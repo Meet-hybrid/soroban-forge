@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/shared-utils",
+    "crates/test-utils",
+    "crates/cli",
+    "crates/escrow",
+    "crates/vesting",
+    "crates/multi-sig-wallet",
+    "crates/dao-governance",
+    "crates/subscription-payments",
+    "crates/marketplace-royalties",
+]
+exclude = ["packages", "examples", "templates"]
+
+[workspace.package]
+version       = "0.1.0"
+edition       = "2021"
+rust-version  = "1.75"
+license       = "MIT OR Apache-2.0"
+repository    = "https://github.com/teachlink/soroban-forge"
+
+[workspace.dependencies]
+soroban-sdk       = "21.5.1"
+soroban-sdk-macros = "21.5.1"
+rand              = { version = "0.8", default-features = false, features = ["small_rng"] }
+clap              = { version = "4.5", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all              = { level = "warn", priority = -1 }
+pedantic         = { level = "warn", priority = -2 }
+nursery          = { level = "warn", priority = -3 }
+cargo            = { level = "warn", priority = -4 }
+
+[profile.release]
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+panic         = "abort"
+strip         = "symbols"

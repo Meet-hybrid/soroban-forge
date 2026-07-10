@@ -1,0 +1,38 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    allow:
+      - dependency-type: direct
+    labels:
+      - "dependencies"
+      - "rust"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: npm
+    directory: /packages/typescript-sdk
+    schedule:
+      interval: weekly
+    labels:
+      - "dependencies"
+      - "typescript"
+
+  - package-ecosystem: npm
+    directory: /packages/nextjs-example
+    schedule:
+      interval: weekly
+    labels:
+      - "dependencies"
+      - "nextjs"
+    allow:
+      - dependency-type: production
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - "dependencies"
+      - "ci-cd"

@@ -1,0 +1,18 @@
+[package]
+name = "soroban-forge-multi-sig-wallet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Multi-signature wallet contract for Soroban Forge"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk.workspace = true
+soroban-forge-shared-utils = { path = "../shared-utils", version = "0.1.0" }
+
+[dev-dependencies]
+soroban-sdk.workspace = true

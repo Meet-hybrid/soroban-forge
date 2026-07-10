@@ -1,0 +1,25 @@
+services:
+  soroban-rpc:
+    image: stellar/quickstart:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - STELLAR_NETWORK_PASSPHRASE=Test SDF Network ; September 2015
+      - STELLAR_HORIZON_URL=http://localhost:8000
+    volumes:
+      - ./data:/opt/stellar/data
+    command: >
+      bash -c "
+        stellar-core --newdb --forcescp --metrics
+        "
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: stellar
+      POSTGRES_PASSWORD: stellar
+      POSTGRES_DB: soroban_forge
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
