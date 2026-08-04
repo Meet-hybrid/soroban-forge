@@ -5,4 +5,4 @@ pub mod storage;
 pub mod types;
 
 pub use errors::ForgeError;
-pub use types::{PaginatedResult, Party, PaginationCursor, TimeBounds};
+pub use types::{PaginatedResult, PaginationCursor, Party, TimeBounds};

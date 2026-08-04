@@ -1,4 +1,4 @@
-use crate::DeployArgs;
+use crate::cli::DeployArgs;
 use anyhow::{Context, Result};
 
 pub fn run(args: DeployArgs) -> Result<()> {

@@ -7,7 +7,7 @@
 //! public interface is declared by [`SorobanForgeDaoGovernance`]; [`DaoGovernance`]
 //! is the deployable contract. Implementation arrives in a later commit.
 
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Bytes, Env};
 
 /// Public interface for the Soroban Forge DAO governance contract.
 #[contractclient(name = "SorobanForgeDaoGovernanceClient")]
@@ -16,7 +16,7 @@ pub trait SorobanForgeDaoGovernance {
     fn propose(
         env: Env,
         proposer: Address,
-        action: soroban_sdk::Val,
+        action: Bytes,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
     /// Cast `voter`'s vote (for/against) on `proposal_id`.
@@ -54,7 +54,7 @@ pub struct Proposal {
     /// Address that created the proposal.
     pub proposer: Address,
     /// Encoded action to execute on success.
-    pub action: soroban_sdk::Val,
+    pub action: Bytes,
     /// Tally of "for" votes (in governance-token units).
     pub for_votes: i128,
     /// Tally of "against" votes (in governance-token units).

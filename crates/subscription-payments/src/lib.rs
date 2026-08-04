@@ -29,10 +29,8 @@ pub trait SorobanForgeSubscriptionPayments {
     ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 
     /// Cancel `subscription_id`, preventing further charges.
-    fn cancel(
-        env: Env,
-        subscription_id: u64,
-    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+    fn cancel(env: Env, subscription_id: u64)
+        -> Result<(), soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Lifecycle state of a subscription.

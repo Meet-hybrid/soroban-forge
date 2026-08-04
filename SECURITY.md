@@ -10,8 +10,8 @@
 
 Please report security vulnerabilities by one of the following methods:
 
-- **GitHub Security Advisory**: Use the "Security" tab on the repository.
-- **Email**: Send details to **security@teachlink.org**.
+- **Private vulnerability reporting**: Use the "Security" tab on the repository
+  (private vulnerability reporting) or file a GitHub Security Advisory.
 
 Include:
 - Description of the vulnerability.
@@ -25,8 +25,9 @@ We will acknowledge receipt within 72 hours and provide a detailed response with
 
 ## Security Practices
 
-- All smart contracts are subject to formal verification where feasible.
-- External audits are performed before major releases.
+- We aim to have smart contracts formally verified where feasible.
+- External audits are planned before any major release; none have been
+  performed yet.
 - Dependencies are audited automatically via CI using `cargo audit`.
 - Critical and high severity vulnerabilities are patched within 14 days.
 - Low/medium issues are scheduled for the next minor release.
@@ -37,4 +38,4 @@ We will acknowledge receipt within 72 hours and provide a detailed response with
 - Fixes are released as patch versions.
 - Public disclosure occurs after a fix is available.
 
-Contact: **security@teachlink.org**
+Contact: via the repository's Security tab (GitHub private vulnerability reporting).

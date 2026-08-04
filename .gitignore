@@ -4,7 +4,7 @@
 # Local build-tool installers (never commit large binaries)
 /temp-installer/
 **/*.rs.bk
-Cargo.lock
+# Keep the workspace dependency graph reproducible for contracts, tooling, and CI.
 **/*.orig
 **/*.bk
 **/node_modules
@@ -28,6 +28,8 @@ Thumbs.db
 **/*.swp
 **/*.swo
 coverage/
+# Soroban test-environment snapshot artifacts
+**/test_snapshots/
 *.profraw
 *.profdata
 cobertura.xml

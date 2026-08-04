@@ -23,14 +23,21 @@ By participating, you agree to uphold our Code of Conduct. Be respectful, inclus
 ### Security Issues
 
 - **Do NOT open a public issue** for security vulnerabilities.
-- Report confidentially via GitHub Security Advisories or email `security@teachlink.org`.
+- Report confidentially via the repository's Security tab (GitHub private
+  vulnerability reporting / Security Advisories).
 - See [SECURITY.md](SECURITY.md) for details.
 
 ## Development Setup
 
+The workspace pins **Rust 1.96.0** via `rust-toolchain.toml`. Do not bump it
+casually: soroban-sdk 21.x does not compile on newer stable toolchains
+(`ethnum 1.5.0` relies on a `TryFromIntError` transmute that breaks when the
+standard library changes that type's size). Upgrading the toolchain requires
+the soroban-sdk 27 migration issue in the backlog.
+
 ```bash
-# Install Rust (1.75+)
-rustup update stable
+# Install Rust; rustup auto-installs the pinned 1.96.0 toolchain on first use
+rustup toolchain install 1.96.0
 rustup component add rustfmt clippy
 rustup target add wasm32-unknown-unknown
 
@@ -38,7 +45,7 @@ rustup target add wasm32-unknown-unknown
 cargo install soroban-cli
 
 # Clone and build
-git clone https://github.com/teachlink/soroban-forge.git
+git clone https://github.com/Meet-hybrid/soroban-forge.git
 cd soroban-forge
 make build
 make test
@@ -74,8 +81,29 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 5. Open a Pull Request with a clear title and description.
 6. Request review from at least one maintainer.
 
+## Community task workflow
+
+Contributor-facing tasks should use the **Maintainer Task** issue template and
+include a single outcome, acceptance criteria, technical context, and
+verification commands. A campaign label or complexity label does not itself
+guarantee funding; the repository must first be accepted by the campaign
+organizers.
+
+If you want to work on an open task, comment with your proposed approach or
+apply through the active campaign dashboard and wait for assignment. Do not
+start work on a reserved task. Once assigned, create a focused branch and link
+the pull request with `Closes #<issue-number>`.
+
+If you cannot finish, tell the maintainer promptly so the issue can be
+unassigned and offered to another contributor. Maintainers close an issue as
+completed only after the pull request is reviewed, merged, and verified. See
+[the maintainer issue workflow](docs/maintainers/issue-triage.md).
+
 ## Maintainer Onboarding
 
-- Two maintainers must approve non-trivial PRs.
+- One approval is required by branch protection; sensitive or non-trivial
+  changes should receive a second maintainer review where practical.
 - Breaking changes require a discussion issue and 72-hour review period.
 - Security fixes follow our Security Policy and are fast-tracked.
+- New maintainers should first demonstrate reliable issue triage, review,
+  release, and contributor communication before receiving write access.

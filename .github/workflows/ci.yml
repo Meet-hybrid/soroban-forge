@@ -12,73 +12,105 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - run: cargo metadata --locked --no-deps --format-version 1 > /dev/null
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   build:
     name: Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --all-targets
-      - run: cargo doc --workspace --no-deps --document-private-items
+      - run: cargo build --workspace --all-targets --locked
+      - run: cargo doc --workspace --no-deps --locked --document-private-items
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-targets
+      - run: cargo test --workspace --all-targets --locked
 
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    # audit-check publishes its result as a check run on the commit.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2026-0009 (time 0.3.44): `time` is a transitive lockfile
+          # artifact of the soroban-sdk 21 chain, not part of the compiled
+          # build graph, and cannot be updated without migrating the SDK.
+          # Tracked by the soroban-sdk 27 migration issue; re-evaluate after.
+          ignore: RUSTSEC-2026-0009
 
   wasm-size:
     name: WASM Size Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --release
-      - run: |
-          echo "WASM Artifacts:"
-          find target/wasm32-unknown-unknown/release -name "*.wasm" -exec sh -c 'echo "$(basename {}): $(stat -c%s {}) bytes"' \;
-      - run: |
-          MAX_SIZE=150000
+      # Build only the contract crates for the WASM target; shared/test-utils
+      # are not deployable artifacts. NOTE: keep this list in sync with the
+      # contract crates added to the workspace.
+      - name: Build contract WASM artifacts
+        run: |
+          cargo build --locked --release --target wasm32-unknown-unknown \
+            --package soroban-forge-escrow \
+            --package soroban-forge-vesting \
+            --package soroban-forge-multi-sig-wallet \
+            --package soroban-forge-dao-governance \
+            --package soroban-forge-subscription-payments \
+            --package soroban-forge-marketplace-royalties
+      - name: Report WASM artifact sizes
+        run: |
+          shopt -s nullglob
           for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
+            echo "$(basename "$wasm"): $(stat -c%s "$wasm") bytes"
+          done
+      - name: Enforce maximum WASM size
+        run: |
+          MAX_SIZE=150000
+          shopt -s nullglob
+          found=0
+          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
+            found=1
             SIZE=$(stat -c%s "$wasm")
             if [ "$SIZE" -gt "$MAX_SIZE" ]; then
               echo "::error::$wasm exceeds $MAX_SIZE bytes: $SIZE bytes"
               exit 1
             fi
           done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No WASM artifacts were produced; the size check cannot run"
+            exit 1
+          fi
