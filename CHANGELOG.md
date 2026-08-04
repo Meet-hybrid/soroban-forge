@@ -9,9 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `docs/maintainers/release-checklist.md` — maintainer release procedure.
+- **Vesting contract** (implemented): `create_schedule`, `claim`, `claimable`,
+  and `get_status` with linear release after a cliff, `require_auth`
+  enforcement, checked arithmetic, and 21 in-crate `Env`-based tests covering
+  the cliff/duration boundaries, no-overpay claims, overflow reporting, and
+  missing-schedule errors.
 
 ### In progress
-- The vesting, multi-sig-wallet, dao-governance, subscription-payments, and
+- The multi-sig-wallet, dao-governance, subscription-payments, and
   marketplace-royalties contracts ship public interfaces and storage types
   only; implementations are tracked in the
   [issue backlog](docs/maintainers/issue-backlog.md).
