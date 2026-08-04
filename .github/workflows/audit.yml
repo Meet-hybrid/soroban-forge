@@ -8,6 +8,10 @@ on:
 jobs:
   audit:
     runs-on: ubuntu-latest
+    # audit-check publishes its result as a check run on the commit.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
@@ -15,4 +19,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           allow-low: true
           deny-warnings: false
-```
+          # RUSTSEC-2026-0009 (time 0.3.44): `time` is a transitive lockfile
+          # artifact of the soroban-sdk 21 chain, not part of the compiled
+          # build graph, and cannot be updated without migrating the SDK.
+          # Tracked by the soroban-sdk 27 migration issue; re-evaluate after.
+          args: --ignore RUSTSEC-2026-0009
