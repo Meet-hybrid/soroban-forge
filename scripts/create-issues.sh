@@ -107,30 +107,39 @@ create_issue \
 cat > "$BODY_DIR/i01.md" <<'EOF'
 ### Description
 
-`crates/escrow` currently ships only its public interface and storage types.
-Implement `create_escrow`, `deposit`, `release`, `refund`, `cancel`, and
-`get_status` so the contract enforces the state machine
-`Pending → Funded → Completed | Refunded | Cancelled`, with `Disputed`
-reserved for a follow-up dispute method. The reference implementation pattern
-(authorization via `require_auth`, `ForgeError`-typed failures, in-crate
-`Env`-based tests) is already demonstrated by the code that landed for this
-issue — treat it as the baseline to keep consistent.
+The escrow contract was implemented (`create_escrow`, `deposit`, `release`,
+`refund`, `cancel`, `get_status`) with 16 in-crate tests. This issue is an
+**independent audit and hardening pass**: verify the implementation against
+the documented specification, add the edge cases that are not yet covered,
+and document the storage schema. Treat the existing implementation as the
+baseline — seek out what is missing rather than rewriting it.
 
 ### What "done" looks like
 
-- All six public methods implemented with `ForgeError`-typed failures.
-- Invalid transitions return the appropriate error, never panic.
-- Unit tests cover every documented transition, missing-escrow `NotFound`,
-  and deadline expiry (`complexity: high` reflects the dispute/timeout logic).
-- WASM build stays under the size budget; `make lint` and `make test` pass.
+- An independent review of the state machine
+  (`Pending → Funded → Completed | Refunded | Cancelled`) and the
+  deadline-based refund authorization (seller before the deadline, buyer
+  after) with any defects found fixed and tested.
+- Edge cases beyond the current 16 tests, for example: refund exactly at the
+  deadline boundary, the invalid-transition matrix (deposit/release/refund/
+  cancel from every wrong state), timestamps near `u64::MAX` (overflow
+  paths), and repeated operations after terminal states.
+- The negative-authorization gap (host abort on soroban-sdk 21.x) documented
+  explicitly in the test module, with each invariant covered by a reachable
+  error path where possible.
+- The storage schema (`DataKey::Escrow(u64)` and `Count`) documented in
+  `docs/contracts/escrow.md`, including an upgrade-compatibility note.
+- `cargo test -p soroban-forge-escrow --all-targets --locked` and
+  `make lint` pass.
 
 ### Implementation guidelines
 
-- Match the storage pattern: instance storage keyed by `DataKey::Escrow(u64)`
-  plus a monotonic `Count`.
-- Keep authorization on specific addresses via `require_auth`; the SDK has no
-  caller-identity API, so design "buyer OR seller" flows by state, not caller.
-- Reuse `crates/test-utils` (`new_env`, `TestAccounts`) in the test module.
+- Read `crates/escrow/src/lib.rs` and its tests first. Do **not** change the
+  public interface (`create_escrow`/`deposit`/`release`/`refund`/`cancel`/
+  `get_status`) — that is a breaking change and out of scope.
+- Reuse `crates/test-utils` rather than duplicating helpers.
+- Follow the house test style (`setup!` macro, `try_<method>` client
+  variants, `.unwrap_err().unwrap()`).
 
 ### PR guidelines
 
@@ -146,8 +155,8 @@ cargo test -p soroban-forge-escrow --all-targets --locked
 ```
 EOF
 create_issue \
-  "feat(escrow): implement and test the escrow lifecycle" \
-  "enhancement,complexity: high" \
+  "test(escrow): audit and harden the escrow implementation" \
+  "test,complexity: medium" \
   "$BODY_DIR/i01.md"
 
 # ------------------------------------------------------------------ Issue 2
