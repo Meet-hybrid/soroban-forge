@@ -131,30 +131,44 @@ cargo test -p soroban-forge-escrow --all-targets --locked
 
 ---
 
-## Issue 2 — feat(vesting): implement vesting schedules and claim edge cases
+## Issue 2 — test(vesting): audit and harden the vesting implementation
 
-- **Labels:** `enhancement`, `complexity: medium`
+- **Labels:** `test`, `complexity: medium`
 - **Affected crates:** `crates/vesting`, `crates/shared-utils`
 
 ### Description
 
-Implement `create_schedule`, `claim`, and `claimable` with linear release
-after a cliff, and cover the edge cases that make vesting contracts
-notoriously buggy: zero durations, cliff after duration, claims before the
-cliff, and over-claim attempts.
+The vesting contract was implemented (`create_schedule`, `claim`, `claimable`,
+`get_status`) with 21 in-crate tests. This issue is an **independent audit
+and hardening pass**: verify the implementation against the documented
+specification, add the edge cases that are not yet covered, and document the
+storage schema. Treat the existing implementation as the baseline — seek out
+what is missing rather than rewriting it.
 
 ### What "done" looks like
 
-- `claim` returns exactly the vested-but-unclaimed amount.
-- Repeated claims never overpay or underpay.
-- Boundary tests: t=cliff, t=duration, t>duration, zero total, zero duration.
-- `make lint` and `make test` pass.
+- An independent review of the release math (floor division, cliff/duration
+  boundaries, `cliff == duration`, the never-overpay guarantee) with any
+  defects found fixed and tested.
+- Edge cases beyond the current 21 tests, for example: timestamps/amounts
+  near `u64::MAX` / `i128::MAX` (overflow paths), many interleaved partial
+  claims, and repeated `claimable` calls between claims.
+- The negative-authorization gap (host abort on soroban-sdk 21.x) documented
+  explicitly in the test module, with each invariant covered by a reachable
+  error path where possible.
+- The storage schema (`DataKey::Schedule(u64)` and `Count`) documented in
+  `docs/contracts/vesting.md`, including an upgrade-compatibility note.
+- `cargo test -p soroban-forge-vesting --all-targets --locked` and
+  `make lint` pass.
 
 ### Implementation guidelines
 
-- Reuse the escrow storage/error pattern; `ForgeError::InvalidInput` for
-  schedule validation.
-- Use ledger time (`env.ledger().timestamp()`) and tested `Ledger` overrides.
+- Read `crates/vesting/src/lib.rs` and its tests first. Do **not** change the
+  public interface (`create_schedule`/`claim`/`claimable`/`get_status`) —
+  that is a breaking change and out of scope.
+- Reuse `crates/test-utils` rather than duplicating helpers.
+- Follow the house test style (`setup!` macro, `try_<method>` client
+  variants, `.unwrap_err().unwrap()`).
 
 ### PR guidelines
 
@@ -511,7 +525,8 @@ so those PRs land on a CI-visible test surface. **8–10** can be created and
 taken in parallel at any time. **7** (security invariants) is most valuable
 after 1–4 land.
 
-> Note: the CLI is already wired into the workspace and the escrow contract is
-> implemented (with 16 tests) ahead of issues 1 and 6 — those issues remain
-> valid as regression/coverage tasks, and their bodies reflect the current
-> baseline.
+> Note: the CLI is already wired into the workspace, and the escrow (16 tests)
+> and vesting (21 tests) contracts are implemented ahead of issues 1, 2, and 6
+> — those issues remain valid as regression/coverage tasks, and their bodies
+> reflect the current baseline. Issue 2 (vesting) is scoped as an audit and
+> hardening pass over the existing implementation.
