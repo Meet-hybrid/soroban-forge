@@ -47,6 +47,12 @@ only.
 4. The contributor opens a focused pull request containing `Closes #<number>`.
 5. Review, request changes when needed, and merge only when the acceptance
    criteria are met.
+
+Contributors work in **forks**: the PR arrives from `contributor:soroban-forge`
+against `main`. Review fork PRs exactly like in-repo PRs. One fork-specific
+step: GitHub does not run workflows on the first PR from a new contributor if
+it modifies `.github/workflows/` — approve the "Approve and run" prompt after
+quickly scanning the diff.
 6. If the contributor cannot continue, ask them to confirm and remove the
    assignee. Add a short comment explaining that the issue is available again;
    do not silently replace the assignment.

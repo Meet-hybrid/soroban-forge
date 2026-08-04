@@ -61,7 +61,8 @@ behavior.
 
 ### Implementation guidelines
 
-- Create a branch: `git checkout -b chore/migrate-soroban-sdk-27`.
+- Fork the repository, then in your fork create a branch:
+  `git checkout -b chore/migrate-soroban-sdk-27`.
 - Reproduce the failures first: merge `main` into one of the dependabot
   branches and run `cargo clippy --workspace --all-targets --locked`.
 - Verify rather than assume: after re-pointing imports, confirm the storage

@@ -30,6 +30,7 @@ Reference the affected contract, SDK, CLI, documentation, or CI surface.
 ## PR guidelines
 
 - Get assigned before starting; do not start work on a reserved issue.
+- Work in a fork of the repository; open the PR from your fork against `main`.
 - PR description must include: `Closes #<this issue>`.
 - State any before/after data (sizes, gas, behavior) explicitly.
 
