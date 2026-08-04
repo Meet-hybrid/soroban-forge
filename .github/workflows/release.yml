@@ -46,7 +46,7 @@ jobs:
             exit 1
           fi
       - name: Upload WASM Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: soroban-forge-wasm-${{ github.ref_name }}
           path: artifacts/*.wasm
