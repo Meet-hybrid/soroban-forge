@@ -7,26 +7,44 @@ on:
 
 jobs:
   publish:
-    name: Publish Registry
+    name: Build WASM Artifacts
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Keep in sync with rust-toolchain.toml: the pinned soroban-sdk 21.x
+      # does not compile on newer stable toolchains.
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           key: release
-      - run: cargo build --workspace --release
-      - run: |
+      - name: Build contracts to WASM
+        run: |
+          cargo build --locked --release --target wasm32-unknown-unknown \
+            -p soroban-forge-escrow \
+            -p soroban-forge-vesting \
+            -p soroban-forge-multi-sig-wallet \
+            -p soroban-forge-dao-governance \
+            -p soroban-forge-subscription-payments \
+            -p soroban-forge-marketplace-royalties
+      - name: Collect artifacts
+        run: |
           mkdir -p artifacts
+          shopt -s nullglob
+          found=0
           for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
             cp "$wasm" artifacts/
-            echo "Built $(basename $wasm)"
+            echo "Built $(basename "$wasm")"
+            found=1
           done
+          if [[ "$found" -eq 0 ]]; then
+            echo "::error::no WASM artifacts produced — release aborted"
+            exit 1
+          fi
       - name: Upload WASM Artifacts
         uses: actions/upload-artifact@v4
         with:
