@@ -74,7 +74,21 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ## Pull Request Process
 
-1. Fork the repository and create your branch from `main`.
+1. Fork the repository (GitHub **Fork** button), clone your fork, and add
+   the upstream remote:
+
+   ```bash
+   git clone https://github.com/<your-user>/soroban-forge.git
+   cd soroban-forge
+   git remote add upstream https://github.com/Meet-hybrid/soroban-forge.git
+   git fetch upstream
+   git checkout -b my-feature upstream/main
+   ```
+
+   Push the branch to your fork and open a Pull Request against
+   `Meet-hybrid/soroban-forge:main`. Working in a fork means you never need
+   direct push access to the repository; the maintainers review and merge
+   your PR.
 2. If you've added code that should be tested, add tests.
 3. Ensure `make format lint test` passes.
 4. Update documentation if needed.
