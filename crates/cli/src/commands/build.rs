@@ -1,9 +1,17 @@
-use crate::BuildArgs;
+use crate::cli::BuildArgs;
 use anyhow::{Context, Result};
 
 pub fn run(args: BuildArgs) -> Result<()> {
     let mut cmd = std::process::Command::new("cargo");
-    cmd.arg("build").arg(args.target.clone());
+    cmd.arg("build");
+    match args.package {
+        Some(pkg) => {
+            cmd.arg("--package").arg(pkg);
+        }
+        None => {
+            cmd.arg("--workspace");
+        }
+    }
     if args.release {
         cmd.arg("--release");
     }

@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, String, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, String, Vec};
 
 /// Inclusive time window expressed as Unix timestamps (seconds).
 ///
@@ -51,15 +51,15 @@ impl PaginationCursor {
 
 /// A page of results plus the cursor needed to fetch the next page.
 ///
-/// Items are stored as a `soroban_sdk::Vec<Val>` so the helper is agnostic to
-/// the concrete value type a contract paginates; callers re-interpret each
-/// `Val` into their domain type. `Debug` is omitted because `Val` and
-/// `Vec<Val>` do not implement it.
+/// Items are stored as serialized `Bytes` so the helper is agnostic to the
+/// concrete value type a contract paginates. Callers decode each item into
+/// their domain type. `Debug` is omitted because the SDK collection does not
+/// implement it for this contract type.
 #[contracttype]
 #[derive(Clone)]
 pub struct PaginatedResult {
     /// Items on this page.
-    pub items: Vec<soroban_sdk::Val>,
+    pub items: Vec<Bytes>,
     /// Total number of items across all pages.
     pub total: u32,
     /// Cursor describing the next page (offset advanced by `limit`).

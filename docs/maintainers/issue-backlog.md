@@ -1,0 +1,517 @@
+# Initial issue backlog (ready to paste)
+
+This backlog mirrors the issue style used by
+[soroban-budget-assert](https://github.com/Tollcraft/soroban-budget-assert)
+(Stellar Wave reference repo): conventional-commit titles, a narrative
+Description, a **What "done" looks like** section, **Implementation
+guidelines**, **PR guidelines**, and the **📋 Before you start** verification
+block. Each issue carries type labels plus exactly **one** complexity label.
+
+Deliberately **no** `Stellar Wave` label: that campaign label is added only
+after the repository is accepted by the program organizers.
+
+Label convention (create these exact labels in GitHub):
+
+| Label | Description (paste as-is) |
+| --- | --- |
+| `complexity: trivial` | `Wave: typos, small bug fixes, minor copy changes (100 pts)` |
+| `complexity: medium` | `Wave: standard features or involved bug fixes (150 pts)` |
+| `complexity: high` | `Wave: complex features, refactors, or new integrations (200 pts)` |
+| `enhancement` | `New feature or request` |
+| `bug` | `Something isn't working` |
+| `documentation` | `Improvements or additions to documentation` |
+| `refactor` | `A code change that neither fixes a bug nor adds a feature` |
+| `test` | `Adding missing tests or correcting existing tests` |
+| `chore` | `Maintenance tasks and build/CI changes` |
+| `dependencies` | `Pull requests that update a dependency file` |
+| `good first issue` | `Good for newcomers` |
+| `Stellar Wave` | `Issues in the Stellar wave program` *(add only after acceptance)* |
+
+Suggested issue creation order: create **11** (SDK migration) first, then **5**
+and **6** (test coverage), then **1–4** (implementations), then **8–10**
+(housekeeping) in parallel.
+
+---
+
+## Issue 11 — chore: migrate to soroban-sdk 27 and stellar-xdr 27
+
+- **Labels:** `chore`, `dependencies`, `complexity: high`
+- **Affected files:** workspace `Cargo.toml`, `Cargo.lock`, all contract crates, CI
+
+### Description
+
+Dependabot PRs #2 and #5 propose a six-major-version jump: soroban-sdk
+21.5.1 → 27.0.4 (and soroban-sdk-macros with it). The workspace pins
+`=21.5.1`, and a blind bump will not compile: contract macros, the XDR layer,
+and error handling moved several majors. This is a platform migration, not a
+routine bump, and it matters more here than in most projects: these contracts
+are measured artifacts, and the upgrade must not silently change on-chain
+behavior.
+
+### What "done" looks like
+
+- `cargo build --workspace --all-targets --locked` and
+  `cargo test --workspace --all-targets --locked` pass against soroban-sdk 27.x.
+- All six contract crates compile for `wasm32-unknown-unknown` and the WASM
+  Size Check stays green; before/after sizes are stated in the PR.
+- Any public interface or storage-format changes are documented in
+  `CHANGELOG.md` and `docs/contracts/`.
+- The dependency bump is done as one deliberate PR, not via the raw dependabot
+  branches.
+
+### Implementation guidelines
+
+- Create a branch: `git checkout -b chore/migrate-soroban-sdk-27`.
+- Reproduce the failures first: merge `main` into one of the dependabot
+  branches and run `cargo clippy --workspace --all-targets --locked`.
+- Verify rather than assume: after re-pointing imports, confirm the storage
+  and error types still serialize identically before trusting a green build.
+- Update `Cargo.lock` intentionally; keep `--locked` CI working.
+
+### PR guidelines
+
+- Get assigned before starting.
+- PR description must include: `Closes #<this issue>`.
+- State the before/after WASM sizes and any behavior changes explicitly.
+
+### 📋 Before you start
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+```
+
+---
+
+## Issue 1 — feat(escrow): implement and test the escrow lifecycle
+
+- **Labels:** `enhancement`, `complexity: high`
+- **Affected crates:** `crates/escrow`, `crates/shared-utils`
+
+### Description
+
+`crates/escrow` currently ships only its public interface and storage types.
+Implement `create_escrow`, `deposit`, `release`, `refund`, `cancel`, and
+`get_status` so the contract enforces the state machine
+`Pending → Funded → Completed | Refunded | Cancelled`, with `Disputed`
+reserved for a follow-up dispute method. The reference implementation pattern
+(authorization via `require_auth`, `ForgeError`-typed failures, in-crate
+`Env`-based tests) is already demonstrated by the code that landed for this
+issue — treat it as the baseline to keep consistent.
+
+### What "done" looks like
+
+- All six public methods implemented with `ForgeError`-typed failures.
+- Invalid transitions return the appropriate error, never panic.
+- Unit tests cover every documented transition, missing-escrow `NotFound`,
+  and deadline expiry (`complexity: high` reflects the dispute/timeout logic).
+- WASM build stays under the size budget; `make lint` and `make test` pass.
+
+### Implementation guidelines
+
+- Match the storage pattern: instance storage keyed by `DataKey::Escrow(u64)`
+  plus a monotonic `Count`.
+- Keep authorization on specific addresses via `require_auth`; the SDK has no
+  caller-identity API, so design "buyer OR seller" flows by state, not caller.
+- Reuse `crates/test-utils` (`new_env`, `TestAccounts`) in the test module.
+
+### PR guidelines
+
+- Get assigned before starting.
+- PR description must include: `Closes #<this issue>`.
+
+### 📋 Before you start
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p soroban-forge-escrow --all-targets --locked
+```
+
+---
+
+## Issue 2 — feat(vesting): implement vesting schedules and claim edge cases
+
+- **Labels:** `enhancement`, `complexity: medium`
+- **Affected crates:** `crates/vesting`, `crates/shared-utils`
+
+### Description
+
+Implement `create_schedule`, `claim`, and `claimable` with linear release
+after a cliff, and cover the edge cases that make vesting contracts
+notoriously buggy: zero durations, cliff after duration, claims before the
+cliff, and over-claim attempts.
+
+### What "done" looks like
+
+- `claim` returns exactly the vested-but-unclaimed amount.
+- Repeated claims never overpay or underpay.
+- Boundary tests: t=cliff, t=duration, t>duration, zero total, zero duration.
+- `make lint` and `make test` pass.
+
+### Implementation guidelines
+
+- Reuse the escrow storage/error pattern; `ForgeError::InvalidInput` for
+  schedule validation.
+- Use ledger time (`env.ledger().timestamp()`) and tested `Ledger` overrides.
+
+### PR guidelines
+
+- Get assigned before starting.
+- PR description must include: `Closes #<this issue>`.
+
+### 📋 Before you start
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p soroban-forge-vesting --all-targets --locked
+```
+
+---
+
+## Issue 3 — feat(multi-sig-wallet): implement authorization and execution
+
+- **Labels:** `enhancement`, `complexity: medium`
+- **Affected crates:** `crates/multi-sig-wallet`, `crates/shared-utils`
+
+### Description
+
+Implement `submit`, `confirm`, and `execute` so a transaction only executes
+once the configured owner threshold is met. Owner-set and threshold storage,
+duplicate-confirmation rejection, and execute-once semantics are the core
+invariants to get right.
+
+### What "done" looks like
+
+- Confirmation below threshold keeps the transaction `Pending`.
+- Executing before the threshold, or twice, returns the documented error.
+- Duplicate confirmations and non-owner confirmations are rejected.
+- Unit tests cover the threshold boundary; `make lint` and `make test` pass.
+
+### Implementation guidelines
+
+- The payload is opaque `Bytes`; no external-call dispatch in this iteration.
+- Match the escrow test style (`env.register_contract` + generated client).
+
+### PR guidelines
+
+- Get assigned before starting.
+- PR description must include: `Closes #<this issue>`.
+
+### 📋 Before you start
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p soroban-forge-multi-sig-wallet --all-targets --locked
+```
+
+---
+
+## Issue 4 — feat(dao-governance): implement proposal/voting state transitions
+
+- **Labels:** `enhancement`, `complexity: medium`
+- **Affected crates:** `crates/dao-governance`, `crates/shared-utils`
+
+### Description
+
+Implement `propose`, `vote`, and `execute` with the
+`Active → Succeeded | Defeated` lifecycle and vote tallying: id assignment,
+single-vote-per-address enforcement, deadline enforcement, and execute-only-
+after-deadline semantics.
+
+### What "done" looks like
+
+- Votes cast after the voting deadline are rejected.
+- Double voting by the same address is rejected.
+- State transitions are exactly `Active → Succeeded | Defeated`.
+- Unit tests cover deadline, double-vote, and tally correctness; `make lint`
+  and `make test` pass.
+
+### Implementation guidelines
+
+- The action payload is opaque `Bytes`; execution just finalizes state.
+- Reuse the escrow storage/error pattern.
+
+### PR guidelines
+
+- Get assigned before starting.
+- PR description must include: `Closes #<this issue>`.
+
+### 📋 Before you start
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p soroban-forge-dao-governance --all-targets --locked
+```
+
+---
+
+## Issue 5 — test: add in-process integration tests for every public contract method
+
+- **Labels:** `test`, `complexity: medium`
+- **Affected crates:** all contract crates, `crates/test-utils`
+
+### Description
+
+Add Soroban `Env`-based in-crate test modules (the standard
+`env.register_contract` + generated `*Client` pattern) exercising every public
+method of every contract — happy paths, error paths, and state-machine
+transitions. The escrow crate shows the house style; extend it to the other
+five contracts.
+
+### What "done" looks like
+
+- `cargo test --workspace --all-targets --locked` runs a growing, nonzero
+  suite with every public method invoked at least once.
+- Shared helpers are reused from `crates/test-utils`, not duplicated.
+- CI `Test` job output shows the suite executing.
+
+### Implementation guidelines
+
+- Use `try_<method>` client variants to assert exact `ForgeError` codes.
+- Note: negative authorization tests are not runnable in-process on
+  soroban-sdk 21.x (host panics abort); document any gaps in the test module
+  rather than leaving silent holes.
+
+### PR guidelines
+
+- Get assigned before starting.
+- PR description must include: `Closes #<this issue>`.
+
+### 📋 Before you start
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+```
+
+---
+
+## Issue 6 — test(cli): add smoke tests and CI coverage
+
+- **Labels:** `test`, `complexity: medium`
+- **Affected crates:** `crates/cli`, `.github/workflows/ci.yml`
+
+### Description
+
+The CLI is already wired into the workspace and builds
+(`soroban-forge --help` runs; clippy-clean). This issue adds the missing
+regression coverage: unit tests for argument parsing and command dispatch, a
+smoke test that executes the built binary, and an explicit CI step that runs
+`soroban-forge --help`.
+
+### What "done" looks like
+
+- `cargo test -p soroban-forge-cli --all-targets --locked` runs arg-parsing
+  and smoke tests.
+- A CI step runs `soroban-forge --help` and fails on a nonzero exit.
+- `make lint` and `make test` pass.
+
+### Implementation guidelines
+
+- Test through `std::process::Command` (or `assert_cmd`) against the built
+  binary; assert the subcommand list is present.
+- Add the CI step to the existing `test` job.
+
+### PR guidelines
+
+- Get assigned before starting.
+- PR description must include: `Closes #<this issue>`.
+
+### 📋 Before you start
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p soroban-forge-cli --all-targets --locked
+```
+
+---
+
+## Issue 7 — test: add security invariant tests across contracts
+
+- **Labels:** `test`, `complexity: high`
+- **Affected crates:** all contract crates, `crates/test-utils`
+
+### Description
+
+Add a shared security-test suite asserting invariants across escrow, vesting,
+multisig, and governance: authorization enforcement, no double-spend or
+over-claim, integer overflow resistance, and timestamp edge cases.
+
+### What "done" looks like
+
+- Each contract has at least three security-focused tests.
+- Tests fail loudly when an authorization or overflow check is removed.
+- `make test` passes with the full suite enabled.
+
+### Implementation guidelines
+
+- Parameterize with `Env` auths; where the SDK's non-unwinding panics prevent
+  in-process negative-auth tests, document the gap and cover the invariant by
+  a reachable error path instead.
+- Cover `checked_add`-style overflow paths that the implementation relies on.
+
+### PR guidelines
+
+- Get assigned before starting.
+- PR description must include: `Closes #<this issue>`.
+
+### 📋 Before you start
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+```
+
+---
+
+## Issue 8 — chore: cut the v0.1.0 release and changelog
+
+- **Labels:** `chore`, `complexity: trivial`, `good first issue`
+- **Affected files:** `CHANGELOG.md`, `Cargo.toml`, `.github/workflows/release.yml`
+
+### Description
+
+Cut `v0.1.0`: complete `CHANGELOG.md` from existing history, verify the
+release workflow tags and drafts a GitHub release, and document the release
+checklist for maintainers.
+
+### What "done" looks like
+
+- `CHANGELOG.md` covers all merged user-facing changes.
+- `cargo metadata --no-deps --format-version 1` shows one consistent `0.1.0`
+  across all workspace members.
+- Release workflow runs green on a dry-run tag.
+
+### Implementation guidelines
+
+- Follow the Keep a Changelog format already started in `CHANGELOG.md`.
+- Do not push tags during the PR; the workflow handles tagging on merge.
+
+### PR guidelines
+
+- Get assigned before starting.
+- PR description must include: `Closes #<this issue>`.
+
+### 📋 Before you start
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+```
+
+---
+
+## Issue 9 — chore: harden WASM-size and dependency audit checks
+
+- **Labels:** `chore`, `complexity: medium`
+- **Affected files:** `.github/workflows/ci.yml`, `Makefile`, `deny.toml` (new)
+
+### Description
+
+Harden CI: keep the WASM Size Check failing when no artifacts are produced,
+add per-contract size budgets, and add a dependency policy (`cargo-deny` or
+`cargo audit` config) with explicit allow/deny rules.
+
+### What "done" looks like
+
+- WASM Size Check fails if no `.wasm` files are produced.
+- The chosen audit tool passes with a pinned, documented policy.
+- Size budgets and audit commands are documented in `docs/`.
+
+### Implementation guidelines
+
+- Baseline: the size job already builds the six contract crates with
+  `--target wasm32-unknown-unknown`; extend, don't rewrite.
+- Keep the new contract-crate list in sync with workspace members (see the
+  comment in `ci.yml`).
+
+### PR guidelines
+
+- Get assigned before starting.
+- PR description must include: `Closes #<this issue>`.
+
+### 📋 Before you start
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+```
+
+---
+
+## Issue 10 — docs: document deployment and storage compatibility
+
+- **Labels:** `documentation`, `complexity: trivial`, `good first issue`
+- **Affected files:** `docs/tutorials/deploying-to-testnet.md`, `docs/architecture/storage-patterns.md`, `docs/contracts/index.md`
+
+### Description
+
+Write deployment guidance (testnet → mainnet, account/key setup, verifying
+deployed WASM) and document each contract's storage schema plus what a
+storage-breaking upgrade looks like.
+
+### What "done" looks like
+
+- Every contract links to its storage layout and deploy commands.
+- A short "upgrade compatibility" section explains when storage changes break
+  upgrades.
+- No dead links in the edited docs.
+
+### Implementation guidelines
+
+- Use the actual `stellar contract` commands that work with the current
+  contract set; verify, don't copy from memory.
+- Cross-link the storage keys defined in each contract crate.
+
+### PR guidelines
+
+- Get assigned before starting.
+- PR description must include: `Closes #<this issue>`.
+
+### 📋 Before you start
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+```
+
+---
+
+## Dependabot triage (do this before/while creating issues)
+
+Your PR list is currently 100% dependabot. Program reviewers will look at the
+Issues tab, not just PRs — real, labeled issues are what make the repo look
+maintainer-ready. While creating the backlog:
+
+1. **Do not merge #2/#5** (soroban-sdk → 27.0.4) or #1 (rand 0.10) blindly —
+   those are covered by **Issue 11** (migration) and should land as one
+   deliberate PR with re-measured artifacts.
+2. **Close or let expire** the small JS bumps (#3, #4, #6–#11) if they are
+   irrelevant to the core Rust workspace, or configure dependabot to group
+   them so they stop dominating the PR list.
+3. Reopen `dependabot` branches under a migration branch only as part of
+   Issue 11.
+
+## Backlog ordering suggestion
+
+Create **11** (migration) first — it unblocks the workspace health story.
+Then **5** and **6** (test coverage) alongside the implementation PRs (1–4)
+so those PRs land on a CI-visible test surface. **8–10** can be created and
+taken in parallel at any time. **7** (security invariants) is most valuable
+after 1–4 land.
+
+> Note: the CLI is already wired into the workspace and the escrow contract is
+> implemented (with 16 tests) ahead of issues 1 and 6 — those issues remain
+> valid as regression/coverage tasks, and their bodies reflect the current
+> baseline.

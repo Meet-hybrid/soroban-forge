@@ -7,16 +7,13 @@
 //! [`SorobanForgeMultiSigWallet`]; [`MultiSigWallet`] is the deployable
 //! contract. Implementation arrives in a later commit.
 
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Bytes, Env};
 
 /// Public interface for the Soroban Forge multi-signature wallet contract.
 #[contractclient(name = "SorobanForgeMultiSigWalletClient")]
 pub trait SorobanForgeMultiSigWallet {
     /// Add a pending transaction and open it for owner approvals.
-    fn submit(
-        env: Env,
-        tx: soroban_sdk::Val,
-    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+    fn submit(env: Env, tx: Bytes) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
     /// Record `signer`'s approval of `tx_id`.
     fn confirm(
@@ -50,7 +47,7 @@ pub struct WalletTx {
     /// Address that submitted the transaction.
     pub submitter: Address,
     /// The encoded transaction payload to execute.
-    pub payload: soroban_sdk::Val,
+    pub payload: Bytes,
     /// Owners that have confirmed so far.
     pub confirmations: soroban_sdk::Vec<Address>,
     /// Current state.

@@ -1,3 +1,4 @@
+use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 /// A fixed set of distinct mock accounts for use in tests.

@@ -1,14 +1,21 @@
 # Soroban Forge
 
 [![License](https://img.shields.io/badge/License-MIT%20OR%20Apache-2.0-blue.svg)](LICENSE)
-[![CI](https://github.com/teachlink/soroban-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/teachlink/soroban-forge/actions)
+[![CI](https://github.com/Meet-hybrid/soroban-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/Meet-hybrid/soroban-forge/actions)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange)](https://www.rust-lang.org)
 
-**Soroban Forge** is a community-driven, production-ready library of reusable Soroban smart contracts and developer tooling for the Stellar ecosystem.
+**Soroban Forge** is a community-driven library of reusable Soroban smart-contract foundations and developer tooling for the Stellar ecosystem.
 
 ## Vision
 
-Eliminate the need to repeatedly build common smart contracts from scratch by providing audited, reusable, modular, and well-documented implementations for the Stellar ecosystem.
+Eliminate the need to repeatedly build common smart contracts from scratch by providing reusable, modular, and well-documented foundations for the Stellar ecosystem.
+
+> **Status:** This project is under active development. The contract crates
+> currently ship their public interfaces and storage types; the
+> `#[contractimpl]` implementations and tests are being filled in via the
+> [issue backlog](docs/maintainers/issue-backlog.md). Nothing here is
+> independently audited and nothing should be treated as production-ready
+> without your own security review.
 
 ## Initial Contracts
 
@@ -21,6 +28,10 @@ Eliminate the need to repeatedly build common smart contracts from scratch by pr
 | **Subscription Payments** | Recurring payment plans with auto-renewal |
 | **Marketplace Royalties** | NFT/asset sales with configurable royalty distribution |
 
+> All six contracts currently define their public interface and storage types;
+> implementations and tests are delivered through the
+> [issue backlog](docs/maintainers/issue-backlog.md).
+
 ## Architecture
 
 ```
@@ -28,6 +39,7 @@ soroban-forge/
 ├── crates/                 # Rust smart contracts and libraries
 │   ├── shared-utils/       # Shared types, error handling, storage patterns
 │   ├── test-utils/         # Shared test harnesses and soroban test helpers
+│   ├── cli/                # Developer CLI (build/test/lint/deploy)
 │   ├── escrow/
 │   ├── vesting/
 │   ├── multi-sig-wallet/
@@ -39,16 +51,17 @@ soroban-forge/
 │   ├── nextjs-example/     # Next.js reference application
 │   └── deployment-templates/ # Docker, Kubernetes, and CI templates
 ├── docs/                   # Architecture, tutorials, best practices
-├── examples/               # Integration examples
-├── templates/              # Contract scaffolding templates
-└── tests/                  # Integration and E2E tests
+└── templates/              # Contract scaffolding templates
 ```
+
+> Tests live inside each contract crate as Soroban `Env`-based test modules
+> and run via `cargo test --workspace`.
 
 ## Quick Start
 
 ```bash
 # Clone the repository
-git clone https://github.com/teachlink/soroban-forge.git
+git clone https://github.com/Meet-hybrid/soroban-forge.git
 cd soroban-forge
 
 # Build all contracts

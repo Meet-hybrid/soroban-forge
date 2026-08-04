@@ -1,28 +1,17 @@
-#![no_std]
 //! Soroban Forge developer CLI.
 //!
 //! ```text
-//! soroban-forge build --all
-//! soroban-forge test --package escrow
-//! soroban-forge deploy --wasm target/.../escrow.wasm --network testnet
-//! soroban-forge lint --all
+//! soroban-forge build
+//! soroban-forge test --package soroban-forge-escrow
+//! soroban-forge lint --fix
+//! soroban-forge deploy path/to/escrow.wasm --network testnet
 //! ```
-//!
-//! This crate is compiled as a standard binary, not a WASM contract.
-//! The `#![no_std]` annotation is not used here.
-
-#[macro_use]
-extern crate tracing;
 
 mod cli;
 mod commands;
-mod error;
-mod utils;
 
 use clap::{Parser, Subcommand};
-use commands::{BuildArgs, CliCommand, DeployArgs, LintArgs, TestArgs};
-
-type Result<T> = std::result::Result<T, error::CliError>;
+use cli::{BuildArgs, DeployArgs, LintArgs, TestArgs};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -44,7 +33,7 @@ pub enum Commands {
     Deploy(DeployArgs),
 }
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 

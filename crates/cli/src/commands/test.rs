@@ -1,11 +1,16 @@
-use crate::TestArgs;
+use crate::cli::TestArgs;
 use anyhow::{Context, Result};
 
 pub fn run(args: TestArgs) -> Result<()> {
     let mut cmd = std::process::Command::new("cargo");
-    cmd.arg("test").arg(args.scope.clone());
-    if let Some(pkg) = args.package {
-        cmd.arg("--package").arg(pkg);
+    cmd.arg("test");
+    match args.package {
+        Some(pkg) => {
+            cmd.arg("--package").arg(pkg);
+        }
+        None => {
+            cmd.arg("--workspace");
+        }
     }
     let status = cmd.status().context("failed to run cargo test")?;
     if !status.success() {

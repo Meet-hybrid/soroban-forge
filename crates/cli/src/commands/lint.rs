@@ -1,16 +1,14 @@
-use crate::LintArgs;
+use crate::cli::LintArgs;
 use anyhow::{Context, Result};
 
-pub fn run(_args: LintArgs) -> Result<()> {
-    let status = std::process::Command::new("cargo")
-        .arg("clippy")
-        .arg("--workspace")
-        .arg("--all-targets")
-        .arg("--")
-        .arg("-D")
-        .arg("warnings")
-        .status()
-        .context("failed to run cargo clippy")?;
+pub fn run(args: LintArgs) -> Result<()> {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("clippy").arg("--workspace").arg("--all-targets");
+    if args.fix {
+        cmd.arg("--fix");
+    }
+    cmd.arg("--").arg("-D").arg("warnings");
+    let status = cmd.status().context("failed to run cargo clippy")?;
     if !status.success() {
         std::process::exit(1);
     }

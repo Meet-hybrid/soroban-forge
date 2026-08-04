@@ -12,13 +12,6 @@ name = "soroban-forge"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
-soroban-forge-shared-utils = { path = "../shared-utils", version = "0.1.0" }
-soroban-sdk.workspace = true
-tokio = { version = "1.43", features = ["full"] }
-thiserror = "1.0"
-tracing = "0.1"
 tracing-subscriber = "0.3"
-
-[dev-dependencies]
-soroban-sdk.workspace = true
