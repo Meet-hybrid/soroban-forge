@@ -15,9 +15,9 @@ well-documented foundation, audit it for your use case, and ship.
 
 > **Status:** This project is under active development. The contracts are **not
 > independently audited** and should not be treated as production-ready without
-> your own security review. The escrow contract is implemented and tested; the
-> remaining contracts currently ship their public interfaces and storage types,
-> with implementations delivered through the
+> your own security review. The escrow and vesting contracts are implemented
+> and tested; the remaining contracts currently ship their public interfaces
+> and storage types, with implementations delivered through the
 > [issue backlog](docs/maintainers/issue-backlog.md).
 
 ## Contracts
@@ -25,7 +25,7 @@ well-documented foundation, audit it for your use case, and ship.
 | Contract | Description | Status |
 |----------|-------------|--------|
 | **Escrow** | Buyer–seller escrow with deadline-based refunds (`create → deposit → release / refund / cancel`, with `Disputed` reserved) | ✅ Implemented · 16 tests |
-| **Vesting** | Time-locked token release with cliff and schedule support | 🚧 Interface + storage types |
+| **Vesting** | Time-locked token release with cliff and linear release (`create_schedule → claim / claimable`) | ✅ Implemented · 21 tests |
 | **Multi-Sig Wallet** | Multi-owner wallet with configurable approval thresholds | 🚧 Interface + storage types |
 | **DAO Governance** | On-chain proposals, voting, deadline enforcement, and execution | 🚧 Interface + storage types |
 | **Subscription Payments** | Recurring payment plans with auto-renewal | 🚧 Interface + storage types |
@@ -88,7 +88,7 @@ soroban-forge/
 │   ├── test-utils/           # Soroban Env test harness and mock accounts
 │   ├── cli/                  # Developer CLI (build / test / lint / deploy)
 │   ├── escrow/               # ✅ implemented
-│   ├── vesting/
+│   ├── vesting/              # ✅ implemented
 │   ├── multi-sig-wallet/
 │   ├── dao-governance/
 │   ├── subscription-payments/
