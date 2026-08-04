@@ -1,91 +1,76 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Timestamp, Vec};
+//! # Soroban Forge — DAO Governance contract
+//!
+//! A minimal on-chain governance primitive: members create proposals, vote
+//! with governance tokens, and approved proposals become executable. The
+//! public interface is declared by [`SorobanForgeDaoGovernance`]; [`DaoGovernance`]
+//! is the deployable contract. Implementation arrives in a later commit.
 
-mod contract;
-mod errors;
-mod types;
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env};
 
-pub use contract::DaoGovernance;
-pub use errors::*;
-pub use types::*;
-
-#[contract]
-pub struct DaoGovernance;
-
-#[contractimpl]
-impl DaoGovernance for DaoGovernance {
-    fn create_proposal(
+/// Public interface for the Soroban Forge DAO governance contract.
+#[contractclient(name = "SorobanForgeDaoGovernanceClient")]
+pub trait SorobanForgeDaoGovernance {
+    /// Create a new proposal with an encoded action payload.
+    fn propose(
         env: Env,
         proposer: Address,
-        title: Symbol,
-        description: Symbol,
-        start_time: Timestamp,
-        end_time: Timestamp,
-    ) -> Result<u64, ForgeError> {
-        todo!()
-    }
+        action: soroban_sdk::Val,
+    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
+    /// Cast `voter`'s vote (for/against) on `proposal_id`.
     fn vote(
         env: Env,
         proposal_id: u64,
         voter: Address,
         support: bool,
-        weight: i128,
-    ) -> Result<(), ForgeError> {
-        todo!()
-    }
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
-    fn execute(env: Env, proposal_id: u64) -> Result<bool, ForgeError> {
-        todo!()
-    }
-
-    fn cancel(env: Env, proposal_id: u64) -> Result<bool, ForgeError> {
-        todo!()
-    }
-
-    fn get_proposal(env: Env, proposal_id: u64) -> Result<Proposal, ForgeError> {
-        todo!()
-    }
-
-    fn get_vote(env: Env, proposal_id: u64, voter: Address) -> Result<Vote, ForgeError> {
-        todo!()
-    }
+    /// Finalise a proposal once voting has ended.
+    fn execute(env: Env, proposal_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 }
 
+/// Lifecycle state of a governance proposal.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProposalStatus {
+pub enum ProposalState {
+    /// Open for voting.
     Active,
+    /// Approved and executed.
     Succeeded,
+    /// Rejected or expired.
     Defeated,
-    Executed,
-    Cancelled,
-    Expired,
+    /// Queued for delayed execution (optional timelock).
+    Queued,
 }
 
+/// A single governance proposal.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Proposal {
-    pub id: u64,
+    /// Stable identifier assigned at creation.
+    pub proposal_id: u64,
+    /// Address that created the proposal.
     pub proposer: Address,
-    pub title: Symbol,
-    pub description: Symbol,
-    pub start_time: Timestamp,
-    pub end_time: Timestamp,
+    /// Encoded action to execute on success.
+    pub action: soroban_sdk::Val,
+    /// Tally of "for" votes (in governance-token units).
     pub for_votes: i128,
+    /// Tally of "against" votes (in governance-token units).
     pub against_votes: i128,
-    pub quorum: i128,
-    pub status: ProposalStatus,
-    pub created_at: u64,
+    /// Ledger timestamp at which voting closes.
+    pub voting_ends: u64,
+    /// Current state.
+    pub state: ProposalState,
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Vote {
-    pub proposal_id: u64,
-    pub voter: Address,
-    pub support: bool,
-    pub weight: i128,
-    pub voted_at: u64,
-}
+/// The deployable DAO governance contract.
+///
+/// The `#[contractimpl]` block is intentionally empty at this stage; the
+/// proposal/voting/execution logic is added in a subsequent commit.
+#[contract]
+pub struct DaoGovernance;
+
+#[contractimpl]
+impl DaoGovernance {}

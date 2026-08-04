@@ -1,23 +1,34 @@
-use soroban_sdk::{contracterror, contracttype, Env, String, Vec};
+use soroban_sdk::contracterror;
 
+/// Shared error type used across all Soroban Forge contracts.
+///
+/// Defining a single error enum in `shared-utils` keeps the on-chain error
+/// space consistent and intelligible to SDK consumers, and avoids every
+/// contract re-declaring the same failure modes. Contract crates may expose
+/// their own domain-specific errors, but should prefer these where they fit.
+///
+/// Error codes start at 1; code 0 is reserved by the Soroban host.
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum ForgeError {
+    /// The caller is not permitted to perform this action.
     Unauthorized = 1,
+    /// The requested entity (escrow, proposal, subscription, ...) does not exist.
     NotFound = 2,
+    /// One or more arguments failed validation (e.g. zero amount, bad address).
     InvalidInput = 3,
+    /// The contract does not hold enough balance to satisfy the operation.
     InsufficientFunds = 4,
+    /// The entity was already initialised; re-initialisation is rejected.
     AlreadyInitialized = 5,
+    /// The entity was expected to be initialised but was not.
     NotInitialized = 6,
+    /// An operation was attempted after its deadline elapsed.
     DeadlineReached = 7,
+    /// A required token allowance was lower than the amount being spent.
     InsufficientAllowance = 8,
+    /// An arithmetic operation overflowed.
     ArithmeticOverflow = 9,
+    /// Contract-specific error that does not map to the categories above.
     Custom = 10,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ErrorDetails {
-    pub code: u32,
-    pub message: String,
 }

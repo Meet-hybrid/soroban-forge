@@ -1,4 +1,4 @@
-use soroban_sdk::{contractclient, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env};
 
 #[contractclient(name = "SorobanForgeEscrowClient")]
 pub trait SorobanForgeEscrow {
@@ -44,3 +44,13 @@ pub struct EscrowData {
     pub status: EscrowStatus,
     pub created_at: u64,
 }
+
+/// The deployable escrow contract.
+///
+/// The `#[contractimpl]` block is intentionally empty at this stage; the
+/// deposit/release/refund logic is implemented in a subsequent commit.
+#[contract]
+pub struct Escrow;
+
+#[contractimpl]
+impl Escrow {}
