@@ -4,7 +4,8 @@ This tutorial will walk you through building and testing a Soroban Forge contrac
 
 ## Prerequisites
 
-- Rust 1.75 or later
+- Rust **1.96.0** (pinned via `rust-toolchain.toml`; do not use a newer
+  stable — the pinned soroban-sdk 21.x does not compile on newer toolchains)
 - `rustup target add wasm32-unknown-unknown`
 - `cargo install soroban-cli`
 
