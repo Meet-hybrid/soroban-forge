@@ -1,5 +1,9 @@
 version: 2
 updates:
+  # Cargo workspace: group routine updates into a single PR; keep the risky
+  # major-version packages (soroban-sdk chain, rand) ungrouped so they surface
+  # individually for triage. Those jumps are tracked by the SDK-migration
+  # issue (#14) and must NOT be merged blindly.
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -9,25 +13,42 @@ updates:
     labels:
       - "dependencies"
       - "rust"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    groups:
+      cargo-runtime:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "soroban-sdk"
+          - "soroban-sdk-macros"
+          - "soroban-sdk-testutils"
+          - "rand"
 
+  # TypeScript SDK: all dependency updates arrive as one grouped PR.
   - package-ecosystem: npm
     directory: /packages/typescript-sdk
     schedule:
       interval: weekly
     labels:
       - "dependencies"
-      - "typescript"
+    open-pull-requests-limit: 3
+    groups:
+      typescript-sdk-deps:
+        patterns:
+          - "*"
 
+  # Next.js example app: all dependency updates arrive as one grouped PR.
   - package-ecosystem: npm
     directory: /packages/nextjs-example
     schedule:
       interval: weekly
     labels:
       - "dependencies"
-      - "nextjs"
-    allow:
-      - dependency-type: production
+    open-pull-requests-limit: 3
+    groups:
+      nextjs-example-deps:
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
@@ -35,4 +56,5 @@ updates:
       interval: weekly
     labels:
       - "dependencies"
-      - "ci-cd"
+      - "ci"
+    open-pull-requests-limit: 2
