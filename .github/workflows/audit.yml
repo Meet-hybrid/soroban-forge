@@ -23,4 +23,4 @@ jobs:
           # artifact of the soroban-sdk 21 chain, not part of the compiled
           # build graph, and cannot be updated without migrating the SDK.
           # Tracked by the soroban-sdk 27 migration issue; re-evaluate after.
-          args: --ignore RUSTSEC-2026-0009
+          ignore: RUSTSEC-2026-0009
