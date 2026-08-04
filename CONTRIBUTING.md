@@ -101,8 +101,11 @@ completed only after the pull request is reviewed, merged, and verified. See
 
 ## Maintainer Onboarding
 
-- One approval is required by branch protection; sensitive or non-trivial
-  changes should receive a second maintainer review where practical.
+- One approval is required by branch protection for contributor pull
+  requests; sensitive or non-trivial changes should receive a second
+  maintainer review where practical. Repository administrators are exempt,
+  so maintainer-authored pull requests are merged through GitHub's admin
+  bypass instead of being blocked on a second approver.
 - Breaking changes require a discussion issue and 72-hour review period.
 - Security fixes follow our Security Policy and are fast-tracked.
 - New maintainers should first demonstrate reliable issue triage, review,
