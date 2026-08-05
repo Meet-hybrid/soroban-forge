@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- Internal maintainer-process docs (`docs/maintainers/`) and
+  `.github/settings.yml` from the public tree; contributor-facing work remains
+  tracked as labeled [issues](https://github.com/Meet-hybrid/soroban-forge/issues).
+
 ### Added
-- `docs/maintainers/release-checklist.md` — maintainer release procedure.
 - **Vesting contract** (implemented): `create_schedule`, `claim`, `claimable`,
   and `get_status` with linear release after a cliff, `require_auth`
   enforcement, checked arithmetic, and 21 in-crate `Env`-based tests covering
@@ -19,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The multi-sig-wallet, dao-governance, subscription-payments, and
   marketplace-royalties contracts ship public interfaces and storage types
   only; implementations are tracked in the
-  [issue backlog](docs/maintainers/issue-backlog.md).
+  [issue backlog](https://github.com/Meet-hybrid/soroban-forge/issues).
 
 ## [0.1.0] - 2026-08-04
 
@@ -46,9 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`-D warnings`), Build, Test, Security Audit, and a WASM Size Check with a
   per-contract size budget; a `Release` workflow that builds WASM artifacts
   and drafts a GitHub release on `v*` tags.
-- Maintainer tooling and docs: 11-issue backlog, application packet, issue
-  triage guide, program-readiness notes, and reusable `scripts/` for label
-  and issue creation.
+- Maintainer tooling: reusable `scripts/` for label and issue creation.
 - MIT OR Apache-2.0 dual license, security policy, and contribution
   guidelines.
 
