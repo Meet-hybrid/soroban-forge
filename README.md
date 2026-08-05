@@ -188,6 +188,10 @@ We welcome contributions! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for
 our code of conduct and contribution process. Contributor-facing work is
 scoped as labeled [issues](https://github.com/Meet-hybrid/soroban-forge/issues).
 
+Contributions are **fork-first**: fork the repository, work on a branch in your
+fork, and open a pull request against `main`. Each issue lists its acceptance
+criteria and verification commands.
+
 ## Security
 
 Please read [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
