@@ -3,8 +3,7 @@
 # create-labels.sh — create/update the Soroban Forge issue labels.
 #
 # The label names, colors, and descriptions below are the canonical set used
-# by the maintainer workflow (see docs/maintainers/issue-triage.md). Run this
-# before creating issues from docs/maintainers/issue-backlog.md.
+# by the repository. Run this before creating issues from scripts/create-issues.sh.
 #
 # Usage:
 #   ./scripts/create-labels.sh                      # dry run (prints changes)

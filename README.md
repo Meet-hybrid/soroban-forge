@@ -18,7 +18,7 @@ well-documented foundation, audit it for your use case, and ship.
 > your own security review. The escrow and vesting contracts are implemented
 > and tested; the remaining contracts currently ship their public interfaces
 > and storage types, with implementations delivered through the
-> [issue backlog](docs/maintainers/issue-backlog.md).
+> [open issues](https://github.com/Meet-hybrid/soroban-forge/issues).
 
 ## Contracts
 
@@ -31,8 +31,8 @@ well-documented foundation, audit it for your use case, and ship.
 | **Subscription Payments** | Recurring payment plans with auto-renewal | 🚧 Interface + storage types |
 | **Marketplace Royalties** | NFT/asset sales with configurable royalty distribution | 🚧 Interface + storage types |
 
-Implementation work is tracked as scoped, labeled issues — see the
-[issue backlog](docs/maintainers/issue-backlog.md).
+Implementation work is tracked as scoped, labeled
+[issues](https://github.com/Meet-hybrid/soroban-forge/issues).
 
 ## Architecture
 
@@ -186,7 +186,7 @@ reproducible builds and a per-contract WASM size budget.
 
 We welcome contributions! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for
 our code of conduct and contribution process. Contributor-facing work is
-scoped as labeled issues in the [issue backlog](docs/maintainers/issue-backlog.md).
+scoped as labeled [issues](https://github.com/Meet-hybrid/soroban-forge/issues).
 
 ## Security
 

@@ -110,8 +110,7 @@ the pull request with `Closes #<issue-number>`.
 
 If you cannot finish, tell the maintainer promptly so the issue can be
 unassigned and offered to another contributor. Maintainers close an issue as
-completed only after the pull request is reviewed, merged, and verified. See
-[the maintainer issue workflow](docs/maintainers/issue-triage.md).
+completed only after the pull request is reviewed, merged, and verified.
 
 ## Maintainer Onboarding
 
