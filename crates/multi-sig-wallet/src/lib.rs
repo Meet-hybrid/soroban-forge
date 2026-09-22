@@ -32,7 +32,9 @@
 extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Bytes, Env, Vec};
+use soroban_sdk::{
+    contract, contractclient, contractevent, contractimpl, contracttype, Address, Bytes, Env, Vec,
+};
 
 /// Public interface for the Soroban Forge multi-signature wallet contract.
 #[contractclient(name = "SorobanForgeMultiSigWalletClient")]
@@ -164,6 +166,7 @@ impl MultiSigWallet {
         submitter.require_auth();
 
         let tx_id = Self::next_id(&env)?;
+        let payload_len = tx.len();
         let wallet_tx = WalletTx {
             tx_id,
             submitter,
@@ -174,6 +177,7 @@ impl MultiSigWallet {
         env.storage()
             .instance()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        events::tx_submitted(&env, tx_id, &wallet_tx.submitter, payload_len);
         Ok(tx_id)
     }
 
@@ -194,10 +198,12 @@ impl MultiSigWallet {
         if wallet_tx.confirmations.contains(&signer) {
             return Err(ForgeError::InvalidInput);
         }
-        wallet_tx.confirmations.push_back(signer);
+        wallet_tx.confirmations.push_back(signer.clone());
+        let confirmations_count = wallet_tx.confirmations.len();
         env.storage()
             .instance()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        events::tx_confirmed(&env, tx_id, &signer, confirmations_count);
         Ok(())
     }
 
@@ -219,10 +225,12 @@ impl MultiSigWallet {
             return Err(ForgeError::InvalidInput);
         }
 
+        let confirmations_count = wallet_tx.confirmations.len();
         wallet_tx.status = TxStatus::Executed;
         env.storage()
             .instance()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        events::tx_executed(&env, tx_id, confirmations_count, threshold);
         Ok(())
     }
 
@@ -267,11 +275,75 @@ impl MultiSigWallet {
     }
 }
 
+/// Wallet lifecycle events.
+///
+/// The transaction id is a **topic** so indexers can filter by `tx_id`
+/// cheaply; the remaining fields are intentionally small — the payload bytes
+/// are never included, only their length — so no full [`WalletTx`] clone is
+/// required to publish.
+mod events {
+    use super::*;
+
+    #[contractevent]
+    pub struct TxSubmitted {
+        #[topic]
+        pub tx_id: u64,
+        pub submitter: Address,
+        pub payload_len: u32,
+    }
+
+    #[contractevent]
+    pub struct TxConfirmed {
+        #[topic]
+        pub tx_id: u64,
+        pub signer: Address,
+        pub confirmations_count: u32,
+    }
+
+    #[contractevent]
+    pub struct TxExecuted {
+        #[topic]
+        pub tx_id: u64,
+        pub confirmations_count: u32,
+        pub threshold: u32,
+    }
+
+    // Publishers: thin functions so call sites read as intent, not mechanics,
+    // and so a future payload change touches one module.
+    pub fn tx_submitted(env: &Env, tx_id: u64, submitter: &Address, payload_len: u32) {
+        TxSubmitted {
+            tx_id,
+            submitter: submitter.clone(),
+            payload_len,
+        }
+        .publish(env);
+    }
+
+    pub fn tx_confirmed(env: &Env, tx_id: u64, signer: &Address, confirmations_count: u32) {
+        TxConfirmed {
+            tx_id,
+            signer: signer.clone(),
+            confirmations_count,
+        }
+        .publish(env);
+    }
+
+    pub fn tx_executed(env: &Env, tx_id: u64, confirmations_count: u32, threshold: u32) {
+        TxExecuted {
+            tx_id,
+            confirmations_count,
+            threshold,
+        }
+        .publish(env);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::{Bytes, Env};
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::{Bytes, Env, Event, TryIntoVal, Val};
 
     /// Build a fresh env with mocked auths, a registered contract, a configured
     /// wallet (threshold 2), and named accounts. The generated client exposes
@@ -301,6 +373,28 @@ mod tests {
 
     fn payload(env: &Env) -> Bytes {
         Bytes::from_array(env, &[0x01, 0x02, 0x03])
+    }
+
+    /// Build the single expected `(contract, topics, data)` tuple for `ev`,
+    /// asserting the wallet id is carried as the event topic (topic index 1,
+    /// after the event-name symbol).
+    fn expected_event<E: Event>(
+        env: &Env,
+        contract: &Address,
+        ev: &E,
+        tx_id: u64,
+    ) -> soroban_sdk::Vec<(Address, Vec<Val>, Val)> {
+        let topics = ev.topics(env);
+        assert_eq!(topics.len(), 2);
+        let topic_id: u64 = topics.get_unchecked(1).try_into_val(env).unwrap();
+        assert_eq!(topic_id, tx_id);
+        soroban_sdk::vec![env, (contract.clone(), topics, ev.data(env))]
+    }
+
+    /// A successful call emits exactly the one event we expect, and nothing
+    /// else.
+    fn assert_one_event<E: Event>(env: &Env, contract: &Address, ev: &E, tx_id: u64) {
+        assert_eq!(env.events().all(), expected_event(env, contract, ev, tx_id));
     }
 
     #[test]
@@ -490,6 +584,122 @@ mod tests {
         client.execute(&tx_id);
         let err = client.try_execute(&tx_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn submit_emits_tx_submitted() {
+        let (env, client, accounts) = setup!();
+        let payload = payload(&env);
+        let tx_id = client.submit(&accounts.user1, &payload);
+        let ev = events::TxSubmitted {
+            tx_id,
+            submitter: accounts.user1.clone(),
+            payload_len: payload.len(),
+        };
+        assert_one_event(&env, &client.address, &ev, tx_id);
+    }
+
+    #[test]
+    fn submit_does_not_emit_on_bad_signer() {
+        let (env, client, accounts) = setup!();
+        let err = client
+            .try_submit(&accounts.arbiter, &payload(&env))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+        assert!(env.events().all().events().is_empty());
+    }
+
+    #[test]
+    fn confirm_emits_tx_confirmed() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        let ev = events::TxConfirmed {
+            tx_id,
+            signer: accounts.user2.clone(),
+            confirmations_count: 1,
+        };
+        assert_one_event(&env, &client.address, &ev, tx_id);
+    }
+
+    #[test]
+    fn confirm_emits_updated_count_on_second_confirmation() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        let ev = events::TxConfirmed {
+            tx_id,
+            signer: accounts.user3.clone(),
+            confirmations_count: 2,
+        };
+        assert_one_event(&env, &client.address, &ev, tx_id);
+    }
+
+    #[test]
+    fn confirm_does_not_emit_on_double_confirm() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        let err = client
+            .try_confirm(&tx_id, &accounts.user2)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(env.events().all().events().is_empty());
+    }
+
+    #[test]
+    fn confirm_does_not_emit_on_bad_signer() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        let err = client
+            .try_confirm(&tx_id, &accounts.arbiter)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+        assert!(env.events().all().events().is_empty());
+    }
+
+    #[test]
+    fn execute_emits_tx_executed() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        // Read the threshold before executing: a read is itself an invocation
+        // and would otherwise become the "last invocation" events are read from.
+        let threshold = client.get_threshold();
+        client.execute(&tx_id);
+        let ev = events::TxExecuted {
+            tx_id,
+            confirmations_count: 2,
+            threshold,
+        };
+        assert_one_event(&env, &client.address, &ev, tx_id);
+    }
+
+    #[test]
+    fn execute_does_not_emit_below_threshold() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(env.events().all().events().is_empty());
+    }
+
+    #[test]
+    fn execute_does_not_emit_on_second_execute() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        client.execute(&tx_id);
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(env.events().all().events().is_empty());
     }
 
     #[test]
