@@ -33,11 +33,13 @@ contract** and remain open for the other five:
 
 ## Still open
 
-### 1. Token settlement for the other five contracts
+### 1. Token settlement for the other four contracts
 
-Vesting, multi-sig, DAO governance, subscriptions, and royalties remain
-state machines: amounts are validated and stored, never moved. Each gets
-its own tranche using the escrow pattern (see
+Vesting, multi-sig, DAO governance, and subscriptions remain state
+machines: amounts are validated and stored, never moved. (Marketplace
+royalties moved off this list: `settle_sale` transfers real SEP-41 tokens
+with the escrow pattern.) Each remaining contract gets its own tranche
+using the escrow pattern (see
 [RESUBMISSION.md](RESUBMISSION.md#phase-1--flagship-escrow-primitive-3-weeks)).
 
 ### 2. Instance-only storage outside escrow

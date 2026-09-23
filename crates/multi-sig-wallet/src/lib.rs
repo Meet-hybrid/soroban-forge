@@ -12,6 +12,7 @@
 //!
 //! ```text
 //! submit --(confirm × n)--> threshold met --execute--> Executed
+//! submit_withdrawal --(confirm × n)--> threshold met --execute--> Executed (+ tokens moved)
 //! ```
 //!
 //! Authorization model:
@@ -24,15 +25,109 @@
 //!
 //! The `Rejected` status is reserved for a revocation/rejection method that
 //! lands in a follow-up; it is not reachable through the current public
-//! interface. Execution of the payload (external contract calls) is
-//! intentionally out of scope for this iteration: the contract tracks state,
-//! ownership, and authorisation, not payload execution.
+//! interface. Execution of opaque `payload` bytes (external contract calls)
+//! remains out of scope for this iteration and is covered by a separate
+//! issue; the contract tracks state, ownership, and authorisation for those.
+//! Typed **withdrawals** are the exception: `execute` moves real tokens for
+//! them (see the custody model below).
+//!
+//! ## Custody model
+//!
+//! The wallet custodies SEP-41 token balances. Anyone (an owner or a
+//! third party) can `deposit` into the wallet by pull transfer; only a
+//! threshold-approved withdrawal can move funds out. Open deposits are a
+//! deliberate choice: a wallet that can only receive from its owners is a
+//! strict subset of one that accepts direct funding, and custody risk is
+//! unchanged because every exit is multisig-gated. The wallet must be
+//! initialized before deposits are accepted — funding an uninitialized
+//! wallet would strand the tokens behind a contract with no owners and no
+//! exit.
+//!
+//! A withdrawal is a transaction like any other: `submit_withdrawal` records
+//! a typed [`Withdrawal`] (token, destination, amount) as a `Pending` tx that
+//! collects confirmations; `execute` moves the tokens to the destination and
+//! flips the status only past the threshold. Withdrawal validity is checked
+//! at execution time, not submission time — the balance can change between
+//! the two, so a submitted withdrawal is an intent, not a reservation.
+//!
+//! Two transaction kinds coexist by design:
+//! - **Opaque-payload txs** (`submit`) keep the `payload` `Bytes` untouched
+//!   for arbitrary transaction bodies; dispatching those bytes is out of
+//!   scope here.
+//! - **Typed withdrawal txs** (`submit_withdrawal`) carry an empty `payload`
+//!   and a [`TxKind::Withdrawal`] record instead. Encoding withdrawals into
+//!   the opaque payload was rejected because the contract would need a
+//!   payload codec to validate and execute them natively; a typed record
+//!   lets the contract validate amount/destination semantics directly and
+//!   keeps the `payload` free for genuinely arbitrary txs. The tradeoff is
+//!   that withdrawals are a first-class tx kind rather than uninterpreted
+//!   bytes.
+//!
+//! ## Ordering discipline (load-bearing)
+//!
+//! Every method that moves tokens performs the token transfer **first** and
+//! writes state **after** the transfer succeeds. A failed transfer reverts
+//! the whole invocation with balances and tx state untouched — there is no
+//! state/ledger divergence window and no recovery path needed. The inverse
+//! ordering (state first, transfer second) would strand funds behind a
+//! failed transfer and is the classic custody bug.
+//!
+//! ## Token trust model
+//!
+//! `deposit` accepts a user-specified token address. The contract does not
+//! verify that the address is a deployed token contract or enforce SEP-41
+//! compliance; it assumes the supplied token follows the expected SEP-41
+//! interface and behavior. Token transfer failures use the existing
+//! `TokenTransferFailed` error path, so a malicious or non-compliant token
+//! is an external trust assumption rather than something the wallet
+//! validates.
+//!
+//! ## Storage and TTL
+//!
+//! Token balances live in **per-token persistent entries**
+//! (`DataKey::Balance(token)`), not instance storage, mirroring the escrow
+//! crate's rationale: persistent entries scale the byte budget per record
+//! instead of taxing every instance read (the owner set, threshold, and tx
+//! records) with custody data that grows with the number of custodied
+//! tokens, and persistent entries carry their own extensible TTL so a
+//! long-idle balance does not silently expire the way archived instance
+//! storage would force a full-state restore. Every balance write bumps the
+//! entry's TTL with the standard threshold/extend pattern, and `touch_ttl`
+//! is a permissionless keeper entrypoint for balances that sit idle near
+//! expiry. The `Owners`/`Threshold`/`Count`/`Tx` keys stay in instance
+//! storage: they are small, hot, written by the existing entrypoints, and
+//! their semantics are unchanged by this custody layer.
+
+// WASM target guard: SDK 27 contracts must be built for wasm32v1-none.
+// wasm32-unknown-unknown (os=unknown) can emit features the Soroban
+// runtime rejects; wasm32v1-none (os=none) is the supported target.
+#[cfg(all(target_family = "wasm", not(target_os = "none")))]
+compile_error!(
+    "build for wasm32v1-none (see rust-toolchain.toml); wasm32-unknown-unknown is not supported by the Soroban runtime"
+);
 
 #[cfg(test)]
 extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Bytes, Env, Vec};
+use soroban_sdk::{
+    contract, contractclient, contractimpl, contracttype, token, Address, Bytes, Env, Vec,
+};
+
+/// Ledger-time constants for TTL bumps.
+///
+/// One ledger closes roughly every 5 seconds, so 17,280 ledgers ≈ 1 day.
+/// `BUMP_AMOUNT` is the lifetime written on every touch; `BUMP_THRESHOLD`
+/// is how close to expiry an entry must be before a bump applies. The
+/// 30-day horizon comfortably covers an idle custody balance between keeper
+/// touches.
+mod ttl {
+    pub const DAY_IN_LEDGERS: u32 = 17_280;
+    /// Lifetime applied on every TTL touch.
+    pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
+    /// Bump only when the entry is within this window of expiring.
+    pub const BUMP_THRESHOLD: u32 = BUMP_AMOUNT - DAY_IN_LEDGERS;
+}
 
 /// Public interface for the Soroban Forge multi-signature wallet contract.
 #[contractclient(name = "SorobanForgeMultiSigWalletClient")]
@@ -61,7 +156,68 @@ pub trait SorobanForgeMultiSigWallet {
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
     /// Execute `tx_id` once approvals meet the configured threshold.
+    ///
+    /// For typed withdrawal txs (see [`TxKind::Withdrawal`]), the recorded
+    /// tokens are moved to the recorded destination **before** the status
+    /// flips to `Executed` (transfer first, state second — see the module
+    /// docs), so a failed transfer leaves balances and tx state untouched.
     fn execute(env: Env, tx_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Deposit `amount` of `token` into the wallet's custody, pulling the
+    /// tokens from `from` with their authorization.
+    ///
+    /// Open to owners and third parties alike (see the custody model in the
+    /// module docs); the wallet must already be initialized so deposited
+    /// funds always have a multisig-gated exit.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotInitialized`] — the wallet has no owner set.
+    /// * [`ForgeError::InvalidInput`] — non-positive amount.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the transfer (insufficient balance, missing trustline, deauthorized
+    ///   token, or undeployed token contract).
+    fn deposit(
+        env: Env,
+        token: Address,
+        from: Address,
+        amount: i128,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Submit a token withdrawal as a pending transaction like any other:
+    /// it collects owner confirmations and executes only past the threshold.
+    /// Returns the stable transaction id.
+    ///
+    /// The withdrawal is recorded as a typed [`TxKind::Withdrawal`] on the
+    /// tx; the `payload` stays empty. Funding is validated at execution
+    /// time, not submission time (see the custody model in the module docs).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotInitialized`] — the wallet has no owner set.
+    /// * [`ForgeError::Unauthorized`] — `submitter` is not an owner.
+    /// * [`ForgeError::InvalidInput`] — non-positive amount.
+    fn submit_withdrawal(
+        env: Env,
+        submitter: Address,
+        token: Address,
+        destination: Address,
+        amount: i128,
+    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the wallet's custody balance of `token` (read-only view).
+    ///
+    /// Returns `0` for a token that has never been deposited.
+    fn balance(env: Env, token: Address) -> i128;
+
+    /// Permissionless TTL keeper: bumps the balance entry's TTL for `token`
+    /// to the standard horizon without changing any state.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — the wallet holds no balance entry for
+    ///   `token`.
+    fn touch_ttl(env: Env, token: Address) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
     /// Read the current approval threshold (read-only view).
     fn get_threshold(env: Env) -> Result<u32, soroban_forge_shared_utils::ForgeError>;
@@ -82,6 +238,35 @@ pub enum TxStatus {
     Rejected,
 }
 
+/// What a submitted transaction carries.
+///
+/// The two kinds encode the custody split documented in the module docs:
+/// opaque-payload transactions dispatch (out of scope here) through their
+/// `payload` bytes, while withdrawal transactions move real tokens through
+/// the typed record below.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TxKind {
+    /// Opaque-payload transaction: `WalletTx::payload` carries the intent.
+    Opaque,
+    /// Typed token withdrawal.
+    Withdrawal(Withdrawal),
+}
+
+/// A typed token withdrawal record (see [`TxKind::Withdrawal`] and the
+/// custody model in the module docs for why this is a record rather than
+/// payload bytes).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Withdrawal {
+    /// SEP-41 token to move out of custody.
+    pub token: Address,
+    /// Recipient of the tokens.
+    pub destination: Address,
+    /// Amount to move; must be positive.
+    pub amount: i128,
+}
+
 /// A transaction awaiting multi-signature approval.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -96,11 +281,22 @@ pub struct WalletTx {
     pub confirmations: soroban_sdk::Vec<Address>,
     /// Current state.
     pub status: TxStatus,
+    /// What the transaction carries: an opaque payload or a typed token
+    /// withdrawal (see [`TxKind`]).
+    pub kind: TxKind,
 }
 
-/// Instance-storage keys.
+/// Storage keys, split by class (see the storage-and-TTL notes in the
+/// module docs). Config and tx records stay in **instance** storage: they
+/// are small, hot, and their semantics predate the custody layer. Token
+/// balances live in **per-token persistent** entries so the byte budget
+/// scales with the number of custodied tokens instead of inflating the
+/// shared instance entry, and so each balance carries its own extensible
+/// TTL — instance storage is the wrong home for anything the wallet
+/// custodies long-term.
 #[contracttype]
 enum DataKey {
+    // --- instance storage: small, hot, bounded config/state ---
     /// The transaction record for `u64` id.
     Tx(u64),
     /// The wallet's owner set.
@@ -109,6 +305,9 @@ enum DataKey {
     Threshold,
     /// Monotonic transaction id counter.
     Count,
+    // --- persistent storage: per-token custody accounting ---
+    /// The wallet's custody balance of the token at `Address`.
+    Balance(Address),
 }
 
 /// The deployable multi-signature wallet contract.
@@ -170,6 +369,7 @@ impl MultiSigWallet {
             payload: tx,
             confirmations: Vec::new(&env),
             status: TxStatus::Pending,
+            kind: TxKind::Opaque,
         };
         env.storage()
             .instance()
@@ -205,6 +405,13 @@ impl MultiSigWallet {
     ///
     /// Callable by anyone once the threshold is met; otherwise the state
     /// transition is rejected.
+    ///
+    /// For typed withdrawal txs this moves the recorded tokens to the
+    /// recorded destination before the status flips (transfer first, state
+    /// second — see the module docs). The wallet balance is validated
+    /// against the recorded amount first (`InsufficientFunds`), so a
+    /// withdrawal that exceeds custody fails with balances and tx state
+    /// untouched.
     pub fn execute(env: Env, tx_id: u64) -> Result<(), ForgeError> {
         let mut wallet_tx = Self::get_tx_impl(&env, tx_id)?;
         if wallet_tx.status != TxStatus::Pending {
@@ -219,10 +426,109 @@ impl MultiSigWallet {
             return Err(ForgeError::InvalidInput);
         }
 
+        // Withdrawal txs move real tokens before the status flip. Any
+        // failure below reverts the whole invocation: balances and tx state
+        // stay exactly as they were.
+        if let TxKind::Withdrawal(withdrawal) = &wallet_tx.kind {
+            let balance = Self::balance_impl(&env, &withdrawal.token);
+            if balance < withdrawal.amount {
+                return Err(ForgeError::InsufficientFunds);
+            }
+            transfer_from_contract(
+                &env,
+                &withdrawal.token,
+                &withdrawal.destination,
+                withdrawal.amount,
+            )?;
+            Self::sub_balance(&env, &withdrawal.token, withdrawal.amount)?;
+        }
+
         wallet_tx.status = TxStatus::Executed;
         env.storage()
             .instance()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        Ok(())
+    }
+
+    /// Deposit `amount` of `token` into custody, pulling from `from`.
+    ///
+    /// Ordering: transfer **first**, balance write **second** — see the
+    /// module docs for why the inverse would be a fund-safety bug.
+    pub fn deposit(
+        env: Env,
+        token: Address,
+        from: Address,
+        amount: i128,
+    ) -> Result<(), ForgeError> {
+        if !Self::is_initialized(&env) {
+            return Err(ForgeError::NotInitialized);
+        }
+        if amount <= 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        from.require_auth();
+
+        // Pull the tokens before writing any state. If `from` lacks balance
+        // or a trustline the invocation reverts here with storage untouched.
+        transfer_to_contract(&env, &token, &from, amount)?;
+
+        Self::add_balance(&env, &token, amount)?;
+        Ok(())
+    }
+
+    /// Submit a token withdrawal as a pending tx (see the trait docs).
+    pub fn submit_withdrawal(
+        env: Env,
+        submitter: Address,
+        token: Address,
+        destination: Address,
+        amount: i128,
+    ) -> Result<u64, ForgeError> {
+        if !Self::is_initialized(&env) {
+            return Err(ForgeError::NotInitialized);
+        }
+        if !Self::is_owner(&env, &submitter) {
+            return Err(ForgeError::Unauthorized);
+        }
+        if amount <= 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        submitter.require_auth();
+
+        let tx_id = Self::next_id(&env)?;
+        let wallet_tx = WalletTx {
+            tx_id,
+            submitter,
+            payload: Bytes::new(&env),
+            confirmations: Vec::new(&env),
+            status: TxStatus::Pending,
+            kind: TxKind::Withdrawal(Withdrawal {
+                token,
+                destination,
+                amount,
+            }),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::Tx(tx_id), &wallet_tx);
+        Ok(tx_id)
+    }
+
+    /// Read the wallet's custody balance of `token` (read-only view).
+    ///
+    /// Unknown tokens read as zero so the view has no error path.
+    pub fn balance(env: Env, token: Address) -> i128 {
+        Self::balance_impl(&env, &token)
+    }
+
+    /// Permissionless keeper: bump the balance entry's TTL without changing
+    /// any state (see the trait docs).
+    pub fn touch_ttl(env: Env, token: Address) -> Result<(), ForgeError> {
+        let key = DataKey::Balance(token);
+        if !env.storage().persistent().has(&key) {
+            return Err(ForgeError::NotFound);
+        }
+        bump_entry(&env, &key);
         Ok(())
     }
 
@@ -237,6 +543,51 @@ impl MultiSigWallet {
     /// Read a stored transaction by id (read-only view).
     pub fn get_tx(env: Env, tx_id: u64) -> Result<WalletTx, ForgeError> {
         Self::get_tx_impl(&env, tx_id)
+    }
+
+    /// Credit the custody balance of `token` by `amount`, overflow-safe.
+    fn add_balance(env: &Env, token: &Address, amount: i128) -> Result<(), ForgeError> {
+        let current: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Balance(token.clone()))
+            .unwrap_or(0);
+        let updated = current
+            .checked_add(amount)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(token.clone()), &updated);
+        bump_entry(env, &DataKey::Balance(token.clone()));
+        Ok(())
+    }
+
+    /// Debit the custody balance of `token` by `amount`, overflow-safe.
+    ///
+    /// Callers validate funding before transferring, so the checked
+    /// subtraction is an invariant backstop rather than the primary guard.
+    fn sub_balance(env: &Env, token: &Address, amount: i128) -> Result<(), ForgeError> {
+        let current: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Balance(token.clone()))
+            .unwrap_or(0);
+        let updated = current
+            .checked_sub(amount)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(token.clone()), &updated);
+        bump_entry(env, &DataKey::Balance(token.clone()));
+        Ok(())
+    }
+
+    /// Read the custody balance of `token`; unknown tokens read as zero.
+    fn balance_impl(env: &Env, token: &Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Balance(token.clone()))
+            .unwrap_or(0)
     }
 
     /// Allocate the next monotonic transaction id.
@@ -267,11 +618,70 @@ impl MultiSigWallet {
     }
 }
 
+/// Move `amount` of `token` from `from` into this contract.
+///
+/// The depositor's `require_auth` on the calling entrypoint covers the
+/// nested token authorization; no separate allowance is needed for a
+/// `transfer` pull when the holder authorizes the invocation.
+///
+/// Token failures are bucketed into [`ForgeError::TokenTransferFailed`]
+/// rather than forwarded: a client receiving `Error(Contract, #N)` cannot
+/// know whether `N` came from the token or the wallet, and forwarding the
+/// raw discriminant invites silent misinterpretation. The root cause
+/// remains visible in the transaction's diagnostic events.
+fn transfer_to_contract(
+    env: &Env,
+    token: &Address,
+    from: &Address,
+    amount: i128,
+) -> Result<(), ForgeError> {
+    match token::TokenClient::new(env, token).try_transfer(
+        from,
+        env.current_contract_address(),
+        &amount,
+    ) {
+        Ok(Ok(())) => Ok(()),
+        // Token returned a typed error (insufficient balance, missing
+        // trustline, custom token logic) or the host aborted (most
+        // commonly an undeployed token address). The raw discriminant is
+        // intentionally discarded — see the bucketing note above.
+        _ => Err(ForgeError::TokenTransferFailed),
+    }
+}
+
+/// Move `amount` of `token` from this contract to `to`.
+fn transfer_from_contract(
+    env: &Env,
+    token: &Address,
+    to: &Address,
+    amount: i128,
+) -> Result<(), ForgeError> {
+    match token::TokenClient::new(env, token).try_transfer(
+        &env.current_contract_address(),
+        to,
+        &amount,
+    ) {
+        Ok(Ok(())) => Ok(()),
+        _ => Err(ForgeError::TokenTransferFailed),
+    }
+}
+
+/// Bump a persistent entry's TTL to the [`ttl::BUMP_AMOUNT`] horizon when
+/// it falls inside [`ttl::BUMP_THRESHOLD`]. The standard threshold/extend
+/// pattern: cheap no-op while the entry is fresh, decisive near expiry.
+fn bump_entry(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, ttl::BUMP_THRESHOLD, ttl::BUMP_AMOUNT);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::{Bytes, Env};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+    use soroban_sdk::{contract, contractimpl, Bytes, Env};
 
     /// Build a fresh env with mocked auths, a registered contract, a configured
     /// wallet (threshold 2), and named accounts. The generated client exposes
@@ -288,6 +698,88 @@ mod tests {
             client.initialize(&owners, &2_u32);
             (env, client, accounts)
         }};
+    }
+
+    /// Fresh env with a SAC token on top of the standard `setup!`: the wallet
+    /// is configured (threshold 2), `user1` starts funded with [`DEPOSIT`],
+    /// and everyone else starts at zero.
+    macro_rules! custody {
+        () => {{
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register(MultiSigWallet, ());
+            let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+            let accounts = TestAccounts::generate(&env);
+            let owners = owner_vec(&env, &accounts);
+            client.initialize(&owners, &2_u32);
+
+            let admin = Address::generate(&env);
+            let sac = env.register_stellar_asset_contract_v2(admin.clone());
+            let token = sac.address();
+            let token_admin = StellarAssetClient::new(&env, &token);
+            let token_client = TokenClient::new(&env, &token);
+            token_admin.mint(&accounts.user1, &DEPOSIT);
+
+            (env, client, accounts, token, token_client)
+        }};
+    }
+
+    const DEPOSIT: i128 = 10_000;
+
+    /// A minimal SEP-41-shaped token that can refuse transfers **to** a
+    /// chosen recipient. Used to force the wallet's payout transfer to fail
+    /// after custody has already been validated, without relying on SAC
+    /// admin flags (not available on the test-host SAC).
+    #[contract]
+    pub struct BlockingToken;
+
+    #[contracttype]
+    enum BlockingKey {
+        /// Recipient that rejects incoming transfers.
+        Blocked,
+        /// Account balances.
+        Balance(Address),
+    }
+
+    #[contractimpl]
+    impl BlockingToken {
+        /// Mark `to` as a recipient that rejects incoming transfers.
+        pub fn block(env: Env, to: Address) {
+            env.storage().instance().set(&BlockingKey::Blocked, &to);
+        }
+
+        /// Mint test funds to `to`.
+        pub fn mint(env: Env, to: Address, amount: i128) {
+            let key = BlockingKey::Balance(to);
+            let current: i128 = env.storage().instance().get(&key).unwrap_or(0);
+            env.storage().instance().set(&key, &(current + amount));
+        }
+
+        /// SEP-41 balance view.
+        pub fn balance(env: Env, id: Address) -> i128 {
+            env.storage()
+                .instance()
+                .get(&BlockingKey::Balance(id))
+                .unwrap_or(0)
+        }
+
+        /// SEP-41 transfer that aborts when `to` was blocked.
+        pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+            if env.storage().instance().has(&BlockingKey::Blocked) {
+                let blocked: Address = env.storage().instance().get(&BlockingKey::Blocked).unwrap();
+                if to == blocked {
+                    panic!("blocked recipient");
+                }
+            }
+            let from_key = BlockingKey::Balance(from);
+            let to_key = BlockingKey::Balance(to);
+            let from_bal: i128 = env.storage().instance().get(&from_key).unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&from_key, &(from_bal - amount));
+            let to_bal: i128 = env.storage().instance().get(&to_key).unwrap_or(0);
+            env.storage().instance().set(&to_key, &(to_bal + amount));
+        }
     }
 
     fn owner_vec(env: &Env, accounts: &TestAccounts) -> soroban_sdk::Vec<Address> {
@@ -496,6 +988,250 @@ mod tests {
     fn missing_tx_is_not_found() {
         let (_env, client, _accounts) = setup!();
         let err = client.try_get_tx(&999).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    // -------------------------------------------------------------------
+    // Custody: deposits
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn deposit_moves_tokens_and_updates_balance() {
+        let (_env, client, accounts, token, token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &1_000);
+
+        assert_eq!(client.balance(&token), 1_000);
+        assert_eq!(token_client.balance(&accounts.user1), DEPOSIT - 1_000);
+    }
+
+    #[test]
+    fn deposit_from_third_party_is_allowed() {
+        let (env, client, accounts, token, token_client) = custody!();
+        // `arbiter` is not an owner; open custody accepts direct funding.
+        let token_admin = StellarAssetClient::new(&env, &token);
+        token_admin.mint(&accounts.arbiter, &500);
+        client.deposit(&token, &accounts.arbiter, &500);
+        assert_eq!(client.balance(&token), 500);
+        assert_eq!(token_client.balance(&accounts.arbiter), 0);
+    }
+
+    #[test]
+    fn balance_defaults_to_zero_for_unknown_token() {
+        let (env, client, _accounts, _token, _token_client) = custody!();
+        let unknown = Address::generate(&env);
+        assert_eq!(client.balance(&unknown), 0);
+    }
+
+    #[test]
+    fn deposit_rejects_zero_and_negative_amounts() {
+        let (_env, client, accounts, token, _token_client) = custody!();
+        let err = client
+            .try_deposit(&token, &accounts.user1, &0_i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+
+        let err = client
+            .try_deposit(&token, &accounts.user1, &-1_i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn deposit_before_initialize_is_not_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(MultiSigWallet, ());
+        let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(admin);
+        let token = sac.address();
+        let err = client
+            .try_deposit(&token, &Address::generate(&env), &1_i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::NotInitialized);
+    }
+
+    #[test]
+    fn deposit_transfer_failure_leaves_balance_untouched() {
+        let (_env, client, accounts, token, _token_client) = custody!();
+        // `user2` holds nothing: the token pull fails at the token level.
+        let err = client
+            .try_deposit(&token, &accounts.user2, &1_000)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::TokenTransferFailed);
+        assert_eq!(client.balance(&token), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Custody: withdrawals
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn withdrawal_executes_at_threshold_exactly_once() {
+        let (_env, client, accounts, token, token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &1_000);
+
+        let tx_id = client.submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &400_i128);
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        client.execute(&tx_id);
+
+        // Destination paid, custody debited, tx executed — exactly once.
+        assert_eq!(token_client.balance(&accounts.arbiter), 400);
+        assert_eq!(client.balance(&token), 600);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
+
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(token_client.balance(&accounts.arbiter), 400);
+        assert_eq!(client.balance(&token), 600);
+    }
+
+    #[test]
+    fn below_threshold_withdrawal_cannot_execute() {
+        let (_env, client, accounts, token, token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &1_000);
+
+        let tx_id = client.submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &400_i128);
+        // One confirmation, threshold is 2.
+        client.confirm(&tx_id, &accounts.user2);
+
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(token_client.balance(&accounts.arbiter), 0);
+        assert_eq!(client.balance(&token), 1_000);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+    }
+
+    #[test]
+    fn withdrawal_exceeding_balance_fails_and_changes_nothing() {
+        let (_env, client, accounts, token, token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &100);
+
+        let tx_id =
+            client.submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &1_000_i128);
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InsufficientFunds);
+        // Nothing changed: custody intact, destination unfunded, tx pending.
+        assert_eq!(client.balance(&token), 100);
+        assert_eq!(token_client.balance(&accounts.arbiter), 0);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+    }
+
+    #[test]
+    fn withdrawal_failed_transfer_leaves_state_untouched() {
+        let (env, client, accounts, token, _token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &1_000);
+
+        // The destination is blocked on the token, so the wallet's payout
+        // transfer fails even though custody covers the amount. This is the
+        // load-bearing ordering check: transfer first, state second — a
+        // failed transfer must leave balances and tx state untouched.
+        let token_b = env.register(BlockingToken, ());
+        let token_b_client = BlockingTokenClient::new(&env, &token_b);
+        token_b_client.mint(&accounts.user1, &1_000);
+        client.deposit(&token_b, &accounts.user1, &1_000);
+        assert_eq!(client.balance(&token_b), 1_000);
+        token_b_client.block(&accounts.arbiter);
+
+        let tx_id =
+            client.submit_withdrawal(&accounts.user1, &token_b, &accounts.arbiter, &400_i128);
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::TokenTransferFailed);
+        assert_eq!(client.balance(&token_b), 1_000);
+        assert_eq!(token_b_client.balance(&accounts.arbiter), 0);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+    }
+
+    #[test]
+    fn submit_withdrawal_rejects_non_owner() {
+        let (_env, client, accounts, token, _token_client) = custody!();
+        let err = client
+            .try_submit_withdrawal(&accounts.arbiter, &token, &accounts.arbiter, &100_i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+    }
+
+    #[test]
+    fn submit_withdrawal_rejects_zero_amount() {
+        let (_env, client, accounts, token, _token_client) = custody!();
+        let err = client
+            .try_submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &0_i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn submit_withdrawal_before_initialize_is_not_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(MultiSigWallet, ());
+        let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        let token = Address::generate(&env);
+        let err = client
+            .try_submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &100_i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::NotInitialized);
+    }
+
+    // -------------------------------------------------------------------
+    // Custody: per-token accounting and TTL keeper
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn balances_are_tracked_per_token() {
+        let (env, client, accounts, token, _token_client) = custody!();
+        let admin2 = Address::generate(&env);
+        let token_b = env.register_stellar_asset_contract_v2(admin2).address();
+        let token_admin_b = StellarAssetClient::new(&env, &token_b);
+        token_admin_b.mint(&accounts.user1, &DEPOSIT);
+
+        client.deposit(&token, &accounts.user1, &1_000);
+        client.deposit(&token_b, &accounts.user1, &250);
+
+        assert_eq!(client.balance(&token), 1_000);
+        assert_eq!(client.balance(&token_b), 250);
+
+        // Withdrawing token A leaves token B's accounting untouched.
+        let tx_id =
+            client.submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &1_000_i128);
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        client.execute(&tx_id);
+
+        assert_eq!(client.balance(&token), 0);
+        assert_eq!(client.balance(&token_b), 250);
+    }
+
+    #[test]
+    fn touch_ttl_extends_and_keeps_balance_intact() {
+        let (_env, client, accounts, token, _token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &1_000);
+
+        client.touch_ttl(&token);
+
+        assert_eq!(client.balance(&token), 1_000);
+    }
+
+    #[test]
+    fn touch_ttl_unknown_token_is_not_found() {
+        let (env, client, _accounts, _token, _token_client) = custody!();
+        let unknown = Address::generate(&env);
+        let err = client.try_touch_ttl(&unknown).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 }

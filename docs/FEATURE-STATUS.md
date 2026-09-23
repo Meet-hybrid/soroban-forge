@@ -2,8 +2,9 @@
 
 Per-entrypoint status across all six contracts. **Implemented** means:
 implemented, tested, and covered by workspace CI. The escrow contract is
-the flagship: it moves real SEP-41 tokens. The other five are honestly
-labeled **state machine** where they track but do not settle.
+the flagship: it moves real SEP-41 tokens, and marketplace royalties now
+settles its splits the same way via `settle_sale`. The remaining four are
+honestly labeled **state machine** where they track but do not settle.
 
 **Last verified against:** the SDK 27 migration (workspace v0.2.0).
 
@@ -72,8 +73,10 @@ labeled **state machine** where they track but do not settle.
 | Entrypoint | Status | Notes |
 |---|---|---|
 | `set_royalty` | ✅ Implemented | Basis-point caps validated |
-| `distribute` | ⚠️ State only | Computes splits; **pays no recipients** |
+| `distribute` | ⚠️ Computes only | Pure split math; **pays no recipients** (use `settle_sale`) |
+| `settle_sale` | ✅ Implemented | **Real token transfers** payer → seller, then payer → royalty recipient; transfer-before-state, totals committed last |
 | `get_royalty` | ✅ Implemented | Read-only |
+| `get_settlement_summary` | ✅ Implemented | Read-only; cumulative sales, volume, and royalties per collection |
 | Multi-recipient splits | ❌ Not implemented | Follow-up |
 
 ---
@@ -86,7 +89,7 @@ labeled **state machine** where they track but do not settle.
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow: proven against wrong signers via the negative-auth suite (`authz.rs`) + authorization-tree assertions; other five: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
 | Events | ⚠️ Escrow only | Full lifecycle events on escrow; none on the other five |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
-| SEP-41 token settlement | ⚠️ Escrow only | Real transfers with transfer-before-state ordering; others store amounts only |
+| SEP-41 token settlement | ⚠️ Escrow + royalties | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and marketplace `settle_sale`; the other four store amounts only |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
 | Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
 | TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
