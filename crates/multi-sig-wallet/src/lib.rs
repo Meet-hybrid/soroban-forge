@@ -233,6 +233,32 @@ pub trait SorobanForgeMultiSigWallet {
 
     /// Read a stored transaction by id (read-only view).
     fn get_tx(env: Env, tx_id: u64) -> Result<WalletTx, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the configured owner set, in initialization order (read-only view).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotInitialized`] — the wallet has no owner set.
+    fn get_owners(env: Env) -> Result<Vec<Address>, soroban_forge_shared_utils::ForgeError>;
+
+    /// Check whether `address` is a member of the owner set (read-only view).
+    ///
+    /// Uninitialized wallets read as `false`.
+    fn is_owner(env: Env, address: Address) -> bool;
+
+    /// Read the confirmation list recorded for `tx_id`, in the order the
+    /// confirmations were recorded (read-only view).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction with id `tx_id`.
+    fn get_confirmations(
+        env: Env,
+        tx_id: u64,
+    ) -> Result<Vec<Address>, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the number of transactions submitted so far (read-only view).
+    fn get_tx_count(env: Env) -> u64;
 }
 
 /// Lifecycle state of a submitted transaction.
@@ -373,7 +399,7 @@ impl MultiSigWallet {
         if !Self::is_initialized(&env) {
             return Err(ForgeError::NotInitialized);
         }
-        if !Self::is_owner(&env, &submitter) {
+        if !Self::is_owner_impl(&env, &submitter) {
             return Err(ForgeError::Unauthorized);
         }
         submitter.require_auth();
@@ -404,7 +430,7 @@ impl MultiSigWallet {
         if wallet_tx.status != TxStatus::Pending {
             return Err(ForgeError::InvalidInput);
         }
-        if !Self::is_owner(&env, &signer) {
+        if !Self::is_owner_impl(&env, &signer) {
             return Err(ForgeError::Unauthorized);
         }
         signer.require_auth();
@@ -527,7 +553,7 @@ impl MultiSigWallet {
         if !Self::is_initialized(&env) {
             return Err(ForgeError::NotInitialized);
         }
-        if !Self::is_owner(&env, &submitter) {
+        if !Self::is_owner_impl(&env, &submitter) {
             return Err(ForgeError::Unauthorized);
         }
         if amount <= 0 {
@@ -584,6 +610,46 @@ impl MultiSigWallet {
     /// Read a stored transaction by id (read-only view).
     pub fn get_tx(env: Env, tx_id: u64) -> Result<WalletTx, ForgeError> {
         Self::get_tx_impl(&env, tx_id)
+    }
+
+    /// Read the configured owner set, in initialization order (read-only view).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotInitialized`] — the wallet has no owner set.
+    pub fn get_owners(env: Env) -> Result<Vec<Address>, ForgeError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Owners)
+            .ok_or(ForgeError::NotInitialized)
+    }
+
+    /// Check whether `address` is a member of the owner set (read-only view).
+    ///
+    /// Uninitialized wallets read as `false`.
+    pub fn is_owner(env: Env, address: Address) -> bool {
+        Self::is_owner_impl(&env, &address)
+    }
+
+    /// Read the confirmation list recorded for `tx_id`, in the order the
+    /// confirmations were recorded (read-only twin of
+    /// `WalletTx::confirmations`).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction with id `tx_id`.
+    pub fn get_confirmations(env: Env, tx_id: u64) -> Result<Vec<Address>, ForgeError> {
+        let wallet_tx = Self::get_tx_impl(&env, tx_id)?;
+        Ok(wallet_tx.confirmations)
+    }
+
+    /// Read the number of transactions submitted so far (read-only view).
+    ///
+    /// The `Count` counter only advances on successful `submit`/
+    /// `submit_withdrawal`, so this matches the number of recorded
+    /// transactions. Uninitialized wallets read as `0`.
+    pub fn get_tx_count(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::Count).unwrap_or(0)
     }
 
     /// Credit the custody balance of `token` by `amount`, overflow-safe.
@@ -643,7 +709,7 @@ impl MultiSigWallet {
         env.storage().instance().has(&DataKey::Threshold)
     }
 
-    fn is_owner(env: &Env, address: &Address) -> bool {
+    fn is_owner_impl(env: &Env, address: &Address) -> bool {
         let owners: Vec<Address> = match env.storage().instance().get(&DataKey::Owners) {
             Some(owners) => owners,
             None => return false,
@@ -1129,6 +1195,120 @@ mod tests {
         let (_env, client, _accounts) = setup!();
         let err = client.try_get_tx(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
+    }
+
+    // -------------------------------------------------------------------
+    // Read-only introspection views
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn get_owners_round_trips_initialization_order() {
+        let (env, client, accounts) = setup!();
+        let owners = client.get_owners();
+        assert_eq!(owners, owner_vec(&env, &accounts));
+        assert_eq!(owners.len(), 3);
+        assert_eq!(owners.get_unchecked(0), accounts.user1);
+        assert_eq!(owners.get_unchecked(1), accounts.user2);
+        assert_eq!(owners.get_unchecked(2), accounts.user3);
+    }
+
+    #[test]
+    fn get_owners_before_initialize_is_not_initialized() {
+        let (_env, client, _accounts) = fresh!();
+        let err = client.try_get_owners().unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotInitialized);
+    }
+
+    #[test]
+    fn is_owner_recognizes_members_only() {
+        let (_env, client, accounts) = setup!();
+        assert!(client.is_owner(&accounts.user1));
+        assert!(client.is_owner(&accounts.user2));
+        assert!(client.is_owner(&accounts.user3));
+        assert!(!client.is_owner(&accounts.arbiter));
+    }
+
+    #[test]
+    fn is_owner_before_initialize_is_false() {
+        let (_env, client, accounts) = fresh!();
+        assert!(!client.is_owner(&accounts.user1));
+        assert!(!client.is_owner(&accounts.arbiter));
+    }
+
+    #[test]
+    fn get_confirmations_reflects_recorded_order() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let empty = client.get_confirmations(&tx_id);
+        assert_eq!(empty.len(), 0);
+
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        let confirmations = client.get_confirmations(&tx_id);
+        assert_eq!(confirmations.len(), 2);
+        assert_eq!(confirmations.get_unchecked(0), accounts.user2);
+        assert_eq!(confirmations.get_unchecked(1), accounts.user3);
+    }
+
+    #[test]
+    fn get_confirmations_duplicate_confirm_leaves_list_unchanged() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        let err = client
+            .try_confirm(&tx_id, &accounts.user2)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+
+        let confirmations = client.get_confirmations(&tx_id);
+        assert_eq!(confirmations.len(), 1);
+        assert_eq!(confirmations.get_unchecked(0), accounts.user2);
+    }
+
+    #[test]
+    fn get_confirmations_unknown_tx_is_not_found() {
+        let (_env, client, _accounts) = setup!();
+        let err = client.try_get_confirmations(&999).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn get_confirmations_before_initialize_is_not_found() {
+        let (_env, client, _accounts) = fresh!();
+        let err = client.try_get_confirmations(&1).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn get_tx_count_tracks_submits() {
+        let (env, client, accounts) = setup!();
+        assert_eq!(client.get_tx_count(), 0);
+        client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.submit(&accounts.user2, &target(&env), &payload(&env));
+        client.submit(&accounts.user1, &target(&env), &payload(&env));
+        assert_eq!(client.get_tx_count(), 3);
+    }
+
+    #[test]
+    fn get_tx_count_does_not_count_failed_submits() {
+        let (env, client, accounts) = setup!();
+        // A rejected submit (non-owner) never advances the counter.
+        let err = client
+            .try_submit(&accounts.arbiter, &target(&env), &payload(&env))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+        assert_eq!(client.get_tx_count(), 0);
+
+        client.submit(&accounts.user1, &target(&env), &payload(&env));
+        assert_eq!(client.get_tx_count(), 1);
+    }
+
+    #[test]
+    fn get_tx_count_before_initialize_is_zero() {
+        let (_env, client, _accounts) = fresh!();
+        assert_eq!(client.get_tx_count(), 0);
     }
 
     #[test]
