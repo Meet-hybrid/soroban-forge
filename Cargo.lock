@@ -1668,6 +1668,8 @@ name = "soroban-forge-escrow"
 version = "0.2.0"
 dependencies = [
  "proptest",
+ "serde",
+ "serde_json",
  "soroban-forge-shared-utils",
  "soroban-forge-test-utils",
  "soroban-sdk",
