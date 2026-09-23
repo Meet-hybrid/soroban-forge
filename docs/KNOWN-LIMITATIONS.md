@@ -16,7 +16,9 @@ contract** and remain open for the other five:
 1. **No token settlement** — escrow now performs real SEP-41 transfers
    (`deposit` pulls from the buyer, `release`/`refund`/`resolve` pay out)
    with transfer-before-state ordering so a failed transfer leaves no
-   partial state. The other five contracts still move nothing.
+   partial state. Marketplace royalties and vesting have since gained
+   settlement the same way; DAO governance and subscriptions still move
+   nothing.
 2. **Instance-only storage** — escrow records now live in per-id
    **persistent** entries with TTL bumps on every write and a
    permissionless `touch_ttl` keeper entrypoint. The other five still use
@@ -33,14 +35,16 @@ contract** and remain open for the other five:
 
 ## Still open
 
-### 1. Token settlement for the remaining three contracts
+### 1. Token settlement for the remaining two contracts
 
-Vesting, DAO governance, and subscriptions remain state
+DAO governance and subscriptions remain state
 machines: amounts are validated and stored, never moved.
 (Marketplace royalties moved off this list: `settle_sale` transfers
 real SEP-41 tokens with the escrow pattern. Multi-sig wallet also
 moved off this list: `execute` performs real cross-contract
-invocations via `try_invoke_contract`.) Each remaining contract gets
+invocations via `try_invoke_contract`. Vesting also moved off this
+list: `claim` transfers the vested amount to the beneficiary with
+transfer-before-state ordering.) Each remaining contract gets
 its own tranche using the escrow pattern (see
 [RESUBMISSION.md](RESUBMISSION.md#phase-1--flagship-escrow-primitive-3-weeks)).
 
@@ -67,14 +71,18 @@ documents the verified mechanics: contract self-authorization is implicit
 is why a party signature alone legitimately completes a payout.
 
 Still open: the other five contracts' entrypoints are proven at call-graph
-level only. Lower priority because none of them move tokens yet — this
-closes alongside each contract's settlement tranche.
+level only. Vesting's `claim` now moves tokens, so its settlement path is
+covered by balance-asserted tests but not yet by a negative-auth suite;
+DAO governance and subscriptions still move nothing, keeping theirs lower
+priority until their settlement tranches.
 
 ### 5. Vesting rounding residue
 
 Vesting claims use floor division; per-claim residue (at most one stroop
-× number of claims) stays in the contract until the final claim. No
-dust-sweep entrypoint. Revisit when vesting gets settlement.
+× number of claims) stays in the contract until the final claim, where it
+is paid out in full (settlement landed: residue is claimable, never lost,
+asserted by `floor_division_residue_stays_claimable_until_final_claim`).
+No dust-sweep entrypoint — revisit only as a convenience.
 
 ### 6. Testnet only — no mainnet deployment
 

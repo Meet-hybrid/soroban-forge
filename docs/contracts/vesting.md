@@ -48,9 +48,19 @@ once fully claimed. `Revoked` is reserved for a follow-up revocation method.
 - `claim` requires the beneficiary.
 - `claimable` and `get_status` are read-only views.
 
-## Scope
+## Settlement
 
-Token settlement (SAC transfers) is out of scope for the current iteration:
-the contract tracks state and authorization, not balances. Tests live
-in-crate (`crates/vesting/src/lib.rs`) and run with
+The contract custodies the SEP-41 token configured on the schedule, and
+`claim` settles through it:
+
+- the newly claimable amount is transferred from the contract to the
+  beneficiary **before** the schedule is written (escrow's
+  transfer-before-state pattern); a failed transfer returns
+  `ForgeError::TokenTransferFailed` with `claimed` and `status` unchanged;
+- zero-claim calls (before the cliff, or nothing newly vested) return `0`
+  and issue **no** token transfer;
+- floor-division residue is never lost: it stays claimable between claims
+  and is paid out by the final claim.
+
+Tests live in-crate (`crates/vesting/src/lib.rs`) and run with
 `cargo test -p soroban-forge-vesting --all-targets --locked`.

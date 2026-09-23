@@ -2,9 +2,10 @@
 
 Per-entrypoint status across all six contracts. **Implemented** means:
 implemented, tested, and covered by workspace CI. The escrow contract is
-the flagship: it moves real SEP-41 tokens, and marketplace royalties now
-settles its splits the same way via `settle_sale`. The remaining four are
-honestly labeled **state machine** where they track but do not settle.
+the flagship: it moves real SEP-41 tokens; marketplace royalties settles
+its splits the same way via `settle_sale`; vesting settles its claims via
+`claim`. The two remaining state machines (DAO governance, subscriptions)
+are honestly labeled where they track but do not settle.
 
 **Last verified against:** the SDK 27 migration (workspace v0.2.0).
 
@@ -32,11 +33,11 @@ honestly labeled **state machine** where they track but do not settle.
 | Entrypoint | Status | Notes |
 |---|---|---|
 | `create_schedule` | ✅ Implemented | Validates `total_amount > 0`, `duration > 0`, `cliff <= duration` |
-| `claim` | ⚠️ Computes only | Returns exact vested-but-unclaimed amount; **no token transfer**; floor-division residue documented in [Known Limitations](KNOWN-LIMITATIONS.md) |
+| `claim` | ✅ Implemented | **Real token transfer** contract → beneficiary before the state write (transfer-before-state); zero-claim calls skip the transfer; a failed transfer surfaces as `ForgeError::TokenTransferFailed` with `claimed`/`status` unchanged |
 | `claimable` | ✅ Implemented | Read-only |
 | `get_status` | ✅ Implemented | Read-only |
 | Revocation | ❌ Not implemented | `Revoked` status reserved |
-| `VestingSchedule.token` field | ⚠️ Dead | Stored, never read — wired up in the vesting settlement tranche |
+| `VestingSchedule.token` field | ✅ Wired | Read by `claim` for the SEP-41 payout |
 
 ## Multi-Sig Wallet (`crates/multi-sig-wallet`)
 
@@ -89,7 +90,7 @@ honestly labeled **state machine** where they track but do not settle.
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow: proven against wrong signers via the negative-auth suite (`authz.rs`) + authorization-tree assertions; other five: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
 | Events | ⚠️ Escrow only | Full lifecycle events on escrow; none on the other five |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
-| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`); marketplace `settle_sale` settles splits; multi-sig `execute` performs cross-contract `try_invoke_contract` on opaque-payload txs; the remaining three store amounts only |
+| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale` settles splits; multi-sig `execute` performs cross-contract `try_invoke_contract` on opaque-payload txs; DAO governance and subscriptions still store amounts only |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
 | Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
 | TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
