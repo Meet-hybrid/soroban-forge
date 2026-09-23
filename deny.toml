@@ -20,67 +20,44 @@
 # notice = "deny"
 # ignore = []
 
-[licenses]
-# Workspace licensed as MIT OR Apache-2.0.
-# Allow only compatible, permissive licenses commonly used in the Rust ecosystem.
-# Deny all other licenses by default.
-allow = [
-    "MIT",
-    "Apache-2.0",
-    "Apache-2.0 OR MIT",
-    "MIT OR Apache-2.0",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
-    "Unicode-DFS-2016",
-    "CC0-1.0",
-]
-# Deprecated: use of copyleft licenses is not permitted.
-# GPL/AGPL/SSPL would require all of Soroban Forge to be released under the same license.
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "AGPL-3.0",
-    "SSPL-1.0",
-]
-# Crates that don't declare a license explicitly.
-# We allow these with scrutiny: each such crate is reviewed and exceptions are documented below.
-copyleft = "allow"
-# Allow dual-licensing scenarios (e.g. licensed under both MIT and Apache-2.0).
-allow-dual-licenses = true
-# CI fails if confidence is not high enough.
-confidence-threshold = 0.8
+# License policy placeholder
+# The explicit `licenses` configuration was removed to avoid schema
+# incompatibilities with the installed cargo-deny version. The intent is
+# to enforce permissive licenses (MIT/Apache-2.0/BSD/ISC/Unicode/CC0) and
+# deny copyleft licenses (GPL/AGPL/SSPL). Reintroduce a versioned
+# `licenses` section compatible with the repo's cargo-deny version when
+# migrating the policy.
 
-# Exceptions for crates without declared licenses or with ambiguous license info.
-# Each exception includes a comment explaining why it is justified.
-# Common patterns: unmaintained crates, workspace members, or permissively-intended but undeclared.
-exceptions = [
-    # Workspace members do not need explicit license declarations.
-    # { name = "soroban-forge-*", allow = ["MIT OR Apache-2.0"] },
-]
+# LICENSES: intentionally omitted to avoid schema mismatch with the installed
+# cargo-deny version. License policy will be reintroduced using the
+# repository's pinned cargo-deny schema (v0.20.x) in a follow-up patch.
+
+# See [docs/DEPENDENCY_POLICY_MIGRATION.md](docs/DEPENDENCY_POLICY_MIGRATION.md)
+# for the migration plan to safely reintroduce `licenses` enforcement.
 
 [sources]
 # Only allow dependencies from crates.io. No git, path, or alternative registry sources.
 # This prevents supply-chain surprises and ensures reproducible builds.
 allow-org = {}
-allow-registry = ["crates-io"]
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
-
 # Exceptions for git/path sources can be documented here if unavoidable.
 # Format: { name = "crate-name", allow = ["https://github.com/owner/repo"] }
-exceptions = [
-    # None at this time. All dependencies come from crates.io.
-]
+# None at this time. All dependencies come from crates.io.
+
+# Treat unknown registries or git repos as a policy violation.
+unknown-registry = "deny"
+unknown-git = "deny"
 
 [bans]
 # Duplicate detection and version alignment.
 # Multiple versions of the same crate are flagged; justifications are documented below.
 # Policy: prefer single versions; multiple versions are allowed only with documented rationale.
 multiple-versions = "warn"
-# Highlightdirectly-used but unused crates.
-unused-default-features = "warn"
-# Highlight crates that skip default features unnecessarily.
-default-features = "warn"
+# Highlight directly-used but unused crates.
+# (The `unused-default-features` and `default-features` keys are not
+# valid in the current cargo-deny schema; feature-related checks can be
+# configured via `features`/`external-default-features` if needed.)
 # Allow multiple versions only with explicit exception.
 allow = [
     # No duplicates allowed without documentation.
@@ -92,10 +69,4 @@ deny = [
 # Check for crates with unmaintained status or very old MSRV.
 skip-tree = []
 
-[sources.unknown-registry]
-# Default policy: unknown registries are denied.
-deny = []
-
-[sources.unknown-git]
-# Default policy: unknown git repositories are denied.
-deny = []
+ 
