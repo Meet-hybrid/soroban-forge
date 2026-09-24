@@ -11,7 +11,7 @@ decision — not an oversight.
 ## Resolved in the SDK 27 / Phase 1 migration
 
 These were the headline gaps in v0.1.0; all are closed **for the escrow
-contract** and remain open for the other five:
+contract** and remain open for the other four:
 
 1. **No token settlement** — escrow now performs real SEP-41 transfers
    (`deposit` pulls from the buyer, `release`/`refund`/`resolve` pay out)
@@ -25,7 +25,8 @@ contract** and remain open for the other five:
    instance storage exclusively.
 3. **No events** — escrow emits `EscrowCreated`, `Deposited`, `Released`,
    `Refunded`, `Disputed`, `Resolved`, `Cancelled` (escrow id as topic).
-   The other five are still silent.
+   DAO governance also emits proposal lifecycle events; the other four are
+   still silent.
 4. **Arbiter stored but unreachable** — `dispute` (claimant-authorized)
    and `resolve` (arbiter-only, final) make the third party live.
    `Disputed` is a real state, verified by tests.
@@ -37,8 +38,8 @@ contract** and remain open for the other five:
 
 ### 1. Token settlement for the remaining two contracts
 
-DAO governance and subscriptions remain state
-machines: amounts are validated and stored, never moved.
+Subscriptions remain state machines: amounts are validated and stored, never
+moved. DAO governance now dispatches approved opaque actions.
 (Marketplace royalties moved off this list: `settle_sale` transfers
 real SEP-41 tokens with the escrow pattern. Multi-sig wallet also
 moved off this list: `execute` performs real cross-contract
@@ -70,11 +71,11 @@ documents the verified mechanics: contract self-authorization is implicit
 (the host auto-approves `require_auth` from the executing contract), which
 is why a party signature alone legitimately completes a payout.
 
-Still open: the other five contracts' entrypoints are proven at call-graph
+Still open: the other four contracts' entrypoints are proven at call-graph
 level only. Vesting's `claim` now moves tokens, so its settlement path is
 covered by balance-asserted tests but not yet by a negative-auth suite;
-DAO governance and subscriptions still move nothing, keeping theirs lower
-priority until their settlement tranches.
+DAO governance now dispatches approved actions, while subscriptions still
+move nothing.
 
 ### 5. Vesting rounding residue
 

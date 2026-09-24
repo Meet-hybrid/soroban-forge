@@ -346,9 +346,9 @@ fn transfer_from_contract(
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-    use soroban_sdk::Env;
+    use soroban_sdk::{Env, IntoVal, InvokeError};
 
     const START: u64 = 1_000_000;
     const CLIFF: u64 = 1_000;
@@ -380,10 +380,24 @@ mod tests {
         }};
     }
 
-    // NOTE: negative authorization tests (calling `require_auth` without a
-    // matching signature) are not runnable in-process with soroban-sdk 21.5.1:
-    // the host raises a non-unwinding panic that aborts the test binary. They
-    // are tracked in the security-invariant test backlog (Issue 7).
+    /// Assert that a `try_` call aborted on authorization (the host aborts the
+    /// whole invocation when the armed envelope does not match).
+    macro_rules! assert_auth_abort {
+        ($res:expr) => {
+            assert!(
+                matches!($res, Err(Err(InvokeError::Abort))),
+                "expected auth abort, got {:?}",
+                $res
+            );
+        };
+    }
+
+    // NOTE: In soroban-sdk 27.0.6, entrypoint `require_auth` checks are verified
+    // via `env.mock_auths` (enforce mode). An unauthorized caller or a signature
+    // with mismatched arguments aborts the invocation with `Err(Err(InvokeError::Abort))`.
+    // Contract self-authorization for token settlement is implicit in the host:
+    // the executing contract's own transfer is auto-approved and requires no
+    // separate user signature frame.
 
     fn create(
         client: &SorobanForgeVestingClient<'_>,
@@ -745,5 +759,268 @@ mod tests {
         assert_eq!(first + rest, TOTAL);
         assert_eq!(tc.balance(&accounts.user1), TOTAL);
         assert_eq!(tc.balance(&contract_id), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Authorization & Negative-Auth Verification
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn create_schedule_accepts_beneficiary_auth() {
+        let (env, token, _tc, contract_id, client, accounts) = setup!();
+        let beneficiary = &accounts.user1;
+        env.mock_auths(&[MockAuth {
+            address: beneficiary,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_schedule",
+                args: (beneficiary, &token, &TOTAL, &CLIFF, &DURATION).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let id = client
+            .try_create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION)
+            .expect("outer ok")
+            .expect("create_schedule ok");
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn create_schedule_rejects_non_beneficiary_auth() {
+        let (env, token, _tc, contract_id, client, accounts) = setup!();
+        let beneficiary = &accounts.user1;
+        let attacker = &accounts.user2;
+
+        env.mock_auths(&[MockAuth {
+            address: attacker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_schedule",
+                args: (beneficiary, &token, &TOTAL, &CLIFF, &DURATION).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+        assert_auth_abort!(res);
+    }
+
+    #[test]
+    fn claim_accepts_beneficiary_auth() {
+        let (env, token, tc, contract_id, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
+        env.ledger().set_timestamp(START + DURATION);
+
+        env.mock_auths(&[MockAuth {
+            address: &accounts.user1,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "claim",
+                args: (id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_claim(&id).expect("outer ok").expect("claim ok");
+        assert_eq!(res, TOTAL);
+        assert_eq!(tc.balance(&accounts.user1), TOTAL);
+    }
+
+    #[test]
+    fn claim_rejects_non_beneficiary_auth() {
+        let (env, token, tc, contract_id, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
+        env.ledger().set_timestamp(START + DURATION);
+
+        env.mock_auths(&[MockAuth {
+            address: &accounts.user2,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "claim",
+                args: (id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_claim(&id);
+        assert_auth_abort!(res);
+        assert_eq!(tc.balance(&accounts.user1), 0);
+        assert_eq!(tc.balance(&contract_id), TOTAL);
+        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+        assert_eq!(client.claimable(&id), TOTAL);
+    }
+
+    // -------------------------------------------------------------------
+    // Boundary, Cliff == Duration, and Timing Tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn boundary_cliff_and_duration_step_progression() {
+        let (env, token, _tc, _cid, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
+
+        // At creation start:
+        env.ledger().set_timestamp(START);
+        assert_eq!(client.get_status(&id), VestingStatus::Locked);
+        assert_eq!(client.claimable(&id), 0);
+
+        // 1 second before cliff:
+        env.ledger().set_timestamp(START + CLIFF - 1);
+        assert_eq!(client.get_status(&id), VestingStatus::Locked);
+        assert_eq!(client.claimable(&id), 0);
+
+        // At cliff boundary:
+        env.ledger().set_timestamp(START + CLIFF);
+        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+        assert_eq!(client.claimable(&id), 0);
+
+        // 1 second after cliff: floor(10_000 * 1 / 3_000) = 3
+        env.ledger().set_timestamp(START + CLIFF + 1);
+        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+        assert_eq!(client.claimable(&id), 3);
+
+        // 1 second before full duration: floor(10_000 * 2_999 / 3_000) = 9_996
+        env.ledger().set_timestamp(START + DURATION - 1);
+        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+        assert_eq!(client.claimable(&id), 9_996);
+
+        // Exactly at duration:
+        env.ledger().set_timestamp(START + DURATION);
+        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+        assert_eq!(client.claimable(&id), TOTAL);
+
+        // After duration:
+        env.ledger().set_timestamp(START + DURATION + 10_000);
+        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+        assert_eq!(client.claimable(&id), TOTAL);
+    }
+
+    #[test]
+    fn interleaved_partial_claims_across_arbitrary_timestamps() {
+        let (env, token, tc, contract_id, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
+
+        // Five sequential claim points:
+        // Period is 3_000 seconds, total is 10_000.
+        // Step 1: elapsed 300 -> 10_000 * 300 / 3_000 = 1_000.
+        env.ledger().set_timestamp(START + CLIFF + 300);
+        assert_eq!(client.claim(&id), 1_000);
+        assert_eq!(tc.balance(&accounts.user1), 1_000);
+        assert_eq!(client.claimable(&id), 0);
+
+        // Step 2: elapsed 750 -> 10_000 * 750 / 3_000 = 2_500 vested. Claimable = 2_500 - 1_000 = 1_500.
+        env.ledger().set_timestamp(START + CLIFF + 750);
+        assert_eq!(client.claim(&id), 1_500);
+        assert_eq!(tc.balance(&accounts.user1), 2_500);
+        assert_eq!(client.claimable(&id), 0);
+
+        // Step 3: elapsed 1_500 -> 10_000 * 1_500 / 3_000 = 5_000 vested. Claimable = 5_000 - 2_500 = 2_500.
+        env.ledger().set_timestamp(START + CLIFF + 1_500);
+        assert_eq!(client.claim(&id), 2_500);
+        assert_eq!(tc.balance(&accounts.user1), 5_000);
+        assert_eq!(client.claimable(&id), 0);
+
+        // Step 4: elapsed 2_250 -> 10_000 * 2_250 / 3_000 = 7_500 vested. Claimable = 7_500 - 5_000 = 2_500.
+        env.ledger().set_timestamp(START + CLIFF + 2_250);
+        assert_eq!(client.claim(&id), 2_500);
+        assert_eq!(tc.balance(&accounts.user1), 7_500);
+        assert_eq!(client.claimable(&id), 0);
+
+        // Step 5: elapsed 3_000 (end of duration) -> full 10_000 vested. Remainder = 2_500.
+        env.ledger().set_timestamp(START + DURATION);
+        assert_eq!(client.claim(&id), 2_500);
+        assert_eq!(tc.balance(&accounts.user1), TOTAL);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(client.get_status(&id), VestingStatus::Completed);
+        assert_eq!(client.claimable(&id), 0);
+    }
+
+    #[test]
+    fn repeated_zero_claims_at_and_before_cliff() {
+        let (env, token, tc, contract_id, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
+
+        // Repeated claims before cliff:
+        env.ledger().set_timestamp(START + 100);
+        assert_eq!(client.claim(&id), 0);
+        assert_eq!(client.claim(&id), 0);
+        assert_eq!(client.claim(&id), 0);
+        assert_eq!(tc.balance(&accounts.user1), 0);
+        assert_eq!(tc.balance(&contract_id), TOTAL);
+
+        // Repeated claims at cliff:
+        env.ledger().set_timestamp(START + CLIFF);
+        assert_eq!(client.claim(&id), 0);
+        assert_eq!(client.claim(&id), 0);
+        assert_eq!(tc.balance(&accounts.user1), 0);
+        assert_eq!(tc.balance(&contract_id), TOTAL);
+    }
+
+    #[test]
+    fn timestamp_u64_max_edge_case() {
+        let (env, token, tc, contract_id, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
+
+        // Ledger timestamp at maximum u64 value:
+        env.ledger().set_timestamp(u64::MAX);
+        assert_eq!(client.claimable(&id), TOTAL);
+        assert_eq!(client.claim(&id), TOTAL);
+        assert_eq!(tc.balance(&accounts.user1), TOTAL);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(client.get_status(&id), VestingStatus::Completed);
+    }
+
+    #[test]
+    fn total_amount_i128_max_at_duration_succeeds() {
+        let (env, _token, _tc, _cid, client, accounts) = setup!();
+        let id = client.create_schedule(
+            &accounts.user1,
+            &accounts.validator,
+            &i128::MAX,
+            &0_u64,
+            &1_000_u64,
+        );
+        // At or after duration, vested_amount returns total_amount directly
+        // without computing total_amount * elapsed / period, so it does not overflow.
+        env.ledger().set_timestamp(START + 1_000);
+        assert_eq!(client.claimable(&id), i128::MAX);
+
+        env.ledger().set_timestamp(START + 2_000);
+        assert_eq!(client.claimable(&id), i128::MAX);
+    }
+
+    #[test]
+    fn start_plus_duration_u64_overflow_reported() {
+        let (env, _token, _tc, _cid, client, accounts) = setup!();
+        // A schedule whose duration would cause start + duration to overflow u64.
+        let id = client.create_schedule(
+            &accounts.user1,
+            &accounts.validator,
+            &TOTAL,
+            &0_u64,
+            &u64::MAX,
+        );
+        env.ledger().set_timestamp(START + 100);
+        let err = client.try_claimable(&id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::ArithmeticOverflow);
+
+        let claim_err = client.try_claim(&id).unwrap_err().unwrap();
+        assert_eq!(claim_err, ForgeError::ArithmeticOverflow);
+    }
+
+    #[test]
+    fn monotonic_id_counter_overflow_reported() {
+        let (env, token, _tc, contract_id, client, accounts) = setup!();
+        // Set Count key to u64::MAX directly in contract storage:
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&DataKey::Count, &u64::MAX);
+        });
+
+        let err = client
+            .try_create_schedule(&accounts.user1, &token, &TOTAL, &CLIFF, &DURATION)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::ArithmeticOverflow);
     }
 }

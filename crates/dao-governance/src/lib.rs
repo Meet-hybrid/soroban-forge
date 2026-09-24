@@ -13,44 +13,58 @@
 //! propose (voting_ends = now + duration)
 //!   --> Active --vote × n--> voting ends
 //!   --> execute: for > against ? Succeeded : Defeated
+//!   --> execute (on Succeeded): target.execute(action) --> Executed (terminal)
 //!   --> cancel (proposer only): Cancelled (terminal)
 //! ```
 //!
-//! `Cancelled` is terminal: a withdrawn proposal can never be voted on,
-//! executed, or re-opened. Cancellation is permitted at any point before
-//! execution — even after voting ends and quorum is met — so a proposer can
-//! stop a proposal that is clearly failing or was created in error.
+//! When voting ends, calling `execute` finalises the vote tally:
+//! - If `for_votes > against_votes`, the proposal becomes `Succeeded`.
+//! - Otherwise, the proposal becomes `Defeated`.
+//!
+//! Once a proposal is `Succeeded`, calling `execute` performs a real
+//! cross-contract call (`target.execute(action)`) using `env.try_invoke_contract`.
+//! - If the target invocation succeeds, the proposal transitions to `Executed`.
+//! - If the target invocation reverts, `ForgeError::ContractInvocationFailed` is
+//!   returned and the proposal remains in the `Succeeded` state (not `Executed`),
+//!   leaving target state unchanged and allowing execution to be re-attempted.
+//!
+//! `Defeated`, `Executed`, `Cancelled`, and still-`Active` proposals cannot be
+//! executed; a second `execute` on an `Executed` proposal is rejected.
 //!
 //! Authorization model:
 //! - `propose` requires the proposer.
 //! - `vote` requires the voter and is one-vote-per-voter per proposal.
-//! - `execute` may be called by anyone, but only once voting has ended.
+//! - `execute` may be called by anyone (permissionless), but only once voting has ended.
 //! - `cancel_proposal` requires the original proposer and freezes a
 //!   not-yet-executed proposal.
 //! - `get_proposal` is a read-only view.
 //!
 //! The `Queued` state is reserved for an optional timelock that lands in a
 //! follow-up; it is not reachable through the current public interface.
-//! Weighted voting by governance-token balance and action execution are
-//! intentionally out of scope for this iteration: the contract tracks
-//! proposals, votes, and timing, not balances.
+//! Weighted voting by governance-token balance is intentionally out of
+//! scope for this iteration: the contract tracks proposals, votes, and timing,
+//! not balances.
 
 #[cfg(test)]
 extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Bytes, Env};
+use soroban_sdk::{
+    contract, contractclient, contractevent, contractimpl, contracttype, Address, Bytes, Env,
+    IntoVal, Symbol, Val,
+};
 
 /// Public interface for the Soroban Forge DAO governance contract.
 #[contractclient(name = "SorobanForgeDaoGovernanceClient")]
 pub trait SorobanForgeDaoGovernance {
-    /// Create a new proposal with an encoded action payload.
+    /// Create a new proposal with a target contract and encoded action payload.
     ///
     /// `duration` (seconds) defines how long voting stays open. Returns the
     /// stable proposal id.
     fn propose(
         env: Env,
         proposer: Address,
+        target: Address,
         action: Bytes,
         duration: u64,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
@@ -63,7 +77,7 @@ pub trait SorobanForgeDaoGovernance {
         support: bool,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
-    /// Finalise a proposal once voting has ended.
+    /// Finalise a proposal once voting has ended, and execute passed proposals.
     fn execute(env: Env, proposal_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
     /// Withdraw a proposal that has not yet been executed.
@@ -89,10 +103,12 @@ pub trait SorobanForgeDaoGovernance {
 pub enum ProposalState {
     /// Open for voting.
     Active,
-    /// Approved and executed.
+    /// Approved and ready for execution.
     Succeeded,
     /// Rejected or expired.
     Defeated,
+    /// Successfully executed on-chain (terminal).
+    Executed,
     /// Queued for delayed execution (optional timelock).
     Queued,
     /// Withdrawn by the proposer before execution; terminal and immutable.
@@ -107,6 +123,8 @@ pub struct Proposal {
     pub proposal_id: u64,
     /// Address that created the proposal.
     pub proposer: Address,
+    /// Target contract to invoke on successful execution.
+    pub target: Address,
     /// Encoded action to execute on success.
     pub action: Bytes,
     /// Tally of "for" votes (in governance-token units).
@@ -142,6 +160,7 @@ impl DaoGovernance {
     pub fn propose(
         env: Env,
         proposer: Address,
+        target: Address,
         action: Bytes,
         duration: u64,
     ) -> Result<u64, ForgeError> {
@@ -159,6 +178,7 @@ impl DaoGovernance {
         let proposal = Proposal {
             proposal_id,
             proposer,
+            target,
             action,
             for_votes: 0,
             against_votes: 0,
@@ -168,6 +188,7 @@ impl DaoGovernance {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        events::proposal_created(&env, &proposal);
         Ok(proposal_id)
     }
 
@@ -190,7 +211,7 @@ impl DaoGovernance {
         }
         voter.require_auth();
 
-        let vote_key = DataKey::Vote(proposal_id, voter);
+        let vote_key = DataKey::Vote(proposal_id, voter.clone());
         if env.storage().instance().has(&vote_key) {
             return Err(ForgeError::InvalidInput);
         }
@@ -210,31 +231,72 @@ impl DaoGovernance {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        events::vote_cast(&env, proposal_id, &voter, support);
         Ok(())
     }
 
-    /// Finalise a proposal once voting has ended.
+    /// Finalise a proposal once voting has ended, and execute passed proposals.
     ///
-    /// Callable by anyone after the deadline. The proposal passes (`Succeeded`)
-    /// on a strict majority of `for` votes, otherwise it is `Defeated`.
+    /// Callable by anyone after the deadline (permissionless execution).
+    ///
+    /// - An `Active` proposal past deadline transitions to `Succeeded` on a
+    ///   strict majority of `for` votes, or `Defeated` otherwise.
+    /// - A `Succeeded` proposal performs a real cross-contract call to `target`
+    ///   with `action` (`target.execute(action)`). On successful invocation,
+    ///   it transitions to the terminal `Executed` state and emits an `Executed` event.
+    /// - If the target invocation reverts, `ForgeError::ContractInvocationFailed`
+    ///   is returned and the proposal remains `Succeeded` (not `Executed`),
+    ///   leaving target state unchanged.
+    /// - `Defeated`, `Executed`, `Cancelled`, and still-`Active` proposals
+    ///   cannot be executed.
     pub fn execute(env: Env, proposal_id: u64) -> Result<(), ForgeError> {
         let mut proposal = Self::get_proposal_impl(&env, proposal_id)?;
-        if proposal.state != ProposalState::Active {
-            return Err(ForgeError::InvalidInput);
-        }
         if env.ledger().timestamp() < proposal.voting_ends {
             return Err(ForgeError::InvalidInput);
         }
 
-        proposal.state = if proposal.for_votes > proposal.against_votes {
-            ProposalState::Succeeded
-        } else {
+        match proposal.state {
+            ProposalState::Active => {
+                if proposal.for_votes > proposal.against_votes {
+                    proposal.state = ProposalState::Succeeded;
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::Proposal(proposal_id), &proposal);
+                    Ok(())
+                } else {
+                    proposal.state = ProposalState::Defeated;
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::Proposal(proposal_id), &proposal);
+                    Ok(())
+                }
+            }
+            ProposalState::Succeeded => {
+                let target = &proposal.target;
+                let payload_val: Val = proposal.action.clone().into_val(&env);
+                let args = soroban_sdk::vec![&env, payload_val];
+                let result = env.try_invoke_contract::<(), ForgeError>(
+                    target,
+                    &Symbol::new(&env, "execute"),
+                    args,
+                );
+
+                if let Err(_) | Ok(Err(_)) = result {
+                    return Err(ForgeError::ContractInvocationFailed);
+                }
+
+                proposal.state = ProposalState::Executed;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Proposal(proposal_id), &proposal);
+                events::executed(&env, &proposal);
+                Ok(())
+            }
             ProposalState::Defeated
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::Proposal(proposal_id), &proposal);
-        Ok(())
+            | ProposalState::Executed
+            | ProposalState::Cancelled
+            | ProposalState::Queued => Err(ForgeError::InvalidInput),
+        }
     }
 
     /// Withdraw an active proposal before it is executed.
@@ -289,18 +351,71 @@ impl DaoGovernance {
     }
 }
 
+/// Lifecycle events emitted by the DAO governance contract.
+mod events {
+    use super::*;
+
+    #[contractevent]
+    pub struct ProposalCreated {
+        #[topic]
+        pub proposal_id: u64,
+        pub data: Proposal,
+    }
+
+    #[contractevent]
+    pub struct VoteCast {
+        #[topic]
+        pub proposal_id: u64,
+        #[topic]
+        pub voter: Address,
+        pub support: bool,
+    }
+
+    #[contractevent]
+    pub struct Executed {
+        #[topic]
+        pub proposal_id: u64,
+        pub data: Proposal,
+    }
+
+    pub fn proposal_created(env: &Env, proposal: &Proposal) {
+        ProposalCreated {
+            proposal_id: proposal.proposal_id,
+            data: proposal.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn vote_cast(env: &Env, proposal_id: u64, voter: &Address, support: bool) {
+        VoteCast {
+            proposal_id,
+            voter: voter.clone(),
+            support,
+        }
+        .publish(env);
+    }
+
+    pub fn executed(env: &Env, proposal: &Proposal) {
+        Executed {
+            proposal_id: proposal.proposal_id,
+            data: proposal.clone(),
+        }
+        .publish(env);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::testutils::Ledger as _;
+    use soroban_forge_test_utils::{MockTarget, MockTargetClient, RevertingTarget, TestAccounts};
+    use soroban_sdk::testutils::{Events as _, Ledger as _};
     use soroban_sdk::{Bytes, Env};
 
     const START: u64 = 1_000_000;
     const DURATION: u64 = 86_400;
 
-    /// Build a fresh env with mocked auths, a registered contract, a pending
-    /// proposal, and named accounts.
+    /// Build a fresh env with mocked auths, a registered contract, a registered
+    /// mock target, a pending proposal, and named accounts.
     macro_rules! setup {
         () => {{
             let env = Env::default();
@@ -309,8 +424,10 @@ mod tests {
             let contract_id = env.register(DaoGovernance, ());
             let client = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
             let accounts = TestAccounts::generate(&env);
-            let proposal_id = client.propose(&accounts.user1, &payload(&env), &DURATION);
-            (env, client, accounts, proposal_id)
+            let target_id = env.register(MockTarget, ());
+            let proposal_id =
+                client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+            (env, client, accounts, proposal_id, target_id)
         }};
     }
 
@@ -318,11 +435,26 @@ mod tests {
         Bytes::from_array(env, &[0xC0, 0xDE, 0x00, 0xFF])
     }
 
+    #[contract]
+    pub struct AuthCheckingTarget;
+
+    #[contractimpl]
+    impl AuthCheckingTarget {
+        pub fn execute(env: Env, _payload: Bytes) {
+            // A target's own authorization requirement is not implicitly
+            // satisfied by the DAO's cross-contract invocation.
+            let caller = env.current_contract_address();
+            caller.require_auth();
+        }
+    }
+
     #[test]
     fn propose_succeeds_and_is_active() {
-        let (_env, client, accounts, proposal_id) = setup!();
+        let (env, client, accounts, proposal_id, target_id) = setup!();
         let proposal = client.get_proposal(&proposal_id);
         assert_eq!(proposal.proposer, accounts.user1);
+        assert_eq!(proposal.target, target_id);
+        assert_eq!(proposal.action, payload(&env));
         assert_eq!(proposal.state, ProposalState::Active);
         assert_eq!(proposal.for_votes, 0);
         assert_eq!(proposal.against_votes, 0);
@@ -330,17 +462,17 @@ mod tests {
 
     #[test]
     fn propose_assigns_distinct_ids() {
-        let (env, client, accounts, _id) = setup!();
-        let id2 = client.propose(&accounts.user2, &payload(&env), &DURATION);
-        let id3 = client.propose(&accounts.user3, &payload(&env), &DURATION);
+        let (env, client, accounts, _id, target_id) = setup!();
+        let id2 = client.propose(&accounts.user2, &target_id, &payload(&env), &DURATION);
+        let id3 = client.propose(&accounts.user3, &target_id, &payload(&env), &DURATION);
         assert_ne!(id2, id3);
     }
 
     #[test]
     fn propose_rejects_zero_duration() {
-        let (env, client, accounts, _id) = setup!();
+        let (env, client, accounts, _id, target_id) = setup!();
         let err = client
-            .try_propose(&accounts.user1, &payload(&env), &0_u64)
+            .try_propose(&accounts.user1, &target_id, &payload(&env), &0_u64)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
@@ -348,7 +480,7 @@ mod tests {
 
     #[test]
     fn vote_records_support() {
-        let (_env, client, accounts, proposal_id) = setup!();
+        let (_env, client, accounts, proposal_id, _target_id) = setup!();
         client.vote(&proposal_id, &accounts.user2, &true);
         let proposal = client.get_proposal(&proposal_id);
         assert_eq!(proposal.for_votes, 1);
@@ -357,7 +489,7 @@ mod tests {
 
     #[test]
     fn vote_records_against() {
-        let (_env, client, accounts, proposal_id) = setup!();
+        let (_env, client, accounts, proposal_id, _target_id) = setup!();
         client.vote(&proposal_id, &accounts.user2, &false);
         let proposal = client.get_proposal(&proposal_id);
         assert_eq!(proposal.for_votes, 0);
@@ -366,7 +498,7 @@ mod tests {
 
     #[test]
     fn vote_twice_is_invalid() {
-        let (_env, client, accounts, proposal_id) = setup!();
+        let (_env, client, accounts, proposal_id, _target_id) = setup!();
         client.vote(&proposal_id, &accounts.user2, &true);
         let err = client
             .try_vote(&proposal_id, &accounts.user2, &true)
@@ -377,7 +509,7 @@ mod tests {
 
     #[test]
     fn vote_after_deadline_is_rejected() {
-        let (env, client, accounts, proposal_id) = setup!();
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
         env.ledger().set_timestamp(START + DURATION);
         let err = client
             .try_vote(&proposal_id, &accounts.user2, &true)
@@ -388,7 +520,7 @@ mod tests {
 
     #[test]
     fn vote_missing_proposal_is_not_found() {
-        let (_env, client, accounts, _id) = setup!();
+        let (_env, client, accounts, _id, _target_id) = setup!();
         let err = client
             .try_vote(&999, &accounts.user2, &true)
             .unwrap_err()
@@ -398,14 +530,14 @@ mod tests {
 
     #[test]
     fn execute_before_deadline_is_invalid() {
-        let (_env, client, _accounts, proposal_id) = setup!();
+        let (_env, client, _accounts, proposal_id, _target_id) = setup!();
         let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
     }
 
     #[test]
     fn execute_after_deadline_passes_majority() {
-        let (env, client, accounts, proposal_id) = setup!();
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&proposal_id);
@@ -417,7 +549,7 @@ mod tests {
 
     #[test]
     fn execute_after_deadline_defeats_minority() {
-        let (env, client, accounts, proposal_id) = setup!();
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
         client.vote(&proposal_id, &accounts.user2, &false);
         client.vote(&proposal_id, &accounts.user3, &true);
         client.vote(&proposal_id, &accounts.validator, &false);
@@ -431,7 +563,7 @@ mod tests {
 
     #[test]
     fn execute_tie_is_defeated() {
-        let (env, client, accounts, proposal_id) = setup!();
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
         client.vote(&proposal_id, &accounts.user2, &true);
         client.vote(&proposal_id, &accounts.user3, &false);
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -444,7 +576,7 @@ mod tests {
 
     #[test]
     fn execute_no_votes_is_defeated() {
-        let (env, client, _accounts, proposal_id) = setup!();
+        let (env, client, _accounts, proposal_id, _target_id) = setup!();
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&proposal_id);
         assert_eq!(
@@ -455,31 +587,32 @@ mod tests {
 
     #[test]
     fn execute_twice_is_invalid() {
-        let (env, client, accounts, proposal_id) = setup!();
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
-        client.execute(&proposal_id);
-        let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        client.execute(&proposal_id); // Active -> Succeeded
+        client.execute(&proposal_id); // Succeeded -> Executed
+        let err = client.try_execute(&proposal_id).unwrap_err().unwrap(); // Executed -> rejected
         assert_eq!(err, ForgeError::InvalidInput);
     }
 
     #[test]
     fn execute_missing_proposal_is_not_found() {
-        let (_env, client, _accounts, _id) = setup!();
+        let (_env, client, _accounts, _id, _target_id) = setup!();
         let err = client.try_execute(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 
     #[test]
     fn get_proposal_missing_is_not_found() {
-        let (_env, client, _accounts, _id) = setup!();
+        let (_env, client, _accounts, _id, _target_id) = setup!();
         let err = client.try_get_proposal(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 
     #[test]
     fn cancel_active_proposal_succeeds() {
-        let (_env, client, accounts, proposal_id) = setup!();
+        let (_env, client, accounts, proposal_id, _target_id) = setup!();
         client.cancel_proposal(&proposal_id, &accounts.user1);
         assert_eq!(
             client.get_proposal(&proposal_id).state,
@@ -489,8 +622,8 @@ mod tests {
 
     #[test]
     fn cancel_immediately_after_propose_succeeds() {
-        let (env, client, accounts, _id) = setup!();
-        let fresh_id = client.propose(&accounts.user3, &payload(&env), &DURATION);
+        let (env, client, accounts, _id, target_id) = setup!();
+        let fresh_id = client.propose(&accounts.user3, &target_id, &payload(&env), &DURATION);
         client.cancel_proposal(&fresh_id, &accounts.user3);
         assert_eq!(
             client.get_proposal(&fresh_id).state,
@@ -500,7 +633,7 @@ mod tests {
 
     #[test]
     fn cancel_after_quorum_before_execute_succeeds() {
-        let (env, client, accounts, proposal_id) = setup!();
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
         client.vote(&proposal_id, &accounts.user2, &true);
         client.vote(&proposal_id, &accounts.user3, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -514,7 +647,7 @@ mod tests {
 
     #[test]
     fn cancel_by_non_proposer_is_unauthorized() {
-        let (_env, client, accounts, proposal_id) = setup!();
+        let (_env, client, accounts, proposal_id, _target_id) = setup!();
         let err = client
             .try_cancel_proposal(&proposal_id, &accounts.user2)
             .unwrap_err()
@@ -524,7 +657,7 @@ mod tests {
 
     #[test]
     fn cancel_missing_proposal_is_not_found() {
-        let (_env, client, accounts, _id) = setup!();
+        let (_env, client, accounts, _id, _target_id) = setup!();
         let err = client
             .try_cancel_proposal(&999, &accounts.user1)
             .unwrap_err()
@@ -534,7 +667,7 @@ mod tests {
 
     #[test]
     fn double_cancel_is_invalid() {
-        let (_env, client, accounts, proposal_id) = setup!();
+        let (_env, client, accounts, proposal_id, _target_id) = setup!();
         client.cancel_proposal(&proposal_id, &accounts.user1);
         let err = client
             .try_cancel_proposal(&proposal_id, &accounts.user1)
@@ -545,7 +678,7 @@ mod tests {
 
     #[test]
     fn cancel_then_vote_is_invalid() {
-        let (_env, client, accounts, proposal_id) = setup!();
+        let (_env, client, accounts, proposal_id, _target_id) = setup!();
         client.cancel_proposal(&proposal_id, &accounts.user1);
         let err = client
             .try_vote(&proposal_id, &accounts.user2, &true)
@@ -556,7 +689,7 @@ mod tests {
 
     #[test]
     fn cancel_then_execute_is_invalid() {
-        let (_env, client, accounts, proposal_id) = setup!();
+        let (_env, client, accounts, proposal_id, _target_id) = setup!();
         client.cancel_proposal(&proposal_id, &accounts.user1);
         let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
@@ -564,7 +697,7 @@ mod tests {
 
     #[test]
     fn cancel_after_execute_is_invalid() {
-        let (env, client, accounts, proposal_id) = setup!();
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&proposal_id);
         let err = client
@@ -572,5 +705,165 @@ mod tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    // -------------------------------------------------------------------
+    // Cross-Contract Invocation & State Verification (Issue 58)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn execute_dispatches_to_mock_target_and_changes_state_once() {
+        let (env, client, accounts, proposal_id, target_id) = setup!();
+        let mock_target = MockTargetClient::new(&env, &target_id);
+        assert_eq!(mock_target.count(), 0);
+        assert_eq!(mock_target.last_payload(), None);
+
+        // Pass proposal with strict majority:
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+
+        // First execute: finalises Active -> Succeeded (target invocation not yet run)
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Succeeded
+        );
+        assert_eq!(mock_target.count(), 0);
+
+        // Second execute: performs cross-contract call, transitions Succeeded -> Executed
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Executed
+        );
+        assert_eq!(mock_target.count(), 1);
+        assert_eq!(mock_target.last_payload(), Some(payload(&env)));
+
+        // Third execute on Executed proposal: rejected, target state remains 1
+        let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(mock_target.count(), 1);
+    }
+
+    #[test]
+    fn execute_reverting_target_leaves_proposal_succeeded_and_target_unchanged() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(START);
+        let contract_id = env.register(DaoGovernance, ());
+        let client = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        let reverting_target_id = env.register(RevertingTarget, ());
+
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &reverting_target_id,
+            &payload(&env),
+            &DURATION,
+        );
+
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+
+        // Finalise Active -> Succeeded
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Succeeded
+        );
+
+        // Execution attempt against reverting target fails with ContractInvocationFailed
+        let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::ContractInvocationFailed);
+
+        // Failure ordering guarantee: proposal remains Succeeded (NOT Executed)
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Succeeded
+        );
+    }
+
+    #[test]
+    fn defeated_and_still_active_proposals_cannot_be_executed() {
+        let (env, client, accounts, proposal_id, target_id) = setup!();
+        let mock_target = MockTargetClient::new(&env, &target_id);
+
+        // 1. Still-Active proposal before deadline cannot be executed
+        let err_active = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err_active, ForgeError::InvalidInput);
+        assert_eq!(mock_target.count(), 0);
+
+        // 2. Defeated proposal cannot be executed
+        client.vote(&proposal_id, &accounts.user2, &false);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id); // Transitions Active -> Defeated
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Defeated
+        );
+
+        let err_defeated = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err_defeated, ForgeError::InvalidInput);
+        assert_eq!(mock_target.count(), 0);
+    }
+
+    #[test]
+    fn target_auth_requirement_is_not_satisfied_implicitly() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(START);
+        let contract_id = env.register(DaoGovernance, ());
+        let client = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        let auth_target_id = env.register(AuthCheckingTarget, ());
+
+        let proposal_id =
+            client.propose(&accounts.user1, &auth_target_id, &payload(&env), &DURATION);
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+
+        client.execute(&proposal_id); // Succeeded
+        let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::ContractInvocationFailed);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Succeeded
+        );
+    }
+
+    #[test]
+    fn execute_is_permissionless_callable_by_unrelated_account() {
+        let (env, client, accounts, proposal_id, target_id) = setup!();
+        let mock_target = MockTargetClient::new(&env, &target_id);
+
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+
+        // An account that did not propose or vote triggers finalisation and execution
+        client.execute(&proposal_id); // user3 or any caller
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Executed
+        );
+        assert_eq!(mock_target.count(), 1);
+    }
+
+    #[test]
+    fn events_emitted_during_proposal_lifecycle() {
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
+        assert_eq!(env.events().all().events().len(), 1); // ProposalCreated
+
+        client.vote(&proposal_id, &accounts.user2, &true);
+        assert_eq!(env.events().all().events().len(), 1); // VoteCast
+
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+        assert_eq!(env.events().all().events().len(), 0); // finalisation only
+
+        client.execute(&proposal_id);
+        assert_eq!(env.events().all().events().len(), 1); // Executed
+
+        // Each successful contract invocation exposes its emitted events.
     }
 }
