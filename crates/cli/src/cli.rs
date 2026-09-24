@@ -32,3 +32,12 @@ pub struct DeployArgs {
     #[arg(short, long)]
     pub source: Option<String>,
 }
+
+#[derive(Args, Debug, Clone)]
+pub struct NewArgs {
+    /// Contract name (alphanumeric, hyphens, or underscores).
+    pub name: String,
+    /// Destination directory path for the new contract.
+    #[arg(short, long)]
+    pub path: Option<std::path::PathBuf>,
+}
