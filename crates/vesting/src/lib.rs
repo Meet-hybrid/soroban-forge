@@ -26,26 +26,27 @@
 //! - `claimable` and `get_status` are read-only views.
 //! - `touch_ttl` is permissionless (keeper entrypoint).
 //!
+//! ## Settlement (load-bearing)
+//!
+//! The contract custodies the configured SEP-41 token and `claim` settles
+//! through it: the newly claimable amount is transferred from this contract
+//! to the beneficiary, and the schedule is written only after that transfer
+//! succeeds. The transfer-before-state ordering mirrors
+//! `crates/escrow/src/lib.rs` — a failed transfer (empty contract balance,
+//! undeployed token) returns [`ForgeError::TokenTransferFailed`] with
+//! `claimed` and `status` untouched. A zero-claim call exits before the
+//! transfer, so no empty transfers are ever issued. Soroban's frame rollback
+//! is the outer atomicity guarantee: any `Err` returned from `claim` reverts
+//! the whole invocation, including sub-invocations.
+//!
 //! The `Revoked` status is reserved for a revocation method that lands in a
-//! follow-up; it is not reachable through the current public interface. Token
-//! settlement (SAC transfers) is intentionally out of scope for this
-//! iteration: the contract tracks state and authorization, not balances.
-//!
-//! ## Storage and TTL
-//!
-//! Each schedule is its own **persistent** entry (`DataKey::Schedule(id)`)
-//! so the byte budget scales per record and a schedule's lifetime does not
-//! depend on the contract instance's. The only instance entry is the id
-//! counter. Every write bumps the entry's TTL with the standard
-//! threshold/extend-to pattern (same constants as escrow), and `touch_ttl`
-//! is a permissionless keeper entrypoint for schedules that sit idle near
-//! expiry. Read-only views never extend a TTL.
+//! follow-up; it is not reachable through the current public interface.
 
 #[cfg(test)]
 extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, Env};
 
 /// Ledger-time constants for TTL bumps.
 ///
@@ -85,8 +86,16 @@ pub trait SorobanForgeVesting {
 
     /// Claim tokens that have vested as of the current ledger time.
     ///
-    /// Requires the beneficiary. Returns the exact vested-but-unclaimed
-    /// amount, or `0` when there is nothing to claim.
+    /// Requires the beneficiary. Transfers the exact vested-but-unclaimed
+    /// amount from this contract to the beneficiary, then records the claim;
+    /// returns `0` without issuing a transfer when nothing is claimable.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no schedule with this id.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the payout (insufficient contract balance, undeployed token).
+    /// * [`ForgeError::ArithmeticOverflow`] — the claimed total overflowed.
     fn claim(env: Env, schedule_id: u64) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 
     /// Return the amount currently claimable by `schedule_id` (read-only).
@@ -215,6 +224,9 @@ impl Vesting {
     /// Requires the beneficiary. Returns exactly what vested since the last
     /// claim (or `0` when nothing is claimable), so repeated claims can never
     /// overpay or underpay.
+    ///
+    /// Ordering: the SEP-41 transfer runs **before** the schedule write —
+    /// see the module docs. A zero-claim call returns before either.
     pub fn claim(env: Env, schedule_id: u64) -> Result<i128, ForgeError> {
         let mut schedule = Self::get_schedule(&env, schedule_id)?;
         // NOTE: when a revocation method lands, `claim` must be gated on
@@ -226,6 +238,10 @@ impl Vesting {
         if amount == 0 {
             return Ok(0);
         }
+
+        // Pay the beneficiary before recording anything: a failed transfer
+        // returns TokenTransferFailed with `claimed`/`status` untouched.
+        transfer_from_contract(&env, &schedule.token, &schedule.beneficiary, amount)?;
 
         schedule.claimed = schedule
             .claimed
@@ -344,20 +360,38 @@ impl Vesting {
     }
 }
 
-/// Bump a persistent entry's TTL to the [`ttl::BUMP_AMOUNT`] horizon when
-/// it falls inside [`ttl::BUMP_THRESHOLD`]. The standard threshold/extend
-/// pattern: cheap no-op while the entry is fresh, decisive near expiry.
-fn bump_entry(env: &Env, key: &DataKey) {
-    env.storage()
-        .persistent()
-        .extend_ttl(key, ttl::BUMP_THRESHOLD, ttl::BUMP_AMOUNT);
+/// Move `amount` of `token` from this contract to `to`.
+///
+/// Token failures are bucketed into [`ForgeError::TokenTransferFailed`]
+/// rather than forwarded — the same policy as escrow: a client receiving
+/// `Error(Contract, #N)` cannot know whether `N` came from the token or this
+/// contract, and the root cause remains visible in the transaction's
+/// diagnostic events.
+fn transfer_from_contract(
+    env: &Env,
+    token: &Address,
+    to: &Address,
+    amount: i128,
+) -> Result<(), ForgeError> {
+    match token::TokenClient::new(env, token).try_transfer(
+        &env.current_contract_address(),
+        to,
+        &amount,
+    ) {
+        Ok(Ok(())) => Ok(()),
+        // Token returned a typed error (insufficient balance, custom token
+        // logic) or the host aborted (most commonly an undeployed token
+        // address). The raw discriminant is intentionally discarded.
+        _ => Err(ForgeError::TokenTransferFailed),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::testutils::Ledger as _;
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::Env;
 
     const START: u64 = 1_000_000;
@@ -373,10 +407,20 @@ mod tests {
             let env = Env::default();
             env.mock_all_auths();
             env.ledger().set_timestamp(START);
+
+            // Real Stellar Asset Contract — the same fixture escrow uses.
+            let admin = Address::generate(&env);
+            let sac = env.register_stellar_asset_contract_v2(admin);
+            let token = sac.address();
+            let token_admin = StellarAssetClient::new(&env, &token);
+            let token_client = TokenClient::new(&env, &token);
             let contract_id = env.register(Vesting, ());
             let client = SorobanForgeVestingClient::new(&env, &contract_id);
             let accounts = TestAccounts::generate(&env);
-            (env, client, accounts)
+            // Fund the schedule contract up front with the full allocation,
+            // the way a deployment is topped up before schedules run.
+            token_admin.mint(&contract_id, &TOTAL);
+            (env, token, token_client, contract_id, client, accounts)
         }};
     }
 
@@ -385,35 +429,33 @@ mod tests {
     // the host raises a non-unwinding panic that aborts the test binary. They
     // are tracked in the security-invariant test backlog (Issue 7).
 
-    fn create(client: &SorobanForgeVestingClient<'_>, accounts: &TestAccounts) -> u64 {
-        client.create_schedule(
-            &accounts.user1,
-            &accounts.validator,
-            &TOTAL,
-            &CLIFF,
-            &DURATION,
-        )
+    fn create(
+        client: &SorobanForgeVestingClient<'_>,
+        token: &Address,
+        accounts: &TestAccounts,
+    ) -> u64 {
+        client.create_schedule(&accounts.user1, token, &TOTAL, &CLIFF, &DURATION)
     }
 
     #[test]
     fn create_schedule_succeeds_and_is_locked() {
-        let (_env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
+        let (_env, token, _tc, _cid, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
         assert_eq!(client.get_status(&id), VestingStatus::Locked);
         assert_eq!(client.claimable(&id), 0);
     }
 
     #[test]
     fn create_schedule_assigns_distinct_ids() {
-        let (_env, client, accounts) = setup!();
-        let id1 = create(&client, &accounts);
-        let id2 = create(&client, &accounts);
+        let (_env, token, _tc, _cid, client, accounts) = setup!();
+        let id1 = create(&client, &token, &accounts);
+        let id2 = create(&client, &token, &accounts);
         assert_ne!(id1, id2);
     }
 
     #[test]
     fn create_schedule_without_cliff_starts_vesting() {
-        let (_env, client, accounts) = setup!();
+        let (_env, _token, _tc, _cid, client, accounts) = setup!();
         let id = client.create_schedule(
             &accounts.user1,
             &accounts.validator,
@@ -426,7 +468,7 @@ mod tests {
 
     #[test]
     fn create_schedule_rejects_zero_total() {
-        let (_env, client, accounts) = setup!();
+        let (_env, _token, _tc, _cid, client, accounts) = setup!();
         let err = client
             .try_create_schedule(
                 &accounts.user1,
@@ -442,7 +484,7 @@ mod tests {
 
     #[test]
     fn create_schedule_rejects_zero_duration() {
-        let (_env, client, accounts) = setup!();
+        let (_env, _token, _tc, _cid, client, accounts) = setup!();
         let err = client
             .try_create_schedule(&accounts.user1, &accounts.validator, &TOTAL, &CLIFF, &0_u64)
             .unwrap_err()
@@ -452,7 +494,7 @@ mod tests {
 
     #[test]
     fn create_schedule_rejects_cliff_after_duration() {
-        let (_env, client, accounts) = setup!();
+        let (_env, _token, _tc, _cid, client, accounts) = setup!();
         let err = client
             .try_create_schedule(
                 &accounts.user1,
@@ -468,8 +510,8 @@ mod tests {
 
     #[test]
     fn claimable_before_cliff_is_zero() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
+        let (env, token, _tc, _cid, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
         // Halfway between start and the cliff.
         env.ledger().set_timestamp(START + CLIFF / 2);
         assert_eq!(client.claimable(&id), 0);
@@ -477,24 +519,24 @@ mod tests {
 
     #[test]
     fn claimable_at_cliff_is_zero() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
+        let (env, token, _tc, _cid, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
         env.ledger().set_timestamp(START + CLIFF);
         assert_eq!(client.claimable(&id), 0);
     }
 
     #[test]
     fn claim_before_cliff_returns_zero() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
+        let (env, token, _tc, _cid, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
         env.ledger().set_timestamp(START + CLIFF / 2);
         assert_eq!(client.claim(&id), 0);
     }
 
     #[test]
     fn claimable_midway_is_half() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
+        let (env, token, _tc, _cid, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
         // Halfway through the vesting window (cliff .. duration).
         env.ledger()
             .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
@@ -503,24 +545,24 @@ mod tests {
 
     #[test]
     fn claimable_at_duration_is_full() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
+        let (env, token, _tc, _cid, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
         env.ledger().set_timestamp(START + DURATION);
         assert_eq!(client.claimable(&id), TOTAL);
     }
 
     #[test]
     fn claimable_after_duration_is_full() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
+        let (env, token, _tc, _cid, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
         env.ledger().set_timestamp(START + DURATION + 1);
         assert_eq!(client.claimable(&id), TOTAL);
     }
 
     #[test]
     fn claim_pays_exact_amount() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
+        let (env, token, _tc, _cid, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
         env.ledger()
             .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
         assert_eq!(client.claim(&id), TOTAL / 2);
@@ -528,8 +570,8 @@ mod tests {
 
     #[test]
     fn repeated_claims_never_overpay_or_underpay() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
+        let (env, token, _tc, _cid, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
 
         // Claim half at the midway point.
         env.ledger()
@@ -549,8 +591,8 @@ mod tests {
 
     #[test]
     fn claim_after_end_completes_status() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
+        let (env, token, _tc, _cid, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
         env.ledger().set_timestamp(START + DURATION + 1);
         assert_eq!(client.get_status(&id), VestingStatus::Vesting);
         assert_eq!(client.claim(&id), TOTAL);
@@ -559,7 +601,7 @@ mod tests {
 
     #[test]
     fn claim_without_cliff_vests_from_start() {
-        let (env, client, accounts) = setup!();
+        let (env, _token, _tc, _cid, client, accounts) = setup!();
         let id = client.create_schedule(
             &accounts.user1,
             &accounts.validator,
@@ -573,7 +615,7 @@ mod tests {
 
     #[test]
     fn cliff_equals_duration_vests_at_once() {
-        let (env, client, accounts) = setup!();
+        let (env, _token, _tc, _cid, client, accounts) = setup!();
         let id = client.create_schedule(
             &accounts.user1,
             &accounts.validator,
@@ -589,28 +631,28 @@ mod tests {
 
     #[test]
     fn claim_missing_schedule_is_not_found() {
-        let (_env, client, _accounts) = setup!();
+        let (_env, _token, _tc, _cid, client, _accounts) = setup!();
         let err = client.try_claim(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 
     #[test]
     fn claimable_missing_schedule_is_not_found() {
-        let (_env, client, _accounts) = setup!();
+        let (_env, _token, _tc, _cid, client, _accounts) = setup!();
         let err = client.try_claimable(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 
     #[test]
     fn get_status_missing_schedule_is_not_found() {
-        let (_env, client, _accounts) = setup!();
+        let (_env, _token, _tc, _cid, client, _accounts) = setup!();
         let err = client.try_get_status(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 
     #[test]
     fn claimable_overflow_is_reported() {
-        let (env, client, accounts) = setup!();
+        let (env, _token, _tc, _cid, client, accounts) = setup!();
         // A huge total with a non-trivial elapsed time overflows the
         // intermediate `total * elapsed` product.
         let id = client.create_schedule(
@@ -626,259 +668,126 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Persistent storage and TTL
+    // Settlement: claim pays real SEP-41 tokens
     // -------------------------------------------------------------------
 
-    use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
+    #[test]
+    fn claim_transfers_vested_tokens_to_beneficiary() {
+        let (env, token, tc, contract_id, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
 
-    /// Remaining TTL (in ledgers) of the schedule's persistent entry.
-    fn schedule_ttl(env: &Env, client: &SorobanForgeVestingClient<'_>, id: u64) -> u32 {
-        env.as_contract(&client.address, || {
-            env.storage().persistent().get_ttl(&DataKey::Schedule(id))
-        })
-    }
+        // Halfway through the vesting window: 5_000 claimable.
+        env.ledger()
+            .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
+        assert_eq!(client.claim(&id), TOTAL / 2);
 
-    /// Remaining TTL (in ledgers) of the contract instance entry.
-    fn instance_ttl(env: &Env, client: &SorobanForgeVestingClient<'_>) -> u32 {
-        env.as_contract(&client.address, || env.storage().instance().get_ttl())
-    }
-
-    /// Read the raw stored record, bypassing the contract entrypoints.
-    fn stored_schedule(
-        env: &Env,
-        client: &SorobanForgeVestingClient<'_>,
-        id: u64,
-    ) -> Option<VestingSchedule> {
-        env.as_contract(&client.address, || {
-            env.storage().persistent().get(&DataKey::Schedule(id))
-        })
-    }
-
-    // How TTL is observed here: in test mode the SDK 27 host
-    // (soroban-env-host 27.0.1, `Storage::handle_maybe_expired_entry`, run
-    // from `prepare_read_only_access`) auto-restores an expired persistent
-    // entry on *any* access -- including `get_ttl` itself -- resetting its
-    // TTL to the network minimum. So "is it still readable" alone cannot tell
-    // a live entry from a restored one. Instead:
-    // - a restored entry reports exactly `restored_ttl()`;
-    // - a remaining TTL exactly equal to the untouched decay proves the entry
-    //   stayed live and was never expired-and-restored.
-    // The contract instance is also auto-restored when a client call hits it
-    // after its TTL; that is orthogonal to the per-schedule TTL measured here.
-
-    /// The TTL the test host reports for an entry it just auto-restored.
-    fn restored_ttl(env: &Env) -> u32 {
-        env.ledger().get().min_persistent_entry_ttl - 1
-    }
-
-    /// Advance the ledger sequence by `ledgers`.
-    fn advance(env: &Env, ledgers: u32) {
-        let seq = env.ledger().sequence();
-        env.ledger().set_sequence_number(seq + ledgers);
-    }
-
-    /// Field-by-field equality (`VestingSchedule` intentionally does not
-    /// derive `PartialEq`; adding it would widen the public type's API).
-    fn assert_same_schedule(a: &VestingSchedule, b: &VestingSchedule) {
-        assert_eq!(a.beneficiary, b.beneficiary);
-        assert_eq!(a.token, b.token);
-        assert_eq!(a.total_amount, b.total_amount);
-        assert_eq!(a.start, b.start);
-        assert_eq!(a.cliff, b.cliff);
-        assert_eq!(a.duration, b.duration);
-        assert_eq!(a.claimed, b.claimed);
-        assert_eq!(a.status, b.status);
+        // Tokens actually moved, and the schedule recorded the claim.
+        assert_eq!(tc.balance(&accounts.user1), TOTAL / 2);
+        assert_eq!(tc.balance(&contract_id), TOTAL - TOTAL / 2);
+        assert_eq!(client.claimable(&id), 0);
+        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     }
 
     #[test]
-    fn create_writes_persistent_entry_with_full_ttl() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
+    fn final_claim_settles_remainder_and_completes() {
+        let (env, token, tc, contract_id, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
 
-        env.as_contract(&client.address, || {
-            assert!(env.storage().persistent().has(&DataKey::Schedule(id)));
-            // Nothing schedule-shaped is left in instance storage; only the
-            // id counter lives there.
-            assert!(!env.storage().instance().has(&DataKey::Schedule(id)));
-            assert_eq!(
-                env.storage().instance().get::<_, u64>(&DataKey::Count),
-                Some(id)
-            );
-        });
-        assert_eq!(schedule_ttl(&env, &client, id), ttl::BUMP_AMOUNT);
+        env.ledger()
+            .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
+        assert_eq!(client.claim(&id), TOTAL / 2);
+
+        env.ledger().set_timestamp(START + DURATION + 100);
+        assert_eq!(client.claim(&id), TOTAL - TOTAL / 2);
+
+        // Full allocation paid out; contract drained; schedule completed.
+        assert_eq!(tc.balance(&accounts.user1), TOTAL);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(client.get_status(&id), VestingStatus::Completed);
+        assert_eq!(client.claimable(&id), 0);
+
+        // A repeated claim after completion is a silent no-op: no transfer.
+        assert_eq!(client.claim(&id), 0);
+        assert_eq!(tc.balance(&accounts.user1), TOTAL);
+        assert_eq!(tc.balance(&contract_id), 0);
     }
 
     #[test]
-    fn schedule_survives_past_instance_ttl_boundary() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
-        let before = stored_schedule(&env, &client, id).unwrap();
+    fn repeated_claims_settle_token_balances_each_time() {
+        let (env, token, tc, contract_id, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
 
-        // Under the old layout the schedule lived inside the instance entry
-        // and shared its TTL. Jump one ledger past the instance's expiry
-        // (see `instance_entry_is_expired_at_that_boundary`).
-        let instance_left = instance_ttl(&env, &client);
-        assert!(instance_left < ttl::BUMP_AMOUNT);
-        advance(&env, instance_left + 1);
+        // Three separate claims across the window; each moves exactly the
+        // newly claimable amount and nothing more.
+        env.ledger().set_timestamp(START + CLIFF + 1_000);
+        assert_eq!(client.claim(&id), 3_333);
+        assert_eq!(tc.balance(&accounts.user1), 3_333);
 
-        // The schedule entry has decayed by exactly the jump, so it stayed
-        // live on its own TTL and was never restored.
-        let remaining = ttl::BUMP_AMOUNT - (instance_left + 1);
-        assert_ne!(remaining, restored_ttl(&env));
-        assert_eq!(schedule_ttl(&env, &client, id), remaining);
-        let after = stored_schedule(&env, &client, id).unwrap();
-        assert_same_schedule(&before, &after);
+        env.ledger().set_timestamp(START + CLIFF + 2_000);
+        assert_eq!(client.claim(&id), 3_333);
+        assert_eq!(tc.balance(&accounts.user1), 6_666);
 
-        // End to end through the public interface.
-        env.ledger().set_timestamp(START + DURATION);
-        assert_eq!(client.claimable(&id), TOTAL);
-        assert_eq!(client.claim(&id), TOTAL);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        assert_eq!(client.claim(&id), 3_334);
+        assert_eq!(tc.balance(&accounts.user1), TOTAL);
+        assert_eq!(tc.balance(&contract_id), 0);
         assert_eq!(client.get_status(&id), VestingStatus::Completed);
     }
 
-    /// Negative control for `schedule_survives_past_instance_ttl_boundary`:
-    /// at the ledger it jumps to, the instance entry (where schedules used to
-    /// live) really has expired -- the host had to restore it.
     #[test]
-    fn instance_entry_is_expired_at_that_boundary() {
-        let (env, client, accounts) = setup!();
-        create(&client, &accounts);
-        let instance_left = instance_ttl(&env, &client);
-        advance(&env, instance_left + 1);
-        // Advancing `instance_left + 1` ledgers leaves no live TTL, yet the
-        // read reports a fresh minimum TTL: the entry was auto-restored.
-        assert_eq!(instance_ttl(&env, &client), restored_ttl(&env));
-    }
+    fn failed_transfer_leaves_claim_unchanged() {
+        let (env, token, tc, contract_id, client, accounts) = setup!();
+        // Schedule promises double what the contract actually holds.
+        let id = client.create_schedule(&accounts.user1, &token, &(TOTAL * 2), &0_u64, &DURATION);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        assert_eq!(client.claimable(&id), TOTAL * 2);
 
-    /// Negative control for the TTL assertions: an untouched schedule entry
-    /// really does expire at its own TTL (and is then auto-restored with the
-    /// minimum TTL, not the decayed one).
-    #[test]
-    fn untouched_schedule_expires_at_its_own_ttl() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
-        advance(&env, ttl::BUMP_AMOUNT + 1);
-        assert_eq!(schedule_ttl(&env, &client, id), restored_ttl(&env));
+        let err = client.try_claim(&id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::TokenTransferFailed);
+
+        // Nothing moved, nothing recorded: balances and schedule unchanged.
+        assert_eq!(tc.balance(&accounts.user1), 0);
+        assert_eq!(tc.balance(&contract_id), TOTAL);
+        assert_eq!(client.claimable(&id), TOTAL * 2);
+        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     }
 
     #[test]
-    fn read_only_views_do_not_extend_ttl() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
-        advance(&env, 2 * ttl::DAY_IN_LEDGERS);
-        let ttl_before = schedule_ttl(&env, &client, id);
-        assert!(ttl_before < ttl::BUMP_THRESHOLD);
+    fn zero_claim_issues_no_token_transfer() {
+        let (env, token, tc, contract_id, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
 
-        client.claimable(&id);
-        client.get_status(&id);
+        // Before the cliff: returns 0, moves nothing.
+        env.ledger().set_timestamp(START + CLIFF / 2);
+        assert_eq!(client.claim(&id), 0);
+        assert_eq!(tc.balance(&accounts.user1), 0);
+        assert_eq!(tc.balance(&contract_id), TOTAL);
 
-        assert_eq!(schedule_ttl(&env, &client, id), ttl_before);
-    }
-
-    #[test]
-    fn claim_extends_ttl() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
-        advance(&env, 2 * ttl::DAY_IN_LEDGERS);
-        assert!(schedule_ttl(&env, &client, id) < ttl::BUMP_THRESHOLD);
-
-        env.ledger().set_timestamp(START + DURATION);
-        assert_eq!(client.claim(&id), TOTAL);
-
-        assert_eq!(schedule_ttl(&env, &client, id), ttl::BUMP_AMOUNT);
-    }
-
-    #[test]
-    fn touch_ttl_extends_without_changing_state() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
-
-        // Mid-vesting with a partial claim, so `claimed` and `status` are
-        // non-default and any accidental rewrite would show.
-        env.ledger()
-            .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 4);
-        client.claim(&id);
+        // A second immediate claim right after a payout is also a no-op.
         env.ledger()
             .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
-
-        advance(&env, 2 * ttl::DAY_IN_LEDGERS);
-        let ttl_before = schedule_ttl(&env, &client, id);
-        assert!(ttl_before < ttl::BUMP_THRESHOLD);
-
-        let schedule_before = stored_schedule(&env, &client, id).unwrap();
-        let claimable_before = client.claimable(&id);
-        let status_before = client.get_status(&id);
-        assert!(claimable_before > 0);
-
-        client.touch_ttl(&id);
-        // Permissionless: no authorization was demanded.
-        assert!(env.auths().is_empty());
-
-        assert_eq!(schedule_ttl(&env, &client, id), ttl::BUMP_AMOUNT);
-        let schedule_after = stored_schedule(&env, &client, id).unwrap();
-        assert_same_schedule(&schedule_before, &schedule_after);
-        assert_eq!(client.claimable(&id), claimable_before);
-        assert_eq!(client.get_status(&id), status_before);
+        assert_eq!(client.claim(&id), TOTAL / 2);
+        assert_eq!(client.claim(&id), 0);
+        assert_eq!(tc.balance(&accounts.user1), TOTAL / 2);
+        assert_eq!(tc.balance(&contract_id), TOTAL - TOTAL / 2);
     }
 
     #[test]
-    fn touch_ttl_keeps_schedule_live_past_original_expiry() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
-        let original_ttl = schedule_ttl(&env, &client, id);
+    fn floor_division_residue_stays_claimable_until_final_claim() {
+        let (env, token, tc, contract_id, client, accounts) = setup!();
+        let id = create(&client, &token, &accounts);
 
-        // Touch once inside the bump window, then jump one ledger past the
-        // entry's original expiry.
-        let touched_at = 2 * ttl::DAY_IN_LEDGERS;
-        advance(&env, touched_at);
-        client.touch_ttl(&id);
-        advance(&env, original_ttl + 1 - touched_at);
+        // 1_000 / 3_000 through the window:
+        // 10_000 * 1_000 / 3_000 = 3_333 (floored) — one stroop of residue
+        // stays behind, and the final claim pays it out in full.
+        env.ledger().set_timestamp(START + CLIFF + 1_000);
+        let first = client.claim(&id);
+        assert_eq!(first, 3_333);
 
-        // Exactly the TTL the touch granted, minus the elapsed ledgers:
-        // never expired, never restored.
-        let remaining = ttl::BUMP_AMOUNT - (original_ttl + 1 - touched_at);
-        assert_ne!(remaining, restored_ttl(&env));
-        assert_eq!(schedule_ttl(&env, &client, id), remaining);
-        assert_eq!(client.get_status(&id), VestingStatus::Locked);
-    }
-
-    #[test]
-    fn touch_ttl_when_fresh_is_a_no_op() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
-        advance(&env, 10);
-        let ttl_before = schedule_ttl(&env, &client, id);
-
-        client.touch_ttl(&id);
-
-        // Outside the bump window the threshold check skips the extension.
-        assert_eq!(schedule_ttl(&env, &client, id), ttl_before);
-    }
-
-    #[test]
-    fn missing_schedule_is_not_found_and_creates_no_storage() {
-        let (env, client, accounts) = setup!();
-        let id = create(&client, &accounts);
-        let missing = id + 998;
-
-        for err in [
-            client.try_touch_ttl(&missing).unwrap_err().unwrap(),
-            client.try_claim(&missing).unwrap_err().unwrap(),
-            client.try_claimable(&missing).unwrap_err().unwrap(),
-            client.try_get_status(&missing).unwrap_err().unwrap(),
-        ] {
-            assert_eq!(err, ForgeError::NotFound);
-        }
-
-        env.as_contract(&client.address, || {
-            assert!(!env.storage().persistent().has(&DataKey::Schedule(missing)));
-            assert!(!env.storage().instance().has(&DataKey::Schedule(missing)));
-            assert!(!env.storage().temporary().has(&DataKey::Schedule(missing)));
-            // The id counter was not advanced by the failed lookups.
-            assert_eq!(
-                env.storage().instance().get::<_, u64>(&DataKey::Count),
-                Some(id)
-            );
-        });
+        env.ledger().set_timestamp(START + DURATION + 1);
+        let rest = client.claim(&id);
+        assert_eq!(first + rest, TOTAL);
+        assert_eq!(tc.balance(&accounts.user1), TOTAL);
+        assert_eq!(tc.balance(&contract_id), 0);
     }
 }

@@ -3,7 +3,7 @@
 | Contract | Path | Status |
 |----------|------|--------|
 | Escrow | crates/escrow | **Flagship** — real SEP-41 settlement, disputes, events, persistent storage · 27 tests |
-| Vesting | crates/vesting | State machine + tests · **no token settlement** |
+| Vesting | crates/vesting | State machine + tests · **real SEP-41 settlement** via `claim` |
 | Multi-Sig Wallet | crates/multi-sig-wallet | State machine + tests · no execution dispatch |
 | DAO Governance | crates/dao-governance | State machine + tests · executes nothing on-chain |
 | Subscription Payments | crates/subscription-payments | State machine + tests · charges nothing |

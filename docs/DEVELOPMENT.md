@@ -149,15 +149,15 @@ make release
 
 ## Repository Commands Reference
 
-| Command | Purpose |
-|---------|---------|
-| `make build` | Build workspace |
-| `make test` | Run all tests |
-| `make format` | Format code |
-| `make lint` | Run clippy |
-| `make audit` | Check dependencies |
-| `make doc` | Generate docs |
-| `make clean` | Clean build artifacts |
+| Command        | Purpose                 |
+| -------------- | ----------------------- |
+| `make build`   | Build workspace         |
+| `make test`    | Run all tests           |
+| `make format`  | Format code             |
+| `make lint`    | Run clippy              |
+| `make audit`   | Check dependencies      |
+| `make doc`     | Generate docs           |
+| `make clean`   | Clean build artifacts   |
 | `make release` | Full pre-release checks |
 
 ## Contract Testing Notes
@@ -206,8 +206,9 @@ The CI workflow (`.github/workflows/ci.yml`) runs:
 3. **build** - Full workspace build + docs
 4. **test** - Test suite execution
 5. **audit** - Dependency vulnerability scan
-6. **wasm-size** - Contract size budget enforcement
-7. **provenance** - Build reproducibility verification
+6. **dependency-policy** - License, source, and ban checks
+7. **wasm-size** - Contract size budget enforcement
+8. **provenance** - Build reproducibility verification
 
 ForgeBot (`.github/workflows/forgebot.yml`, `scripts/forgebot/`) reports these
 results back to each pull request as a single sticky comment and publishes an
@@ -215,11 +216,53 @@ informational `ForgeBot / ready-for-review` commit status. It does not add or
 replace any check, and it never approves or merges a pull request. See
 [ForgeBot](FORGEBOT.md) for details.
 
+### Dependency Policy (cargo-deny)
+
+Soroban Forge enforces a dependency policy via [cargo-deny](https://embarkstudios.github.io/cargo-deny/) to ensure compliance with license compatibility, source integrity, and ban policies.
+
+**Policy:**
+
+- **Licenses**: Only permissive licenses (MIT, Apache-2.0, BSD, ISC, Unicode, CC0) are allowed. GPL/AGPL/SSPL are denied.
+- **Sources**: All dependencies must come from crates.io; git and path dependencies are banned to prevent supply-chain surprises.
+- **Bans**: Multiple versions of the same crate are flagged; justified exceptions are documented in `deny.toml`.
+
+**Configuration:**
+The policy is defined in [deny.toml](../../deny.toml) at the workspace root. Each non-default choice is commented to explain the rationale.
+
+**Running checks locally:**
+
+```bash
+# Install cargo-deny
+cargo install --locked cargo-deny
+
+# Check licenses
+cargo deny check licenses
+
+# Check sources
+cargo deny check sources
+
+# Check bans and duplicates
+cargo deny check bans
+```
+
+**Adding exceptions:**
+If a dependency legitimately requires an exception (e.g., an older crate with an undeclared license, or a tool-only dev dependency), add it to `deny.toml` with a clear comment explaining why it is justified. Example:
+
+```toml
+[licenses]
+exceptions = [
+    # { name = "crate-name", allow = ["MIT"] },  # Reason: <justification>
+]
+```
+
+All exceptions must be reviewed and approved before merge.
+
 ## Common Issues
 
 ### WASM Build Fails
 
 Ensure `wasm32v1-none` target is installed:
+
 ```bash
 rustup target add wasm32v1-none
 ```
@@ -227,6 +270,7 @@ rustup target add wasm32v1-none
 ### Lock File Conflicts
 
 Use `--locked` flag to ensure reproducible builds:
+
 ```bash
 cargo build --locked
 ```
