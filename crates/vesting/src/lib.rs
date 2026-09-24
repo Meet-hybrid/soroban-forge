@@ -24,17 +24,43 @@
 //! - `create_schedule` requires the beneficiary.
 //! - `claim` requires the beneficiary.
 //! - `claimable` and `get_status` are read-only views.
+//! - `touch_ttl` is permissionless (keeper entrypoint).
 //!
 //! The `Revoked` status is reserved for a revocation method that lands in a
 //! follow-up; it is not reachable through the current public interface. Token
 //! settlement (SAC transfers) is intentionally out of scope for this
 //! iteration: the contract tracks state and authorization, not balances.
+//!
+//! ## Storage and TTL
+//!
+//! Each schedule is its own **persistent** entry (`DataKey::Schedule(id)`)
+//! so the byte budget scales per record and a schedule's lifetime does not
+//! depend on the contract instance's. The only instance entry is the id
+//! counter. Every write bumps the entry's TTL with the standard
+//! threshold/extend-to pattern (same constants as escrow), and `touch_ttl`
+//! is a permissionless keeper entrypoint for schedules that sit idle near
+//! expiry. Read-only views never extend a TTL.
 
 #[cfg(test)]
 extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env};
+
+/// Ledger-time constants for TTL bumps.
+///
+/// One ledger closes roughly every 5 seconds, so 17,280 ledgers ≈ 1 day.
+/// `BUMP_AMOUNT` is the lifetime written on every touch; `BUMP_THRESHOLD`
+/// is how close to expiry an entry must be before a bump applies. Vesting
+/// windows routinely exceed 30 days, so long-idle schedules rely on
+/// `touch_ttl` (or a claim) to stay live.
+mod ttl {
+    pub const DAY_IN_LEDGERS: u32 = 17_280;
+    /// Lifetime applied on every TTL touch.
+    pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
+    /// Bump only when the entry is within this window of expiring.
+    pub const BUMP_THRESHOLD: u32 = BUMP_AMOUNT - DAY_IN_LEDGERS;
+}
 
 /// Public interface for the Soroban Forge vesting contract.
 ///
@@ -74,6 +100,17 @@ pub trait SorobanForgeVesting {
         env: Env,
         schedule_id: u64,
     ) -> Result<VestingStatus, soroban_forge_shared_utils::ForgeError>;
+
+    /// Permissionless TTL keeper: bumps the schedule entry's TTL to the
+    /// [`ttl::BUMP_AMOUNT`] horizon when it falls inside
+    /// [`ttl::BUMP_THRESHOLD`]. Call periodically for schedules that must
+    /// outlive their entry's current TTL. Costs fees; changes nothing
+    /// else.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no schedule with this id.
+    fn touch_ttl(env: Env, schedule_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Lifecycle state of a vesting schedule.
@@ -112,7 +149,9 @@ pub struct VestingSchedule {
     pub status: VestingStatus,
 }
 
-/// Instance-storage keys.
+/// Storage keys. Schedules are per-id **persistent** entries so the byte
+/// budget scales per record; only the id counter lives in instance storage
+/// (one small entry, written once per creation).
 #[contracttype]
 enum DataKey {
     /// The vesting record for `u64` id.
@@ -165,8 +204,9 @@ impl Vesting {
         // Derive the initial status from time (cliff == 0 starts `Vesting`).
         schedule.status = Self::current_status(&schedule, start)?;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Schedule(id), &schedule);
+        bump_entry(&env, &DataKey::Schedule(id));
         Ok(id)
     }
 
@@ -193,8 +233,9 @@ impl Vesting {
             .ok_or(ForgeError::ArithmeticOverflow)?;
         schedule.status = Self::current_status(&schedule, now)?;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Schedule(schedule_id), &schedule);
+        bump_entry(&env, &DataKey::Schedule(schedule_id));
         Ok(amount)
     }
 
@@ -213,7 +254,18 @@ impl Vesting {
         Self::current_status(&schedule, env.ledger().timestamp())
     }
 
-    /// Allocate the next monotonic schedule id.
+    /// Permissionless keeper: bump the schedule entry's TTL without changing
+    /// any state. The existence check is deliberate — touching a missing id
+    /// must fail loudly so a keeper can distinguish "extended" from "no such
+    /// schedule".
+    pub fn touch_ttl(env: Env, schedule_id: u64) -> Result<(), ForgeError> {
+        Self::get_schedule(&env, schedule_id)?;
+        bump_entry(&env, &DataKey::Schedule(schedule_id));
+        Ok(())
+    }
+
+    /// Allocate the next monotonic schedule id. Instance storage: one small
+    /// entry, written once per creation.
     fn next_id(env: &Env) -> Result<u64, ForgeError> {
         let count: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
         let id = count.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;
@@ -221,9 +273,11 @@ impl Vesting {
         Ok(id)
     }
 
+    /// Load a schedule by id. A missing id is `NotFound`; the lookup never
+    /// writes, so it cannot create an entry as a side effect.
     fn get_schedule(env: &Env, schedule_id: u64) -> Result<VestingSchedule, ForgeError> {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Schedule(schedule_id))
             .ok_or(ForgeError::NotFound)
     }
@@ -288,6 +342,15 @@ impl Vesting {
             .checked_sub(schedule.claimed)
             .ok_or(ForgeError::ArithmeticOverflow)
     }
+}
+
+/// Bump a persistent entry's TTL to the [`ttl::BUMP_AMOUNT`] horizon when
+/// it falls inside [`ttl::BUMP_THRESHOLD`]. The standard threshold/extend
+/// pattern: cheap no-op while the entry is fresh, decisive near expiry.
+fn bump_entry(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, ttl::BUMP_THRESHOLD, ttl::BUMP_AMOUNT);
 }
 
 #[cfg(test)]
@@ -560,5 +623,262 @@ mod tests {
         env.ledger().set_timestamp(START + 500);
         let err = client.try_claimable(&id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::ArithmeticOverflow);
+    }
+
+    // -------------------------------------------------------------------
+    // Persistent storage and TTL
+    // -------------------------------------------------------------------
+
+    use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
+
+    /// Remaining TTL (in ledgers) of the schedule's persistent entry.
+    fn schedule_ttl(env: &Env, client: &SorobanForgeVestingClient<'_>, id: u64) -> u32 {
+        env.as_contract(&client.address, || {
+            env.storage().persistent().get_ttl(&DataKey::Schedule(id))
+        })
+    }
+
+    /// Remaining TTL (in ledgers) of the contract instance entry.
+    fn instance_ttl(env: &Env, client: &SorobanForgeVestingClient<'_>) -> u32 {
+        env.as_contract(&client.address, || env.storage().instance().get_ttl())
+    }
+
+    /// Read the raw stored record, bypassing the contract entrypoints.
+    fn stored_schedule(
+        env: &Env,
+        client: &SorobanForgeVestingClient<'_>,
+        id: u64,
+    ) -> Option<VestingSchedule> {
+        env.as_contract(&client.address, || {
+            env.storage().persistent().get(&DataKey::Schedule(id))
+        })
+    }
+
+    // How TTL is observed here: in test mode the SDK 27 host
+    // (soroban-env-host 27.0.1, `Storage::handle_maybe_expired_entry`, run
+    // from `prepare_read_only_access`) auto-restores an expired persistent
+    // entry on *any* access -- including `get_ttl` itself -- resetting its
+    // TTL to the network minimum. So "is it still readable" alone cannot tell
+    // a live entry from a restored one. Instead:
+    // - a restored entry reports exactly `restored_ttl()`;
+    // - a remaining TTL exactly equal to the untouched decay proves the entry
+    //   stayed live and was never expired-and-restored.
+    // The contract instance is also auto-restored when a client call hits it
+    // after its TTL; that is orthogonal to the per-schedule TTL measured here.
+
+    /// The TTL the test host reports for an entry it just auto-restored.
+    fn restored_ttl(env: &Env) -> u32 {
+        env.ledger().get().min_persistent_entry_ttl - 1
+    }
+
+    /// Advance the ledger sequence by `ledgers`.
+    fn advance(env: &Env, ledgers: u32) {
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + ledgers);
+    }
+
+    /// Field-by-field equality (`VestingSchedule` intentionally does not
+    /// derive `PartialEq`; adding it would widen the public type's API).
+    fn assert_same_schedule(a: &VestingSchedule, b: &VestingSchedule) {
+        assert_eq!(a.beneficiary, b.beneficiary);
+        assert_eq!(a.token, b.token);
+        assert_eq!(a.total_amount, b.total_amount);
+        assert_eq!(a.start, b.start);
+        assert_eq!(a.cliff, b.cliff);
+        assert_eq!(a.duration, b.duration);
+        assert_eq!(a.claimed, b.claimed);
+        assert_eq!(a.status, b.status);
+    }
+
+    #[test]
+    fn create_writes_persistent_entry_with_full_ttl() {
+        let (env, client, accounts) = setup!();
+        let id = create(&client, &accounts);
+
+        env.as_contract(&client.address, || {
+            assert!(env.storage().persistent().has(&DataKey::Schedule(id)));
+            // Nothing schedule-shaped is left in instance storage; only the
+            // id counter lives there.
+            assert!(!env.storage().instance().has(&DataKey::Schedule(id)));
+            assert_eq!(
+                env.storage().instance().get::<_, u64>(&DataKey::Count),
+                Some(id)
+            );
+        });
+        assert_eq!(schedule_ttl(&env, &client, id), ttl::BUMP_AMOUNT);
+    }
+
+    #[test]
+    fn schedule_survives_past_instance_ttl_boundary() {
+        let (env, client, accounts) = setup!();
+        let id = create(&client, &accounts);
+        let before = stored_schedule(&env, &client, id).unwrap();
+
+        // Under the old layout the schedule lived inside the instance entry
+        // and shared its TTL. Jump one ledger past the instance's expiry
+        // (see `instance_entry_is_expired_at_that_boundary`).
+        let instance_left = instance_ttl(&env, &client);
+        assert!(instance_left < ttl::BUMP_AMOUNT);
+        advance(&env, instance_left + 1);
+
+        // The schedule entry has decayed by exactly the jump, so it stayed
+        // live on its own TTL and was never restored.
+        let remaining = ttl::BUMP_AMOUNT - (instance_left + 1);
+        assert_ne!(remaining, restored_ttl(&env));
+        assert_eq!(schedule_ttl(&env, &client, id), remaining);
+        let after = stored_schedule(&env, &client, id).unwrap();
+        assert_same_schedule(&before, &after);
+
+        // End to end through the public interface.
+        env.ledger().set_timestamp(START + DURATION);
+        assert_eq!(client.claimable(&id), TOTAL);
+        assert_eq!(client.claim(&id), TOTAL);
+        assert_eq!(client.get_status(&id), VestingStatus::Completed);
+    }
+
+    /// Negative control for `schedule_survives_past_instance_ttl_boundary`:
+    /// at the ledger it jumps to, the instance entry (where schedules used to
+    /// live) really has expired -- the host had to restore it.
+    #[test]
+    fn instance_entry_is_expired_at_that_boundary() {
+        let (env, client, accounts) = setup!();
+        create(&client, &accounts);
+        let instance_left = instance_ttl(&env, &client);
+        advance(&env, instance_left + 1);
+        // Advancing `instance_left + 1` ledgers leaves no live TTL, yet the
+        // read reports a fresh minimum TTL: the entry was auto-restored.
+        assert_eq!(instance_ttl(&env, &client), restored_ttl(&env));
+    }
+
+    /// Negative control for the TTL assertions: an untouched schedule entry
+    /// really does expire at its own TTL (and is then auto-restored with the
+    /// minimum TTL, not the decayed one).
+    #[test]
+    fn untouched_schedule_expires_at_its_own_ttl() {
+        let (env, client, accounts) = setup!();
+        let id = create(&client, &accounts);
+        advance(&env, ttl::BUMP_AMOUNT + 1);
+        assert_eq!(schedule_ttl(&env, &client, id), restored_ttl(&env));
+    }
+
+    #[test]
+    fn read_only_views_do_not_extend_ttl() {
+        let (env, client, accounts) = setup!();
+        let id = create(&client, &accounts);
+        advance(&env, 2 * ttl::DAY_IN_LEDGERS);
+        let ttl_before = schedule_ttl(&env, &client, id);
+        assert!(ttl_before < ttl::BUMP_THRESHOLD);
+
+        client.claimable(&id);
+        client.get_status(&id);
+
+        assert_eq!(schedule_ttl(&env, &client, id), ttl_before);
+    }
+
+    #[test]
+    fn claim_extends_ttl() {
+        let (env, client, accounts) = setup!();
+        let id = create(&client, &accounts);
+        advance(&env, 2 * ttl::DAY_IN_LEDGERS);
+        assert!(schedule_ttl(&env, &client, id) < ttl::BUMP_THRESHOLD);
+
+        env.ledger().set_timestamp(START + DURATION);
+        assert_eq!(client.claim(&id), TOTAL);
+
+        assert_eq!(schedule_ttl(&env, &client, id), ttl::BUMP_AMOUNT);
+    }
+
+    #[test]
+    fn touch_ttl_extends_without_changing_state() {
+        let (env, client, accounts) = setup!();
+        let id = create(&client, &accounts);
+
+        // Mid-vesting with a partial claim, so `claimed` and `status` are
+        // non-default and any accidental rewrite would show.
+        env.ledger()
+            .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 4);
+        client.claim(&id);
+        env.ledger()
+            .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
+
+        advance(&env, 2 * ttl::DAY_IN_LEDGERS);
+        let ttl_before = schedule_ttl(&env, &client, id);
+        assert!(ttl_before < ttl::BUMP_THRESHOLD);
+
+        let schedule_before = stored_schedule(&env, &client, id).unwrap();
+        let claimable_before = client.claimable(&id);
+        let status_before = client.get_status(&id);
+        assert!(claimable_before > 0);
+
+        client.touch_ttl(&id);
+        // Permissionless: no authorization was demanded.
+        assert!(env.auths().is_empty());
+
+        assert_eq!(schedule_ttl(&env, &client, id), ttl::BUMP_AMOUNT);
+        let schedule_after = stored_schedule(&env, &client, id).unwrap();
+        assert_same_schedule(&schedule_before, &schedule_after);
+        assert_eq!(client.claimable(&id), claimable_before);
+        assert_eq!(client.get_status(&id), status_before);
+    }
+
+    #[test]
+    fn touch_ttl_keeps_schedule_live_past_original_expiry() {
+        let (env, client, accounts) = setup!();
+        let id = create(&client, &accounts);
+        let original_ttl = schedule_ttl(&env, &client, id);
+
+        // Touch once inside the bump window, then jump one ledger past the
+        // entry's original expiry.
+        let touched_at = 2 * ttl::DAY_IN_LEDGERS;
+        advance(&env, touched_at);
+        client.touch_ttl(&id);
+        advance(&env, original_ttl + 1 - touched_at);
+
+        // Exactly the TTL the touch granted, minus the elapsed ledgers:
+        // never expired, never restored.
+        let remaining = ttl::BUMP_AMOUNT - (original_ttl + 1 - touched_at);
+        assert_ne!(remaining, restored_ttl(&env));
+        assert_eq!(schedule_ttl(&env, &client, id), remaining);
+        assert_eq!(client.get_status(&id), VestingStatus::Locked);
+    }
+
+    #[test]
+    fn touch_ttl_when_fresh_is_a_no_op() {
+        let (env, client, accounts) = setup!();
+        let id = create(&client, &accounts);
+        advance(&env, 10);
+        let ttl_before = schedule_ttl(&env, &client, id);
+
+        client.touch_ttl(&id);
+
+        // Outside the bump window the threshold check skips the extension.
+        assert_eq!(schedule_ttl(&env, &client, id), ttl_before);
+    }
+
+    #[test]
+    fn missing_schedule_is_not_found_and_creates_no_storage() {
+        let (env, client, accounts) = setup!();
+        let id = create(&client, &accounts);
+        let missing = id + 998;
+
+        for err in [
+            client.try_touch_ttl(&missing).unwrap_err().unwrap(),
+            client.try_claim(&missing).unwrap_err().unwrap(),
+            client.try_claimable(&missing).unwrap_err().unwrap(),
+            client.try_get_status(&missing).unwrap_err().unwrap(),
+        ] {
+            assert_eq!(err, ForgeError::NotFound);
+        }
+
+        env.as_contract(&client.address, || {
+            assert!(!env.storage().persistent().has(&DataKey::Schedule(missing)));
+            assert!(!env.storage().instance().has(&DataKey::Schedule(missing)));
+            assert!(!env.storage().temporary().has(&DataKey::Schedule(missing)));
+            // The id counter was not advanced by the failed lookups.
+            assert_eq!(
+                env.storage().instance().get::<_, u64>(&DataKey::Count),
+                Some(id)
+            );
+        });
     }
 }
