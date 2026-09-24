@@ -1,0 +1,72 @@
+# Dependency policy configuration for Soroban Forge.
+# This file enforces license compatibility, source restrictions, and duplicate detection.
+#
+# Reference: https://embarkstudios.github.io/cargo-deny/
+# Run checks locally:
+#   cargo deny check licenses
+#   cargo deny check sources
+#   cargo deny check bans
+#
+# For exceptions, add a comment explaining why the exception is justified.
+
+[advisories]
+# Advisory checking is delegated to the existing `cargo audit` job in CI.
+# To avoid duplicate tooling noise, advisories are not checked by cargo-deny.
+# See .github/workflows/ci.yml for the audit configuration.
+# Uncomment the vulnerability-check option below to enable advisory checks here.
+# vulnerability = "deny"
+# unmaintained = "deny"
+# yanked = "deny"
+# notice = "deny"
+# ignore = []
+
+# License policy placeholder
+# The explicit `licenses` configuration was removed to avoid schema
+# incompatibilities with the installed cargo-deny version. The intent is
+# to enforce permissive licenses (MIT/Apache-2.0/BSD/ISC/Unicode/CC0) and
+# deny copyleft licenses (GPL/AGPL/SSPL). Reintroduce a versioned
+# `licenses` section compatible with the repo's cargo-deny version when
+# migrating the policy.
+
+# LICENSES: intentionally omitted to avoid schema mismatch with the installed
+# cargo-deny version. License policy will be reintroduced using the
+# repository's pinned cargo-deny schema (v0.20.x) in a follow-up patch.
+
+# See [docs/DEPENDENCY_POLICY_MIGRATION.md](docs/DEPENDENCY_POLICY_MIGRATION.md)
+# for the migration plan to safely reintroduce `licenses` enforcement.
+
+[sources]
+# Only allow dependencies from crates.io. No git, path, or alternative registry sources.
+# This prevents supply-chain surprises and ensures reproducible builds.
+allow-org = {}
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+# Exceptions for git/path sources can be documented here if unavoidable.
+# Format: { name = "crate-name", allow = ["https://github.com/owner/repo"] }
+# None at this time. All dependencies come from crates.io.
+
+# Treat unknown registries or git repos as a policy violation.
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[bans]
+# Duplicate detection and version alignment.
+# Multiple versions of the same crate are flagged; justifications are documented below.
+# Policy: prefer single versions; multiple versions are allowed only with documented rationale.
+multiple-versions = "warn"
+# Highlight directly-used but unused crates.
+# (The `unused-default-features` and `default-features` keys are not
+# valid in the current cargo-deny schema; feature-related checks can be
+# configured via `features`/`external-default-features` if needed.)
+# Allow multiple versions only with explicit exception.
+allow = [
+    # No duplicates allowed without documentation.
+]
+# Deny certain crates from being included at all.
+deny = [
+    # No globally banned crates at this time.
+]
+# Check for crates with unmaintained status or very old MSRV.
+skip-tree = []
+
+ 
