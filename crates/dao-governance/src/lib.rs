@@ -95,6 +95,23 @@ pub trait SorobanForgeDaoGovernance {
         env: Env,
         proposal_id: u64,
     ) -> Result<Proposal, soroban_forge_shared_utils::ForgeError>;
+
+    /// Return the total number of proposals created (read-only view).
+    fn get_proposal_count(env: Env) -> u64;
+
+    /// Read a paginated slice of proposals ordered by proposal ID (read-only view).
+    fn get_proposals(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Result<soroban_sdk::Vec<Proposal>, soroban_forge_shared_utils::ForgeError>;
+
+    /// Check whether a voter has already cast a vote on a proposal (read-only view).
+    fn has_voted(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<bool, soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Lifecycle state of a governance proposal.
@@ -333,6 +350,58 @@ impl DaoGovernance {
     /// Read a stored proposal by id (read-only view).
     pub fn get_proposal(env: Env, proposal_id: u64) -> Result<Proposal, ForgeError> {
         Self::get_proposal_impl(&env, proposal_id)
+    }
+
+    /// Return the total number of proposals created (read-only view).
+    pub fn get_proposal_count(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::Count).unwrap_or(0)
+    }
+
+    /// Read a paginated slice of proposals ordered by proposal ID (read-only view).
+    ///
+    /// Bounds clamping:
+    /// - `limit == 0` returns `ForgeError::InvalidInput`.
+    /// - If `offset >= total`, returns an empty `Vec`.
+    /// - Returns at most `limit` items without overflowing.
+    pub fn get_proposals(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Result<soroban_sdk::Vec<Proposal>, ForgeError> {
+        if limit == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let total: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
+        let offset_u64 = u64::from(offset);
+        if offset_u64 >= total {
+            return Ok(soroban_sdk::Vec::new(&env));
+        }
+
+        let start = offset_u64
+            .checked_add(1)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let limit_u64 = u64::from(limit);
+        let end = total.min(offset_u64.saturating_add(limit_u64));
+
+        let mut proposals = soroban_sdk::Vec::new(&env);
+        for id in start..=end {
+            let proposal = Self::get_proposal_impl(&env, id)?;
+            proposals.push_back(proposal);
+        }
+
+        Ok(proposals)
+    }
+
+    /// Check whether `voter` has voted on `proposal_id` (read-only view).
+    ///
+    /// Returns `ForgeError::NotFound` if `proposal_id` does not exist.
+    pub fn has_voted(env: Env, proposal_id: u64, voter: Address) -> Result<bool, ForgeError> {
+        // Verify proposal existence
+        Self::get_proposal_impl(&env, proposal_id)?;
+
+        let vote_key = DataKey::Vote(proposal_id, voter);
+        Ok(env.storage().instance().has(&vote_key))
     }
 
     /// Allocate the next monotonic proposal id.
@@ -865,5 +934,74 @@ mod tests {
         assert_eq!(env.events().all().events().len(), 1); // Executed
 
         // Each successful contract invocation exposes its emitted events.
+    }
+
+    #[test]
+    fn test_introspection_count_pagination_and_has_voted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(START);
+        let contract_id = env.register(DaoGovernance, ());
+        let client = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        let target_id = env.register(MockTarget, ());
+
+        // 1. Initial uninitialized state
+        assert_eq!(client.get_proposal_count(), 0);
+        assert_eq!(client.get_proposals(&0, &10).len(), 0);
+
+        // 2. Create 5 proposals
+        for _ in 0..5 {
+            client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        }
+        assert_eq!(client.get_proposal_count(), 5);
+
+        // 3. Test pagination bounds
+        // Page 1: offset 0, limit 2 -> [p1, p2]
+        let page1 = client.get_proposals(&0, &2);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap().proposal_id, 1);
+        assert_eq!(page1.get(1).unwrap().proposal_id, 2);
+
+        // Page 2: offset 2, limit 2 -> [p3, p4]
+        let page2 = client.get_proposals(&2, &2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2.get(0).unwrap().proposal_id, 3);
+        assert_eq!(page2.get(1).unwrap().proposal_id, 4);
+
+        // Page 3: offset 4, limit 2 -> [p5]
+        let page3 = client.get_proposals(&4, &2);
+        assert_eq!(page3.len(), 1);
+        assert_eq!(page3.get(0).unwrap().proposal_id, 5);
+
+        // Past total count: offset 5, limit 2 -> []
+        let past = client.get_proposals(&5, &2);
+        assert_eq!(past.len(), 0);
+
+        // Zero limit returns InvalidInput
+        assert_eq!(
+            client.try_get_proposals(&0, &0).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // 4. Test has_voted
+        // Before voting
+        assert!(!client.has_voted(&1, &accounts.user2));
+
+        // Vote on proposal 1
+        client.vote(&1, &accounts.user2, &true);
+
+        // After voting
+        assert!(client.has_voted(&1, &accounts.user2));
+        assert!(!client.has_voted(&1, &accounts.user1));
+
+        // Query voting status on non-existent proposal ID
+        assert_eq!(
+            client
+                .try_has_voted(&999, &accounts.user2)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
     }
 }

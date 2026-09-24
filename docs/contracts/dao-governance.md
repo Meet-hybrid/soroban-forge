@@ -11,7 +11,11 @@ fn vote(proposal_id, voter, support) -> Result<(), ForgeError>
 fn execute(proposal_id) -> Result<(), ForgeError>
 fn cancel_proposal(proposal_id, proposer) -> Result<(), ForgeError>
 fn get_proposal(proposal_id) -> Result<Proposal, ForgeError>
+fn get_proposal_count() -> u64
+fn get_proposals(offset, limit) -> Result<Vec<Proposal>, ForgeError>
+fn has_voted(proposal_id, voter) -> Result<bool, ForgeError>
 ```
+
 
 `action` is forwarded as a single `Bytes` argument to the target contract's
 `execute` entrypoint. Voting remains one vote per voter with a strict
