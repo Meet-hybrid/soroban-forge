@@ -62,20 +62,18 @@ any indexer or SDK integration.
 
 ### 4. Negative authorization coverage outside escrow
 
-**Closed for escrow** (was the open item here): a dedicated negative-auth
-suite (`crates/escrow/src/authz.rs`) proves per entrypoint that a wrong
-signer is rejected by the host, that armed signatures cannot be replayed
-over different arguments, and — via `env.auths()` tree assertions — pins
-the exact authorized-invocation tree every payout path demands. It also
-documents the verified mechanics: contract self-authorization is implicit
-(the host auto-approves `require_auth` from the executing contract), which
-is why a party signature alone legitimately completes a payout.
+**Closed for escrow and vesting** (was the open item here): dedicated negative-auth
+suites (`crates/escrow/src/authz.rs`, `crates/vesting/src/authz.rs`) prove per
+entrypoint that a wrong signer is rejected by the host, that armed signatures cannot
+be replayed over different arguments or schedule IDs, and — via `env.auths()` tree assertions
+— pin the exact authorized-invocation tree every creation and payout path demands.
+They also document the verified mechanics: contract self-authorization is implicit
+(the host auto-approves `require_auth` from the executing contract), which is why
+a party signature alone legitimately completes a payout.
 
-Still open: the other four contracts' entrypoints are proven at call-graph
-level only. Vesting's `claim` now moves tokens, so its settlement path is
-covered by balance-asserted tests but not yet by a negative-auth suite;
-DAO governance now dispatches approved actions, while subscriptions still
-move nothing.
+Still open: the other three contracts' entrypoints are proven at call-graph
+level only; DAO governance now dispatches approved actions, while subscriptions
+still move nothing.
 
 ### 5. Vesting rounding residue
 
