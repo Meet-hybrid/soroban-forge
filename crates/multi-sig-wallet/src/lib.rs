@@ -12,24 +12,48 @@
 //!
 //! ```text
 //! submit --(confirm × n)--> threshold met --execute--> Executed
+//! submit --(reject × n)--> rejection threshold met --> Rejected (terminal)
 //! submit_withdrawal --(confirm × n)--> threshold met --execute--> Executed (+ tokens moved)
+//! submit_withdrawal --(reject × n)--> rejection threshold met --> Rejected (terminal)
 //! ```
 //!
 //! Authorization model:
 //! - `initialize` sets the owner set and threshold once (guarded against
 //!   re-initialisation).
-//! - `submit` requires an owner.
+//! - `submit` requires an owner and records a `target` contract address
+//!   and an opaque `payload` for cross-contract invocation.
 //! - `confirm` requires an owner that has not confirmed already.
+//! - `reject` requires an owner that has not already signalled on the tx.
 //! - `execute` may be called by anyone; it only succeeds once the threshold is
-//!   met.
+//!   met. For opaque-payload txs it performs a real cross-contract
+//!   invocation to the recorded `target`. For typed withdrawal txs it moves
+//!   real tokens.
+//! - A target revert surfaces as [`ForgeError::ContractInvocationFailed`]
+//!   and leaves the transaction un-executed (status stays `Pending`).
 //!
-//! The `Rejected` status is reserved for a revocation/rejection method that
-//! lands in a follow-up; it is not reachable through the current public
-//! interface. Execution of opaque `payload` bytes (external contract calls)
-//! remains out of scope for this iteration and is covered by a separate
-//! issue; the contract tracks state, ownership, and authorisation for those.
-//! Typed **withdrawals** are the exception: `execute` moves real tokens for
-//! them (see the custody model below).
+//! ## Rejection policy
+//!
+//! An owner who spots a malicious or mistaken pending transaction records a
+//! formal objection via `reject`. Rejections are stored on the tx record
+//! (`WalletTx::rejections`) alongside confirmations. The policy:
+//!
+//! - **A signed owner may signal once, in one direction.** An owner who
+//!   confirmed cannot also reject the same tx, and an owner who rejected
+//!   cannot confirm it (`InvalidInput`). A combined signal would be
+//!   ambiguous.
+//! - **Existing confirmations do not block rejection.** The whole point of
+//!   the entrypoint is to stop a tx that already reached (or is approaching)
+//!   the threshold, so an owner can reject a tx others have confirmed.
+//! - **Any rejection blocks execution.** `execute` refuses a tx that carries
+//!   even one rejection, below or at the threshold — a single formal
+//!   objection stalls the tx. That is load-bearing: without it, rejections
+//!   below the threshold would be a no-op and a threshold-met malicious tx
+//!   would still execute.
+//! - **Reaching the threshold is terminal.** Once `rejections.len() >=
+//!   threshold` the status flips to `Rejected`: no further confirms,
+//!   executes, or rejects are accepted.
+//! - **Executed txs can never be rejected** (there is nothing to stop), and
+//!   rejections are never revoked (un-confirm is out of scope).
 //!
 //! ## Custody model
 //!
@@ -111,7 +135,8 @@ extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, token, Address, Bytes, Env, Vec,
+    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Bytes,
+    Env, IntoVal, Symbol, Val, Vec,
 };
 
 /// Ledger-time constants for TTL bumps.
@@ -142,9 +167,13 @@ pub trait SorobanForgeMultiSigWallet {
 
     /// Add a pending transaction submitted by `submitter` and open it for
     /// owner approvals. Returns the stable transaction id.
+    ///
+    /// `target` is the contract address to invoke on execution;
+    /// `tx` is the opaque payload passed to the target.
     fn submit(
         env: Env,
         submitter: Address,
+        target: Address,
         tx: Bytes,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
@@ -155,12 +184,33 @@ pub trait SorobanForgeMultiSigWallet {
         signer: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
+    /// Record `signer`'s formal objection to `tx_id`.
+    ///
+    /// Confirmations already on the tx do not block an objection. Each owner
+    /// may signal once, in one direction (confirm **or** reject), and only
+    /// while the tx is `Pending`. Once rejections reach the configured
+    /// threshold the tx becomes `Rejected` and cannot be confirmed, executed,
+    /// or rejected further. A tx carrying any rejection can never execute,
+    /// even below the threshold (see the module docs).
+    fn reject(
+        env: Env,
+        tx_id: u64,
+        signer: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
     /// Execute `tx_id` once approvals meet the configured threshold.
     ///
-    /// For typed withdrawal txs (see [`TxKind::Withdrawal`]), the recorded
-    /// tokens are moved to the recorded destination **before** the status
-    /// flips to `Executed` (transfer first, state second — see the module
-    /// docs), so a failed transfer leaves balances and tx state untouched.
+    /// For opaque-payload txs (see [`TxKind::Opaque`]), this performs
+    /// a real cross-contract invocation to the recorded `target`
+    /// contract with the stored `payload`, gated on the owner threshold.
+    /// For typed withdrawal txs (see [`TxKind::Withdrawal`]), the
+    /// recorded tokens are moved to the recorded destination **before**
+    /// the status flips to `Executed` (transfer first, state second —
+    /// see the module docs).
+    ///
+    /// Failure ordering: a target revert surfaces as
+    /// [`ForgeError::ContractInvocationFailed`] and leaves the
+    /// transaction un-executed (status stays `Pending`).
     fn execute(env: Env, tx_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
     /// Deposit `amount` of `token` into the wallet's custody, pulling the
@@ -224,6 +274,43 @@ pub trait SorobanForgeMultiSigWallet {
 
     /// Read a stored transaction by id (read-only view).
     fn get_tx(env: Env, tx_id: u64) -> Result<WalletTx, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the configured owner set, in initialization order (read-only view).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotInitialized`] — the wallet has no owner set.
+    fn get_owners(env: Env) -> Result<Vec<Address>, soroban_forge_shared_utils::ForgeError>;
+
+    /// Check whether `address` is a member of the owner set (read-only view).
+    ///
+    /// Uninitialized wallets read as `false`.
+    fn is_owner(env: Env, address: Address) -> bool;
+
+    /// Read the confirmation list recorded for `tx_id`, in the order the
+    /// confirmations were recorded (read-only view).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction with id `tx_id`.
+    fn get_confirmations(
+        env: Env,
+        tx_id: u64,
+    ) -> Result<Vec<Address>, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the rejection list recorded for `tx_id`, in the order the
+    /// rejections were recorded (read-only view).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction with id `tx_id`.
+    fn get_rejections(
+        env: Env,
+        tx_id: u64,
+    ) -> Result<Vec<Address>, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the number of transactions submitted so far (read-only view).
+    fn get_tx_count(env: Env) -> u64;
 }
 
 /// Lifecycle state of a submitted transaction.
@@ -234,7 +321,7 @@ pub enum TxStatus {
     Pending,
     /// Threshold met and executed successfully.
     Executed,
-    /// Rejected by owners (reached a rejection threshold or manually revoked).
+    /// Rejected by owners (reached the rejection threshold); terminal.
     Rejected,
 }
 
@@ -275,10 +362,14 @@ pub struct WalletTx {
     pub tx_id: u64,
     /// Address that submitted the transaction.
     pub submitter: Address,
-    /// The encoded transaction payload to execute.
+    /// The target contract to invoke on execution.
+    pub target: Address,
+    /// The encoded transaction payload to pass to the target.
     pub payload: Bytes,
     /// Owners that have confirmed so far.
     pub confirmations: soroban_sdk::Vec<Address>,
+    /// Owners that have formally objected so far.
+    pub rejections: soroban_sdk::Vec<Address>,
     /// Current state.
     pub status: TxStatus,
     /// What the transaction carries: an opaque payload or a typed token
@@ -353,11 +444,16 @@ impl MultiSigWallet {
     ///
     /// Requires the submitter to be an owner. Returns the stable `tx_id` that
     /// confirmations reference.
-    pub fn submit(env: Env, submitter: Address, tx: Bytes) -> Result<u64, ForgeError> {
+    pub fn submit(
+        env: Env,
+        submitter: Address,
+        target: Address,
+        tx: Bytes,
+    ) -> Result<u64, ForgeError> {
         if !Self::is_initialized(&env) {
             return Err(ForgeError::NotInitialized);
         }
-        if !Self::is_owner(&env, &submitter) {
+        if !Self::is_owner_impl(&env, &submitter) {
             return Err(ForgeError::Unauthorized);
         }
         submitter.require_auth();
@@ -366,27 +462,32 @@ impl MultiSigWallet {
         let wallet_tx = WalletTx {
             tx_id,
             submitter,
+            target,
             payload: tx,
             confirmations: Vec::new(&env),
+            rejections: Vec::new(&env),
             status: TxStatus::Pending,
             kind: TxKind::Opaque,
         };
         env.storage()
             .instance()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        events::submitted(&env, &wallet_tx);
         Ok(tx_id)
     }
 
     /// Record an owner's approval of a pending transaction.
     ///
     /// An owner may confirm only once, and only while the transaction is
-    /// `Pending`.
+    /// `Pending`. An owner who has already rejected the transaction may not
+    /// also confirm it (one signal per owner, in one direction — see the
+    /// module docs for the rejection policy).
     pub fn confirm(env: Env, tx_id: u64, signer: Address) -> Result<(), ForgeError> {
         let mut wallet_tx = Self::get_tx_impl(&env, tx_id)?;
         if wallet_tx.status != TxStatus::Pending {
             return Err(ForgeError::InvalidInput);
         }
-        if !Self::is_owner(&env, &signer) {
+        if !Self::is_owner_impl(&env, &signer) {
             return Err(ForgeError::Unauthorized);
         }
         signer.require_auth();
@@ -394,7 +495,51 @@ impl MultiSigWallet {
         if wallet_tx.confirmations.contains(&signer) {
             return Err(ForgeError::InvalidInput);
         }
+        if wallet_tx.rejections.contains(&signer) {
+            return Err(ForgeError::InvalidInput);
+        }
         wallet_tx.confirmations.push_back(signer);
+        env.storage()
+            .instance()
+            .set(&DataKey::Tx(tx_id), &wallet_tx);
+        events::confirmed(&env, &wallet_tx);
+        Ok(())
+    }
+
+    /// Record an owner's formal objection to a pending transaction.
+    ///
+    /// An owner may reject only while the transaction is `Pending`, may not
+    /// reject twice, and may not reject a transaction they have confirmed
+    /// (one signal per owner, in one direction). Existing confirmations from
+    /// other owners do not block a rejection, and a rejection can never be
+    /// revoked.
+    ///
+    /// Once `rejections.len() >= threshold` the status flips to `Rejected`,
+    /// which is terminal: no further confirms, executes, or rejects. Below
+    /// the threshold the tx stays `Pending` but is already blocked from
+    /// executing (see the module docs).
+    pub fn reject(env: Env, tx_id: u64, signer: Address) -> Result<(), ForgeError> {
+        let mut wallet_tx = Self::get_tx_impl(&env, tx_id)?;
+        if wallet_tx.status != TxStatus::Pending {
+            return Err(ForgeError::InvalidInput);
+        }
+        if !Self::is_owner_impl(&env, &signer) {
+            return Err(ForgeError::Unauthorized);
+        }
+        signer.require_auth();
+
+        if wallet_tx.rejections.contains(&signer) || wallet_tx.confirmations.contains(&signer) {
+            return Err(ForgeError::InvalidInput);
+        }
+        wallet_tx.rejections.push_back(signer);
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(ForgeError::NotInitialized)?;
+        if wallet_tx.rejections.len() >= threshold {
+            wallet_tx.status = TxStatus::Rejected;
+        }
         env.storage()
             .instance()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
@@ -412,6 +557,15 @@ impl MultiSigWallet {
     /// against the recorded amount first (`InsufficientFunds`), so a
     /// withdrawal that exceeds custody fails with balances and tx state
     /// untouched.
+    ///
+    /// For opaque-payload txs this performs a real cross-contract
+    /// invocation to the recorded `target` with the stored `payload`.
+    /// The invocation is attempted **before** the status flips. A
+    /// target revert surfaces as [`ForgeError::ContractInvocationFailed`]
+    /// and leaves the transaction un-executed (status stays `Pending`).
+    ///
+    /// Execution is refused while the tx carries **any** rejection, even
+    /// below the rejection threshold (see the module docs).
     pub fn execute(env: Env, tx_id: u64) -> Result<(), ForgeError> {
         let mut wallet_tx = Self::get_tx_impl(&env, tx_id)?;
         if wallet_tx.status != TxStatus::Pending {
@@ -423,6 +577,12 @@ impl MultiSigWallet {
             .get(&DataKey::Threshold)
             .ok_or(ForgeError::NotInitialized)?;
         if wallet_tx.confirmations.len() < threshold {
+            return Err(ForgeError::InvalidInput);
+        }
+        // A single formal objection stalls the tx. Checked before any token
+        // transfer or cross-contract invocation so a sub-threshold rejection
+        // can never be bypassed by executing.
+        if !wallet_tx.rejections.is_empty() {
             return Err(ForgeError::InvalidInput);
         }
 
@@ -441,12 +601,27 @@ impl MultiSigWallet {
                 withdrawal.amount,
             )?;
             Self::sub_balance(&env, &withdrawal.token, withdrawal.amount)?;
+        } else {
+            // Opaque-payload txs perform a real cross-contract
+            // invocation. Invoke first, write Executed only on success.
+            let target = &wallet_tx.target;
+            let payload_val: Val = wallet_tx.payload.clone().into_val(&env);
+            let args = soroban_sdk::vec![&env, payload_val];
+            let result = env.try_invoke_contract::<(), ForgeError>(
+                target,
+                &Symbol::new(&env, "execute"),
+                args,
+            );
+            if let Err(_) | Ok(Err(_)) = result {
+                return Err(ForgeError::ContractInvocationFailed);
+            }
         }
 
         wallet_tx.status = TxStatus::Executed;
         env.storage()
             .instance()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        events::executed(&env, &wallet_tx);
         Ok(())
     }
 
@@ -487,7 +662,7 @@ impl MultiSigWallet {
         if !Self::is_initialized(&env) {
             return Err(ForgeError::NotInitialized);
         }
-        if !Self::is_owner(&env, &submitter) {
+        if !Self::is_owner_impl(&env, &submitter) {
             return Err(ForgeError::Unauthorized);
         }
         if amount <= 0 {
@@ -499,8 +674,10 @@ impl MultiSigWallet {
         let wallet_tx = WalletTx {
             tx_id,
             submitter,
+            target: env.current_contract_address(),
             payload: Bytes::new(&env),
             confirmations: Vec::new(&env),
+            rejections: Vec::new(&env),
             status: TxStatus::Pending,
             kind: TxKind::Withdrawal(Withdrawal {
                 token,
@@ -543,6 +720,57 @@ impl MultiSigWallet {
     /// Read a stored transaction by id (read-only view).
     pub fn get_tx(env: Env, tx_id: u64) -> Result<WalletTx, ForgeError> {
         Self::get_tx_impl(&env, tx_id)
+    }
+
+    /// Read the configured owner set, in initialization order (read-only view).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotInitialized`] — the wallet has no owner set.
+    pub fn get_owners(env: Env) -> Result<Vec<Address>, ForgeError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Owners)
+            .ok_or(ForgeError::NotInitialized)
+    }
+
+    /// Check whether `address` is a member of the owner set (read-only view).
+    ///
+    /// Uninitialized wallets read as `false`.
+    pub fn is_owner(env: Env, address: Address) -> bool {
+        Self::is_owner_impl(&env, &address)
+    }
+
+    /// Read the confirmation list recorded for `tx_id`, in the order the
+    /// confirmations were recorded (read-only twin of
+    /// `WalletTx::confirmations`).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction with id `tx_id`.
+    pub fn get_confirmations(env: Env, tx_id: u64) -> Result<Vec<Address>, ForgeError> {
+        let wallet_tx = Self::get_tx_impl(&env, tx_id)?;
+        Ok(wallet_tx.confirmations)
+    }
+
+    /// Read the rejection list recorded for `tx_id`, in the order the
+    /// rejections were recorded (read-only twin of `WalletTx::rejections`).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction with id `tx_id`.
+    pub fn get_rejections(env: Env, tx_id: u64) -> Result<Vec<Address>, ForgeError> {
+        let wallet_tx = Self::get_tx_impl(&env, tx_id)?;
+        Ok(wallet_tx.rejections)
+    }
+
+    /// Read the number of transactions submitted so far (read-only view).
+    ///
+    /// The `Count` counter only advances on successful `submit`/
+    /// `submit_withdrawal`, so this matches the number of recorded
+    /// transactions. Uninitialized wallets read as `0`.
+    pub fn get_tx_count(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::Count).unwrap_or(0)
     }
 
     /// Credit the custody balance of `token` by `amount`, overflow-safe.
@@ -602,7 +830,7 @@ impl MultiSigWallet {
         env.storage().instance().has(&DataKey::Threshold)
     }
 
-    fn is_owner(env: &Env, address: &Address) -> bool {
+    fn is_owner_impl(env: &Env, address: &Address) -> bool {
         let owners: Vec<Address> = match env.storage().instance().get(&DataKey::Owners) {
             Some(owners) => owners,
             None => return false,
@@ -675,6 +903,58 @@ fn bump_entry(env: &Env, key: &DataKey) {
         .extend_ttl(key, ttl::BUMP_THRESHOLD, ttl::BUMP_AMOUNT);
 }
 
+/// Lifecycle events. The tx id is a **topic** so indexers can filter
+/// by tx cheaply; the data payload carries the full record so no read
+/// call is needed to reconstruct state.
+mod events {
+    use super::*;
+
+    #[contractevent]
+    pub struct Submitted {
+        #[topic]
+        pub tx_id: u64,
+        pub data: WalletTx,
+    }
+
+    #[contractevent]
+    pub struct Confirmed {
+        #[topic]
+        pub tx_id: u64,
+        pub data: WalletTx,
+    }
+
+    #[contractevent]
+    pub struct Executed {
+        #[topic]
+        pub tx_id: u64,
+        pub data: WalletTx,
+    }
+
+    pub fn submitted(env: &Env, tx: &WalletTx) {
+        Submitted {
+            tx_id: tx.tx_id,
+            data: tx.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn confirmed(env: &Env, tx: &WalletTx) {
+        Confirmed {
+            tx_id: tx.tx_id,
+            data: tx.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn executed(env: &Env, tx: &WalletTx) {
+        Executed {
+            tx_id: tx.tx_id,
+            data: tx.clone(),
+        }
+        .publish(env);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,6 +962,45 @@ mod tests {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{contract, contractimpl, Bytes, Env};
+
+    /// A minimal mock target contract for testing cross-contract
+    /// invocation. Its `execute` method is a no-op that accepts the
+    /// payload without panicking, proving the invocation succeeded.
+    #[contract]
+    pub struct MockTarget;
+
+    #[contracttype]
+    enum MockTargetKey {
+        /// Account balances (unused, but required for the contract).
+        Balance(Address),
+    }
+
+    #[contractimpl]
+    impl MockTarget {
+        /// Accept the invocation. Does not access storage, so it
+        /// works reliably through `try_invoke_contract` in the test
+        /// host.
+        pub fn execute(_env: Env, _payload: Bytes) {}
+    }
+
+    /// A mock target whose `execute` panics, simulating a target
+    /// revert for testing the failure-ordering guarantee.
+    #[contract]
+    pub struct BlockingTarget;
+
+    #[contracttype]
+    enum BlockingTargetKey {
+        /// Account balances (unused, but required for the contract).
+        Balance(Address),
+    }
+
+    #[contractimpl]
+    impl BlockingTarget {
+        /// Panics on invocation, simulating a target revert.
+        pub fn execute(_env: Env, _payload: Bytes) {
+            panic!("target reverted");
+        }
+    }
 
     /// Build a fresh env with mocked auths, a registered contract, a configured
     /// wallet (threshold 2), and named accounts. The generated client exposes
@@ -795,6 +1114,10 @@ mod tests {
         Bytes::from_array(env, &[0x01, 0x02, 0x03])
     }
 
+    fn target(env: &Env) -> Address {
+        Address::generate(env)
+    }
+
     #[test]
     fn initialize_sets_threshold() {
         let (_env, client, accounts) = setup!();
@@ -872,7 +1195,7 @@ mod tests {
     #[test]
     fn submit_creates_pending_tx() {
         let (env, client, accounts) = setup!();
-        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
         let tx = client.get_tx(&tx_id);
         assert_eq!(tx.submitter, accounts.user1);
         assert_eq!(tx.status, TxStatus::Pending);
@@ -882,8 +1205,8 @@ mod tests {
     #[test]
     fn submit_assigns_distinct_ids() {
         let (env, client, accounts) = setup!();
-        let id1 = client.submit(&accounts.user1, &payload(&env));
-        let id2 = client.submit(&accounts.user1, &payload(&env));
+        let id1 = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let id2 = client.submit(&accounts.user1, &target(&env), &payload(&env));
         assert_ne!(id1, id2);
     }
 
@@ -891,7 +1214,7 @@ mod tests {
     fn submit_rejects_non_owner() {
         let (env, client, accounts) = setup!();
         let err = client
-            .try_submit(&accounts.arbiter, &payload(&env))
+            .try_submit(&accounts.arbiter, &accounts.arbiter, &payload(&env))
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::Unauthorized);
@@ -905,7 +1228,7 @@ mod tests {
         let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
         let accounts = TestAccounts::generate(&env);
         let err = client
-            .try_submit(&accounts.user1, &payload(&env))
+            .try_submit(&accounts.user1, &accounts.user1, &payload(&env))
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::NotInitialized);
@@ -914,7 +1237,7 @@ mod tests {
     #[test]
     fn confirm_records_approval() {
         let (env, client, accounts) = setup!();
-        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
         client.confirm(&tx_id, &accounts.user2);
         let tx = client.get_tx(&tx_id);
         assert_eq!(tx.confirmations.len(), 1);
@@ -924,7 +1247,7 @@ mod tests {
     #[test]
     fn confirm_twice_is_invalid() {
         let (env, client, accounts) = setup!();
-        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
         client.confirm(&tx_id, &accounts.user2);
         let err = client
             .try_confirm(&tx_id, &accounts.user2)
@@ -936,7 +1259,7 @@ mod tests {
     #[test]
     fn confirm_non_owner_is_unauthorized() {
         let (env, client, accounts) = setup!();
-        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
         let err = client
             .try_confirm(&tx_id, &accounts.arbiter)
             .unwrap_err()
@@ -953,10 +1276,187 @@ mod tests {
             .unwrap();
     }
 
+    // -------------------------------------------------------------------
+    // Rejection
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn reject_records_objection() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.reject(&tx_id, &accounts.user2);
+        let tx = client.get_tx(&tx_id);
+        assert_eq!(tx.rejections.len(), 1);
+        assert_eq!(tx.rejections.get_unchecked(0), accounts.user2);
+        // Below the rejection threshold: still Pending, but blocked from
+        // executing.
+        assert_eq!(tx.status, TxStatus::Pending);
+    }
+
+    #[test]
+    fn reject_twice_is_invalid() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.reject(&tx_id, &accounts.user2);
+        let err = client
+            .try_reject(&tx_id, &accounts.user2)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn reject_non_owner_is_unauthorized() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let err = client
+            .try_reject(&tx_id, &accounts.arbiter)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+    }
+
+    #[test]
+    fn reject_missing_tx_is_not_found() {
+        let (_env, client, accounts) = setup!();
+        let err = client
+            .try_reject(&999, &accounts.user1)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn reject_reaches_threshold_rejects_tx() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.reject(&tx_id, &accounts.user2);
+        client.reject(&tx_id, &accounts.user3);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
+    }
+
+    #[test]
+    fn threshold_one_single_rejection_rejects() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(MultiSigWallet, ());
+        let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        let owners = owner_vec(&env, &accounts);
+        client.initialize(&owners, &1_u32);
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.reject(&tx_id, &accounts.user2);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
+    }
+
+    #[test]
+    fn rejected_tx_cannot_be_confirmed() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.reject(&tx_id, &accounts.user2);
+        client.reject(&tx_id, &accounts.user3);
+        let err = client
+            .try_confirm(&tx_id, &accounts.user1)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn rejected_tx_cannot_be_executed() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.reject(&tx_id, &accounts.user2);
+        client.reject(&tx_id, &accounts.user3);
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn reject_rejected_tx_is_invalid() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.reject(&tx_id, &accounts.user2);
+        client.reject(&tx_id, &accounts.user3);
+        let err = client
+            .try_reject(&tx_id, &accounts.user1)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn reject_executed_tx_is_invalid() {
+        let (env, client, accounts) = setup!();
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, MockTarget, ());
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        client.execute(&tx_id);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
+        let err = client
+            .try_reject(&tx_id, &accounts.user1)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn confirm_then_reject_is_invalid() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        let err = client
+            .try_reject(&tx_id, &accounts.user2)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn reject_then_confirm_is_invalid() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.reject(&tx_id, &accounts.user2);
+        let err = client
+            .try_confirm(&tx_id, &accounts.user2)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn reject_with_confirmations_is_allowed() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        client.reject(&tx_id, &accounts.user3);
+        let tx = client.get_tx(&tx_id);
+        assert_eq!(tx.confirmations.len(), 1);
+        assert_eq!(tx.rejections.len(), 1);
+        assert_eq!(tx.status, TxStatus::Pending);
+    }
+
+    #[test]
+    fn sub_threshold_rejection_blocks_execute() {
+        let (env, client, accounts) = setup!();
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, MockTarget, ());
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        client.reject(&tx_id, &accounts.user1);
+        // Confirmations meet the threshold, but the standing objection wins.
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+    }
+
     #[test]
     fn execute_requires_threshold() {
         let (env, client, accounts) = setup!();
-        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
         // Below the threshold of 2: execution is still blocked.
         client.confirm(&tx_id, &accounts.user2);
         let err = client.try_execute(&tx_id).unwrap_err().unwrap();
@@ -966,7 +1466,9 @@ mod tests {
     #[test]
     fn execute_after_threshold_succeeds() {
         let (env, client, accounts) = setup!();
-        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, MockTarget, ());
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env));
         client.confirm(&tx_id, &accounts.user2);
         client.confirm(&tx_id, &accounts.user3);
         client.execute(&tx_id);
@@ -976,7 +1478,9 @@ mod tests {
     #[test]
     fn execute_twice_is_invalid() {
         let (env, client, accounts) = setup!();
-        let tx_id = client.submit(&accounts.user1, &payload(&env));
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, MockTarget, ());
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env));
         client.confirm(&tx_id, &accounts.user2);
         client.confirm(&tx_id, &accounts.user3);
         client.execute(&tx_id);
@@ -989,6 +1493,192 @@ mod tests {
         let (_env, client, _accounts) = setup!();
         let err = client.try_get_tx(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
+    }
+
+    // -------------------------------------------------------------------
+    // Read-only introspection views
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn get_owners_round_trips_initialization_order() {
+        let (env, client, accounts) = setup!();
+        let owners = client.get_owners();
+        assert_eq!(owners, owner_vec(&env, &accounts));
+        assert_eq!(owners.len(), 3);
+        assert_eq!(owners.get_unchecked(0), accounts.user1);
+        assert_eq!(owners.get_unchecked(1), accounts.user2);
+        assert_eq!(owners.get_unchecked(2), accounts.user3);
+    }
+
+    #[test]
+    fn get_owners_before_initialize_is_not_initialized() {
+        let (_env, client, _accounts) = fresh!();
+        let err = client.try_get_owners().unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotInitialized);
+    }
+
+    #[test]
+    fn is_owner_recognizes_members_only() {
+        let (_env, client, accounts) = setup!();
+        assert!(client.is_owner(&accounts.user1));
+        assert!(client.is_owner(&accounts.user2));
+        assert!(client.is_owner(&accounts.user3));
+        assert!(!client.is_owner(&accounts.arbiter));
+    }
+
+    #[test]
+    fn is_owner_before_initialize_is_false() {
+        let (_env, client, accounts) = fresh!();
+        assert!(!client.is_owner(&accounts.user1));
+        assert!(!client.is_owner(&accounts.arbiter));
+    }
+
+    #[test]
+    fn get_confirmations_reflects_recorded_order() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let empty = client.get_confirmations(&tx_id);
+        assert_eq!(empty.len(), 0);
+
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        let confirmations = client.get_confirmations(&tx_id);
+        assert_eq!(confirmations.len(), 2);
+        assert_eq!(confirmations.get_unchecked(0), accounts.user2);
+        assert_eq!(confirmations.get_unchecked(1), accounts.user3);
+    }
+
+    #[test]
+    fn get_confirmations_duplicate_confirm_leaves_list_unchanged() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        let err = client
+            .try_confirm(&tx_id, &accounts.user2)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+
+        let confirmations = client.get_confirmations(&tx_id);
+        assert_eq!(confirmations.len(), 1);
+        assert_eq!(confirmations.get_unchecked(0), accounts.user2);
+    }
+
+    #[test]
+    fn get_confirmations_unknown_tx_is_not_found() {
+        let (_env, client, _accounts) = setup!();
+        let err = client.try_get_confirmations(&999).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn get_confirmations_before_initialize_is_not_found() {
+        let (_env, client, _accounts) = fresh!();
+        let err = client.try_get_confirmations(&1).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn get_rejections_reflects_recorded_order() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let empty = client.get_rejections(&tx_id);
+        assert_eq!(empty.len(), 0);
+
+        client.reject(&tx_id, &accounts.user2);
+        client.reject(&tx_id, &accounts.user3);
+        let rejections = client.get_rejections(&tx_id);
+        assert_eq!(rejections.len(), 2);
+        assert_eq!(rejections.get_unchecked(0), accounts.user2);
+        assert_eq!(rejections.get_unchecked(1), accounts.user3);
+    }
+
+    #[test]
+    fn get_rejections_unknown_tx_is_not_found() {
+        let (_env, client, _accounts) = setup!();
+        let err = client.try_get_rejections(&999).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn get_rejections_before_initialize_is_not_found() {
+        let (_env, client, _accounts) = fresh!();
+        let err = client.try_get_rejections(&1).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn get_tx_count_tracks_submits() {
+        let (env, client, accounts) = setup!();
+        assert_eq!(client.get_tx_count(), 0);
+        client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.submit(&accounts.user2, &target(&env), &payload(&env));
+        client.submit(&accounts.user1, &target(&env), &payload(&env));
+        assert_eq!(client.get_tx_count(), 3);
+    }
+
+    #[test]
+    fn get_tx_count_does_not_count_failed_submits() {
+        let (env, client, accounts) = setup!();
+        // A rejected submit (non-owner) never advances the counter.
+        let err = client
+            .try_submit(&accounts.arbiter, &target(&env), &payload(&env))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+        assert_eq!(client.get_tx_count(), 0);
+
+        client.submit(&accounts.user1, &target(&env), &payload(&env));
+        assert_eq!(client.get_tx_count(), 1);
+    }
+
+    #[test]
+    fn get_tx_count_before_initialize_is_zero() {
+        let (_env, client, _accounts) = fresh!();
+        assert_eq!(client.get_tx_count(), 0);
+    }
+
+    #[test]
+    fn execute_invokes_target_contract() {
+        let (env, client, accounts) = setup!();
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, MockTarget, ());
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        client.execute(&tx_id);
+
+        // The tx was executed successfully.
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
+    }
+
+    #[test]
+    fn execute_target_revert_leaves_tx_unexecuted() {
+        let (env, client, accounts) = setup!();
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, BlockingTarget, ());
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env));
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+
+        // Execution should fail because the target panics.
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::ContractInvocationFailed);
+        // The tx is NOT executed.
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+    }
+
+    #[test]
+    fn execute_below_threshold_does_not_invoke_target() {
+        let (env, client, accounts) = setup!();
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, MockTarget, ());
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env));
+        // Only one confirmation, threshold is 2.
+        client.confirm(&tx_id, &accounts.user2);
+        // Should fail before invoking the target.
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
     }
 
     // -------------------------------------------------------------------
@@ -1104,6 +1794,37 @@ mod tests {
         assert_eq!(err, ForgeError::InvalidInput);
         assert_eq!(token_client.balance(&accounts.arbiter), 0);
         assert_eq!(client.balance(&token), 1_000);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+    }
+
+    #[test]
+    fn withdrawal_rejection_at_threshold_moves_no_tokens() {
+        let (_env, client, accounts, token, token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &1_000);
+
+        let tx_id = client.submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &400_i128);
+        client.reject(&tx_id, &accounts.user2);
+        client.reject(&tx_id, &accounts.user3);
+
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
+        assert_eq!(token_client.balance(&accounts.arbiter), 0);
+        assert_eq!(client.balance(&token), 1_000);
+    }
+
+    #[test]
+    fn sub_threshold_withdrawal_rejection_blocks_execute() {
+        let (_env, client, accounts, token, _token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &1_000);
+
+        let tx_id = client.submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &400_i128);
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        // The submitter's standing objection stalls an otherwise
+        // threshold-met withdrawal.
+        client.reject(&tx_id, &accounts.user1);
+
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
         assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
     }
 

@@ -38,4 +38,9 @@ pub enum ForgeError {
     /// code, so it is bucketed; the root cause remains visible in the
     /// transaction's diagnostic events.
     TokenTransferFailed = 11,
+    /// A cross-contract invocation failed (target reverted or host
+    /// abort). The target reverts are surfaced here so the caller can
+    /// distinguish them from token-transfer failures, and the invoking
+    /// transaction is left un-executed.
+    ContractInvocationFailed = 12,
 }

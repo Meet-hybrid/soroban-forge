@@ -65,6 +65,20 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  dependency-policy:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+      - name: Check dependency sources
+        run: cargo deny check sources
+      - name: Check dependency bans
+        run: cargo deny check bans
+
   wasm-size:
     name: WASM Size Check
     runs-on: ubuntu-latest
