@@ -12,7 +12,7 @@ use soroban_sdk::Env;
 
 pub mod mocks;
 
-pub use mocks::TestAccounts;
+pub use mocks::{TestAccounts, TokenFixture};
 
 /// Create a [`Env`] configured for contract testing.
 ///
