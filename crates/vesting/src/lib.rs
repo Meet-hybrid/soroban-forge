@@ -186,6 +186,7 @@ impl Vesting {
         env.storage()
             .instance()
             .set(&DataKey::Schedule(id), &schedule);
+        events::schedule_created(&env, id, &schedule);
         Ok(id)
     }
 
@@ -221,6 +222,7 @@ impl Vesting {
         env.storage()
             .instance()
             .set(&DataKey::Schedule(schedule_id), &schedule);
+        events::claimed(&env, schedule_id, amount, &schedule);
         Ok(amount)
     }
 
@@ -339,6 +341,45 @@ fn transfer_from_contract(
         // logic) or the host aborted (most commonly an undeployed token
         // address). The raw discriminant is intentionally discarded.
         _ => Err(ForgeError::TokenTransferFailed),
+    }
+}
+
+/// Lifecycle events. The schedule id is a **topic** so indexers can filter by
+/// schedule cheaply; the data payload carries the full record so no read call is
+/// needed to reconstruct the schedule state.
+mod events {
+    use super::*;
+
+    #[contractevent]
+    pub struct ScheduleCreated {
+        #[topic]
+        pub schedule_id: u64,
+        pub data: VestingSchedule,
+    }
+
+    #[contractevent]
+    pub struct Claimed {
+        #[topic]
+        pub schedule_id: u64,
+        pub amount: i128,
+        pub data: VestingSchedule,
+    }
+
+    pub fn schedule_created(env: &Env, schedule_id: u64, schedule: &VestingSchedule) {
+        ScheduleCreated {
+            schedule_id,
+            data: schedule.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn claimed(env: &Env, schedule_id: u64, amount: i128, schedule: &VestingSchedule) {
+        Claimed {
+            schedule_id,
+            amount,
+            data: schedule.clone(),
+        }
+        .publish(env);
     }
 }
 

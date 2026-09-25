@@ -57,8 +57,9 @@ bricking problem. Migrate per contract with the escrow pattern.
 
 ### 3. No events outside escrow
 
-Only escrow is observable on-chain. The rest need event modules before
-any indexer or SDK integration.
+Escrow, vesting, and DAO governance are now observable on-chain. The
+remaining contracts still need event modules before any indexer or SDK
+integration can reconstruct those lifecycles from events alone.
 
 ### 4. Negative authorization coverage outside escrow
 
