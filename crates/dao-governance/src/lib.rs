@@ -134,7 +134,7 @@ pub enum ProposalState {
 
 /// A single governance proposal.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Proposal {
     /// Stable identifier assigned at creation.
     pub proposal_id: u64,
@@ -205,7 +205,7 @@ impl DaoGovernance {
         env.storage()
             .instance()
             .set(&DataKey::Proposal(proposal_id), &proposal);
-        events::proposal_created(&env, &proposal);
+        events::proposed(&env, &proposal);
         Ok(proposal_id)
     }
 
@@ -279,12 +279,26 @@ impl DaoGovernance {
                     env.storage()
                         .instance()
                         .set(&DataKey::Proposal(proposal_id), &proposal);
+                    events::finalised(
+                        &env,
+                        proposal_id,
+                        proposal.state.clone(),
+                        proposal.for_votes,
+                        proposal.against_votes,
+                    );
                     Ok(())
                 } else {
                     proposal.state = ProposalState::Defeated;
                     env.storage()
                         .instance()
                         .set(&DataKey::Proposal(proposal_id), &proposal);
+                    events::finalised(
+                        &env,
+                        proposal_id,
+                        proposal.state.clone(),
+                        proposal.for_votes,
+                        proposal.against_votes,
+                    );
                     Ok(())
                 }
             }
@@ -306,7 +320,13 @@ impl DaoGovernance {
                 env.storage()
                     .instance()
                     .set(&DataKey::Proposal(proposal_id), &proposal);
-                events::executed(&env, &proposal);
+                events::finalised(
+                    &env,
+                    proposal_id,
+                    proposal.state.clone(),
+                    proposal.for_votes,
+                    proposal.against_votes,
+                );
                 Ok(())
             }
             ProposalState::Defeated
@@ -425,7 +445,7 @@ mod events {
     use super::*;
 
     #[contractevent]
-    pub struct ProposalCreated {
+    pub struct Proposed {
         #[topic]
         pub proposal_id: u64,
         pub data: Proposal,
@@ -435,20 +455,21 @@ mod events {
     pub struct VoteCast {
         #[topic]
         pub proposal_id: u64,
-        #[topic]
         pub voter: Address,
         pub support: bool,
     }
 
     #[contractevent]
-    pub struct Executed {
+    pub struct Finalised {
         #[topic]
         pub proposal_id: u64,
-        pub data: Proposal,
+        pub state: ProposalState,
+        pub for_votes: i128,
+        pub against_votes: i128,
     }
 
-    pub fn proposal_created(env: &Env, proposal: &Proposal) {
-        ProposalCreated {
+    pub fn proposed(env: &Env, proposal: &Proposal) {
+        Proposed {
             proposal_id: proposal.proposal_id,
             data: proposal.clone(),
         }
@@ -464,10 +485,18 @@ mod events {
         .publish(env);
     }
 
-    pub fn executed(env: &Env, proposal: &Proposal) {
-        Executed {
-            proposal_id: proposal.proposal_id,
-            data: proposal.clone(),
+    pub fn finalised(
+        env: &Env,
+        proposal_id: u64,
+        state: ProposalState,
+        for_votes: i128,
+        against_votes: i128,
+    ) {
+        Finalised {
+            proposal_id,
+            state,
+            for_votes,
+            against_votes,
         }
         .publish(env);
     }
@@ -920,20 +949,109 @@ mod tests {
 
     #[test]
     fn events_emitted_during_proposal_lifecycle() {
-        let (env, client, accounts, proposal_id, _target_id) = setup!();
-        assert_eq!(env.events().all().events().len(), 1); // ProposalCreated
+        use soroban_sdk::xdr::{self, ScVal};
 
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(START);
+        let contract_id = env.register(DaoGovernance, ());
+        let client = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        let target_id = env.register(MockTarget, ());
+
+        // 1. propose emits Proposed with topic proposal_id
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let all = env.events().all();
+        let events = all.events();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        let xdr::ContractEventBody::V0(body) = &event.body;
+        assert_eq!(
+            body.topics.first().unwrap(),
+            &ScVal::Symbol("proposed".try_into().unwrap())
+        );
+        assert_eq!(body.topics.get(1).unwrap(), &ScVal::U64(proposal_id));
+
+        // 2. vote emits VoteCast with topic proposal_id
         client.vote(&proposal_id, &accounts.user2, &true);
-        assert_eq!(env.events().all().events().len(), 1); // VoteCast
+        let all = env.events().all();
+        let events = all.events();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        let xdr::ContractEventBody::V0(body) = &event.body;
+        assert_eq!(
+            body.topics.first().unwrap(),
+            &ScVal::Symbol("vote_cast".try_into().unwrap())
+        );
+        assert_eq!(body.topics.get(1).unwrap(), &ScVal::U64(proposal_id));
+
+        // 3. Negative assertion: failed duplicate vote emits no events
+        let err = client
+            .try_vote(&proposal_id, &accounts.user2, &true)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(env.events().all().events().len(), 0);
+
+        // 4. Negative assertion: read-only get_proposal emits no events
+        let _ = client.get_proposal(&proposal_id);
+        assert_eq!(env.events().all().events().len(), 0);
+
+        // 5. execute finalisation (Active -> Succeeded) emits Finalised
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+        let all = env.events().all();
+        let events = all.events();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        let xdr::ContractEventBody::V0(body) = &event.body;
+        assert_eq!(
+            body.topics.first().unwrap(),
+            &ScVal::Symbol("finalised".try_into().unwrap())
+        );
+        assert_eq!(body.topics.get(1).unwrap(), &ScVal::U64(proposal_id));
+
+        // 6. execute invocation (Succeeded -> Executed) emits Finalised
+        client.execute(&proposal_id);
+        let all = env.events().all();
+        let events = all.events();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        let xdr::ContractEventBody::V0(body) = &event.body;
+        assert_eq!(
+            body.topics.first().unwrap(),
+            &ScVal::Symbol("finalised".try_into().unwrap())
+        );
+        assert_eq!(body.topics.get(1).unwrap(), &ScVal::U64(proposal_id));
+    }
+
+    #[test]
+    fn events_emitted_on_defeated_proposal() {
+        use soroban_sdk::xdr::{self, ScVal};
+
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(START);
+        let contract_id = env.register(DaoGovernance, ());
+        let client = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        let target_id = env.register(MockTarget, ());
+
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        client.vote(&proposal_id, &accounts.user2, &false);
 
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&proposal_id);
-        assert_eq!(env.events().all().events().len(), 0); // finalisation only
-
-        client.execute(&proposal_id);
-        assert_eq!(env.events().all().events().len(), 1); // Executed
-
-        // Each successful contract invocation exposes its emitted events.
+        let all = env.events().all();
+        let events = all.events();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        let xdr::ContractEventBody::V0(body) = &event.body;
+        assert_eq!(
+            body.topics.first().unwrap(),
+            &ScVal::Symbol("finalised".try_into().unwrap())
+        );
+        assert_eq!(body.topics.get(1).unwrap(), &ScVal::U64(proposal_id));
     }
 
     #[test]

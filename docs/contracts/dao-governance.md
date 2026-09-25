@@ -39,3 +39,18 @@ the target contract accepts.
 - `Executed` — On-chain action executed
 - `Cancelled` — Revoked by proposer
 - `Expired` — Voting ended without quorum
+
+## Events
+
+The contract emits structured events for all state changes using the standard `proposal_id` topic pattern:
+
+- **`Proposed`**: Emitted when a new proposal is created.
+  - Topics: `proposal_id: u64`
+  - Data: `data: Proposal` (the full initial proposal record)
+- **`VoteCast`**: Emitted when a voter casts a vote.
+  - Topics: `proposal_id: u64`
+  - Data: `voter: Address`, `support: bool`
+- **`Finalised`**: Emitted when a proposal transitions state during execution (e.g. `Active` → `Succeeded`, `Active` → `Defeated`, or `Succeeded` → `Executed`).
+  - Topics: `proposal_id: u64`
+  - Data: `state: ProposalState`, `for_votes: i128`, `against_votes: i128`
+

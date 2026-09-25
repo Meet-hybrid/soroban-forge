@@ -58,7 +58,7 @@ on-chain.
 | `vote` | ✅ Implemented | One-vote-per-voter enforced |
 | `execute` | ✅ Implemented | Permissionless majority finalisation, then `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Succeeded` |
 | `get_proposal` | ✅ Implemented | Read-only |
-| Events | ✅ Implemented | `ProposalCreated`, `VoteCast`, and `Executed` |
+| Events | ✅ Implemented | `Proposed`, `VoteCast`, and `Finalised` (`proposal_id` as topic) |
 | Weighted voting | ❌ Not implemented | Follow-up |
 
 ## Subscription Payments (`crates/subscription-payments`)
@@ -90,7 +90,7 @@ on-chain.
 |---|---|---|
 | Checked arithmetic | ✅ Workspace-wide | Overflow-safe; vesting guards documented |
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow: proven against wrong signers via the negative-auth suite (`authz.rs`) + authorization-tree assertions; other five: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
-| Events | ⚠️ Escrow + DAO | Full lifecycle events on escrow; proposal lifecycle events on DAO governance |
+| Events | ⚠️ Escrow + Multi-Sig + DAO | Full lifecycle events on escrow, multi-sig wallet, and DAO governance |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
 | SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale` settles splits; multi-sig `execute` and DAO governance `execute` perform cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions still store amounts only |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |

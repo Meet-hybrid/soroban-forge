@@ -25,8 +25,8 @@ contract** and remain open for the other four:
    instance storage exclusively.
 3. **No events** — escrow emits `EscrowCreated`, `Deposited`, `Released`,
    `Refunded`, `Disputed`, `Resolved`, `Cancelled` (escrow id as topic).
-   DAO governance also emits proposal lifecycle events; the other four are
-   still silent.
+   Multi-sig wallet and DAO governance also emit lifecycle events; the other
+   three are still silent.
 4. **Arbiter stored but unreachable** — `dispute` (claimant-authorized)
    and `resolve` (arbiter-only, final) make the third party live.
    `Disputed` is a real state, verified by tests.
@@ -55,10 +55,11 @@ The other five contracts keep all state in `env.storage().instance()`.
 Long-lived records there still face the byte budget and TTL-expiry
 bricking problem. Migrate per contract with the escrow pattern.
 
-### 3. No events outside escrow
+### 3. No events outside escrow, multi-sig, and DAO governance
 
-Only escrow is observable on-chain. The rest need event modules before
-any indexer or SDK integration.
+Only escrow, multi-sig wallet, and DAO governance are observable on-chain.
+The remaining three contracts (vesting, subscriptions, and marketplace
+royalties) need event modules before any indexer or SDK integration.
 
 ### 4. Negative authorization coverage outside escrow
 
