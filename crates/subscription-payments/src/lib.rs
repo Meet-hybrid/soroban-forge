@@ -31,7 +31,7 @@
 extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env, Vec};
 
 /// Public interface for the Soroban Forge subscription payments contract.
 #[contractclient(name = "SorobanForgeSubscriptionPaymentsClient")]
@@ -65,6 +65,37 @@ pub trait SorobanForgeSubscriptionPayments {
         env: Env,
         subscription_id: u64,
     ) -> Result<Subscription, soroban_forge_shared_utils::ForgeError>;
+
+    /// Total number of subscriptions created so far (read-only view).
+    fn get_subscription_count(env: Env) -> u64;
+
+    /// List `subscriber`'s subscriptions in creation order, one page at a
+    /// time (read-only view).
+    ///
+    /// `offset` skips the first `offset` subscriptions and `limit` caps the
+    /// page size. Returns a `Result` so a `limit` of `0` fails with
+    /// [`ForgeError::InvalidInput`]; an empty index or an out-of-bounds
+    /// offset yields an empty `Vec`, not an error.
+    fn subscriptions_for_subscriber(
+        env: Env,
+        subscriber: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Subscription>, soroban_forge_shared_utils::ForgeError>;
+
+    /// List `provider`'s subscriptions in creation order, one page at a time
+    /// (read-only view).
+    ///
+    /// `offset` skips the first `offset` subscriptions and `limit` caps the
+    /// page size. Returns a `Result` so a `limit` of `0` fails with
+    /// [`ForgeError::InvalidInput`]; an empty index or an out-of-bounds
+    /// offset yields an empty `Vec`, not an error.
+    fn subscriptions_for_provider(
+        env: Env,
+        provider: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Subscription>, soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Lifecycle state of a subscription.
@@ -108,6 +139,12 @@ enum DataKey {
     Subscription(u64),
     /// Monotonic subscription id counter.
     Count,
+    /// Creation-order subscription ids for which the `Address` is the
+    /// subscriber, in id order. Written once per `subscribe`.
+    SubscriberSubscriptions(Address),
+    /// Creation-order subscription ids for which the `Address` is the
+    /// provider, in id order. Written once per `subscribe`.
+    ProviderSubscriptions(Address),
 }
 
 /// The deployable subscription payments contract.
@@ -139,8 +176,8 @@ impl SubscriptionPayments {
         let subscription_id = Self::next_id(&env)?;
         let subscription = Subscription {
             subscription_id,
-            subscriber,
-            provider,
+            subscriber: subscriber.clone(),
+            provider: provider.clone(),
             token,
             amount,
             period,
@@ -150,6 +187,19 @@ impl SubscriptionPayments {
         env.storage()
             .instance()
             .set(&DataKey::Subscription(subscription_id), &subscription);
+        // Index writes join the success path after every fallible step
+        // (validation, `require_auth`, id allocation), so they cannot
+        // observe or create partial state.
+        Self::append_index(
+            &env,
+            &DataKey::SubscriberSubscriptions(subscriber),
+            subscription_id,
+        );
+        Self::append_index(
+            &env,
+            &DataKey::ProviderSubscriptions(provider),
+            subscription_id,
+        );
         Ok(subscription_id)
     }
 
@@ -204,6 +254,63 @@ impl SubscriptionPayments {
         Self::get_subscription_impl(&env, subscription_id)
     }
 
+    /// Total number of subscriptions created so far (read-only view).
+    ///
+    /// This is the monotonic id counter, which only `subscribe` advances, so
+    /// it never decreases and equals the number of live ids returned by the
+    /// enumeration views.
+    pub fn get_subscription_count(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::Count).unwrap_or(0)
+    }
+
+    /// List `subscriber`'s subscriptions in creation order, one page at a
+    /// time (read-only view).
+    ///
+    /// Requires no authorization and never mutates storage. An address with
+    /// no subscriptions — or an offset at or past the end of its list —
+    /// returns an empty `Vec`, not an error, so clients can back "my
+    /// subscriptions" views without an off-chain indexer.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — `limit` is zero.
+    pub fn subscriptions_for_subscriber(
+        env: Env,
+        subscriber: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Subscription>, ForgeError> {
+        if limit == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        let ids = Self::index_ids(&env, &DataKey::SubscriberSubscriptions(subscriber));
+        Self::resolve_page(&env, &ids, offset, limit)
+    }
+
+    /// List `provider`'s subscriptions in creation order, one page at a time
+    /// (read-only view).
+    ///
+    /// Requires no authorization and never mutates storage. An address with
+    /// no subscriptions — or an offset at or past the end of its list —
+    /// returns an empty `Vec`, not an error, so clients can back "my
+    /// subscribers" views without an off-chain indexer.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — `limit` is zero.
+    pub fn subscriptions_for_provider(
+        env: Env,
+        provider: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Subscription>, ForgeError> {
+        if limit == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        let ids = Self::index_ids(&env, &DataKey::ProviderSubscriptions(provider));
+        Self::resolve_page(&env, &ids, offset, limit)
+    }
+
     /// Allocate the next monotonic subscription id.
     fn next_id(env: &Env) -> Result<u64, ForgeError> {
         let count: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
@@ -217,6 +324,47 @@ impl SubscriptionPayments {
             .instance()
             .get(&DataKey::Subscription(subscription_id))
             .ok_or(ForgeError::NotFound)
+    }
+
+    /// Append `subscription_id` to an index, carrying the address the index
+    /// belongs to in the key.
+    fn append_index(env: &Env, key: &DataKey, subscription_id: u64) {
+        let mut ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(key)
+            .unwrap_or_else(|| Vec::new(env));
+        ids.push_back(subscription_id);
+        env.storage().instance().set(key, &ids);
+    }
+
+    /// Read an index's id list, defaulting to empty when the address has no
+    /// entries.
+    fn index_ids(env: &Env, key: &DataKey) -> Vec<u64> {
+        env.storage()
+            .instance()
+            .get(key)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Resolve a contiguous slice of `ids` into `Subscription` records.
+    ///
+    /// `offset` is clamped to the list length and `end` saturates, so an
+    /// out-of-bounds offset yields an empty `Vec` rather than a bounds panic.
+    fn resolve_page(
+        env: &Env,
+        ids: &Vec<u64>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Subscription>, ForgeError> {
+        let total = ids.len();
+        let (mut at, end) = (offset.min(total), offset.saturating_add(limit).min(total));
+        let mut subscriptions = Vec::new(env);
+        while at < end {
+            subscriptions.push_back(Self::get_subscription_impl(env, ids.get_unchecked(at))?);
+            at += 1;
+        }
+        Ok(subscriptions)
     }
 }
 
@@ -382,5 +530,155 @@ mod tests {
         let (_env, client, _accounts, _id) = setup!();
         let err = client.try_get_subscription(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn get_subscription_count_tracks_creations() {
+        let (_env, client, accounts, _id) = setup!();
+        assert_eq!(client.get_subscription_count(), 1);
+        let id2 = client.subscribe(
+            &accounts.user2,
+            &accounts.validator,
+            &accounts.deployer,
+            &AMOUNT,
+            &PERIOD,
+        );
+        assert_eq!(client.get_subscription_count(), 2);
+        // Cancelling does not lower the creation count.
+        client.cancel(&id2);
+        assert_eq!(client.get_subscription_count(), 2);
+    }
+
+    #[test]
+    fn subscriber_index_tracks_multiple_providers() {
+        let (_env, client, accounts, _id) = setup!();
+        let id2 = client.subscribe(
+            &accounts.user1,
+            &accounts.arbiter,
+            &accounts.deployer,
+            &AMOUNT,
+            &PERIOD,
+        );
+        let page = client.subscriptions_for_subscriber(&accounts.user1, &0, &10);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page.get_unchecked(0).subscription_id, 1);
+        assert_eq!(page.get_unchecked(0).provider, accounts.validator);
+        assert_eq!(page.get_unchecked(1).subscription_id, id2);
+        assert_eq!(page.get_unchecked(1).provider, accounts.arbiter);
+    }
+
+    #[test]
+    fn provider_index_tracks_multiple_subscribers() {
+        let (_env, client, accounts, _id) = setup!();
+        let id2 = client.subscribe(
+            &accounts.user2,
+            &accounts.validator,
+            &accounts.deployer,
+            &AMOUNT,
+            &PERIOD,
+        );
+        let page = client.subscriptions_for_provider(&accounts.validator, &0, &10);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page.get_unchecked(0).subscriber, accounts.user1);
+        assert_eq!(page.get_unchecked(0).subscription_id, 1);
+        assert_eq!(page.get_unchecked(1).subscriber, accounts.user2);
+        assert_eq!(page.get_unchecked(1).subscription_id, id2);
+    }
+
+    #[test]
+    fn pagination_slices_across_pages() {
+        let (_env, client, accounts, _id) = setup!();
+        // user1 adds four more subscriptions, for ids 2..=5.
+        client.subscribe(
+            &accounts.user1,
+            &accounts.arbiter,
+            &accounts.deployer,
+            &AMOUNT,
+            &PERIOD,
+        );
+        client.subscribe(
+            &accounts.user1,
+            &accounts.user3,
+            &accounts.deployer,
+            &AMOUNT,
+            &PERIOD,
+        );
+        client.subscribe(
+            &accounts.user1,
+            &accounts.user2,
+            &accounts.deployer,
+            &AMOUNT,
+            &PERIOD,
+        );
+        client.subscribe(
+            &accounts.user1,
+            &accounts.validator,
+            &accounts.deployer,
+            &AMOUNT,
+            &PERIOD,
+        );
+
+        let first = client.subscriptions_for_subscriber(&accounts.user1, &0, &2);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first.get_unchecked(0).subscription_id, 1);
+        assert_eq!(first.get_unchecked(1).subscription_id, 2);
+
+        let mid = client.subscriptions_for_subscriber(&accounts.user1, &2, &2);
+        assert_eq!(mid.len(), 2);
+        assert_eq!(mid.get_unchecked(0).subscription_id, 3);
+        assert_eq!(mid.get_unchecked(1).subscription_id, 4);
+
+        let last = client.subscriptions_for_subscriber(&accounts.user1, &4, &10);
+        assert_eq!(last.len(), 1);
+        assert_eq!(last.get_unchecked(0).subscription_id, 5);
+    }
+
+    #[test]
+    fn subscriptions_for_unknown_address_are_empty() {
+        let (_env, client, accounts, _id) = setup!();
+        assert_eq!(
+            client
+                .subscriptions_for_subscriber(&accounts.arbiter, &0, &10)
+                .len(),
+            0
+        );
+        assert_eq!(
+            client
+                .subscriptions_for_provider(&accounts.arbiter, &0, &10)
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_offset_returns_empty() {
+        let (_env, client, accounts, _id) = setup!();
+        assert_eq!(
+            client
+                .subscriptions_for_subscriber(&accounts.user1, &1, &10)
+                .len(),
+            0
+        );
+        assert_eq!(
+            client
+                .subscriptions_for_provider(&accounts.validator, &2, &10)
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn zero_limit_is_invalid_input() {
+        let (_env, client, accounts, _id) = setup!();
+        let err = client
+            .try_subscriptions_for_subscriber(&accounts.user1, &0, &0)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        let err = client
+            .try_subscriptions_for_provider(&accounts.validator, &0, &0)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
     }
 }
