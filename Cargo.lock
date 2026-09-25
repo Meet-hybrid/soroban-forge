@@ -1680,6 +1680,7 @@ dependencies = [
 name = "soroban-forge-marketplace-royalties"
 version = "0.2.0"
 dependencies = [
+ "proptest",
  "soroban-forge-shared-utils",
  "soroban-forge-test-utils",
  "soroban-sdk",
@@ -1705,6 +1706,7 @@ dependencies = [
 name = "soroban-forge-subscription-payments"
 version = "0.2.0"
 dependencies = [
+ "proptest",
  "soroban-forge-shared-utils",
  "soroban-forge-test-utils",
  "soroban-sdk",

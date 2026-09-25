@@ -4,8 +4,8 @@
 //!
 //! Recurring, on-chain subscription billing: a subscriber authorises a
 //! provider to pull a fixed `amount` per `period` (seconds) from a token
-//! balance. The contract tracks subscription state and billing cadence; the
-//! provider pulls each period by calling [`SorobanForgeSubscriptionPayments::charge`].
+//! balance using SEP-41 tokens. The contract tracks subscription state,
+//! billing cadence, token settlement, pause/resume, and arrears retry handling.
 //!
 //! Lifecycle:
 //!
@@ -14,36 +14,30 @@
 //!                 \         /
 //!                  v       v
 //!                   cancel -> Cancelled (no further charges)
+//! subscribe -> Active --(period elapses, charge succeeds)--> bills amount, advances
+//!            -> Active --(period elapses, charge fails)---> PastDue (arrears retry)
+//!            -> PastDue --(retry exceeds max retries)-----> Cancelled
+//!            -> cancel -> Cancelled (no further charges)
 //! ```
 //!
 //! Authorization model:
 //! - `subscribe` requires the subscriber (who authorises the agreement).
-//! - `charge` requires the provider (who pulls payment) and only bills when a
-//!   full period has elapsed since the last charge.
+//! - `charge` requires the provider (who pulls payment) and bills when a
+//!   full period has elapsed since the last charge, executing a SEP-41 token
+//!   transfer from subscriber to provider.
 //! - `pause` requires the subscriber.
 //! - `resume` requires the subscriber.
-//! - `cancel` requires the subscriber.
+//! - `cancel` requires the subscriber (works from `Active`, `Paused`, or `PastDue`).
 //! - `get_subscription` is a read-only view.
-//!
-//! ## Resume Semantics
-//!
-//! When a subscription is resumed from `Paused`, `last_charged` is advanced by
-//! the exact elapsed paused duration (`ledger_timestamp - paused_at`). This
-//! pushes the next due date (`last_charged + period`) forward by the paused
-//! duration so that the paused interval is never billed, and any remaining
-//! time in the unbilled cycle is preserved deterministically.
-//!
-//! The `PastDue` status is reserved for a failed-payment retry model that
-//! lands in a follow-up; it is not reachable through the current public
-//! interface. Token settlement (SAC transfers) is intentionally out of scope
-//! for this iteration: the contract tracks state and authorisation, not
-//! balances.
 
 #[cfg(test)]
 extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, Env};
+
+/// Maximum consecutive failed payment attempts before transitioning to Cancelled.
+const MAX_RETRIES: u32 = 3;
 
 /// Public interface for the Soroban Forge subscription payments contract.
 #[contractclient(name = "SorobanForgeSubscriptionPaymentsClient")]
@@ -82,7 +76,7 @@ pub trait SorobanForgeSubscriptionPayments {
 
     /// Cancel `subscription_id`, preventing further charges.
     ///
-    /// Requires the subscriber. Valid when `Active` or `Paused`.
+    /// Requires the subscriber. Valid when `Active`, `Paused`, or `PastDue`.
     fn cancel(env: Env, subscription_id: u64)
         -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
@@ -109,7 +103,7 @@ pub enum SubscriptionStatus {
 
 /// A recurring payment agreement.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Subscription {
     /// Stable identifier assigned at creation.
     pub subscription_id: u64,
@@ -129,6 +123,8 @@ pub struct Subscription {
     pub status: SubscriptionStatus,
     /// Ledger timestamp when paused, if currently paused.
     pub paused_at: Option<u64>,
+    /// Number of consecutive failed billing attempts.
+    pub failed_attempts: u32,
 }
 
 /// Instance-storage keys.
@@ -177,6 +173,7 @@ impl SubscriptionPayments {
             last_charged: env.ledger().timestamp(),
             status: SubscriptionStatus::Active,
             paused_at: None,
+            failed_attempts: 0,
         };
         env.storage()
             .instance()
@@ -188,11 +185,18 @@ impl SubscriptionPayments {
     ///
     /// Requires the provider. If a full period has not elapsed since the last
     /// charge, returns `0` and leaves the subscription untouched. Otherwise
-    /// advances the billing point by one period and returns the billed amount.
-    /// Repeating the call catches up at most one period at a time.
+    /// attempts to transfer `amount` of `token` from `subscriber` to `provider`.
+    ///
+    /// - On successful payment: advances `last_charged` by one period, resets
+    ///   `failed_attempts` to 0, transitions status to `Active`, and returns `amount`.
+    /// - On failed payment: `last_charged` is NOT advanced. Increments `failed_attempts`.
+    ///   If `failed_attempts >= MAX_RETRIES` (3), status becomes `Cancelled`.
+    ///   Otherwise status becomes `PastDue`. Returns `0`.
     pub fn charge(env: Env, subscription_id: u64) -> Result<i128, ForgeError> {
         let mut subscription = Self::get_subscription_impl(&env, subscription_id)?;
-        if subscription.status != SubscriptionStatus::Active {
+        if subscription.status == SubscriptionStatus::Cancelled
+            || subscription.status == SubscriptionStatus::Paused
+        {
             return Err(ForgeError::InvalidInput);
         }
         subscription.provider.require_auth();
@@ -205,11 +209,38 @@ impl SubscriptionPayments {
             return Ok(0);
         }
 
-        subscription.last_charged = next_due;
-        env.storage()
-            .instance()
-            .set(&DataKey::Subscription(subscription_id), &subscription);
-        Ok(subscription.amount)
+        // Execute SEP-41 token transfer from subscriber to provider
+        let transfer_result = token::TokenClient::new(&env, &subscription.token).try_transfer(
+            &subscription.subscriber,
+            &subscription.provider,
+            &subscription.amount,
+        );
+
+        match transfer_result {
+            Ok(Ok(())) => {
+                subscription.last_charged = next_due;
+                subscription.failed_attempts = 0;
+                subscription.status = SubscriptionStatus::Active;
+                subscription.paused_at = None;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Subscription(subscription_id), &subscription);
+                Ok(subscription.amount)
+            }
+            _ => {
+                let failed = subscription.failed_attempts.saturating_add(1);
+                subscription.failed_attempts = failed;
+                if failed >= MAX_RETRIES {
+                    subscription.status = SubscriptionStatus::Cancelled;
+                } else {
+                    subscription.status = SubscriptionStatus::PastDue;
+                }
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Subscription(subscription_id), &subscription);
+                Ok(0)
+            }
+        }
     }
 
     /// Pause an active subscription, preventing charges while paused.
@@ -261,13 +292,11 @@ impl SubscriptionPayments {
 
     /// Cancel a subscription, preventing further charges.
     ///
-    /// Requires the subscriber. Valid when `Active` or `Paused`. Cancelling
+    /// Requires the subscriber. Valid when `Active`, `Paused`, or `PastDue`. Cancelling
     /// an already-cancelled subscription is rejected.
     pub fn cancel(env: Env, subscription_id: u64) -> Result<(), ForgeError> {
         let mut subscription = Self::get_subscription_impl(&env, subscription_id)?;
-        if subscription.status != SubscriptionStatus::Active
-            && subscription.status != SubscriptionStatus::Paused
-        {
+        if subscription.status == SubscriptionStatus::Cancelled {
             return Err(ForgeError::InvalidInput);
         }
         subscription.subscriber.require_auth();
@@ -302,40 +331,64 @@ impl SubscriptionPayments {
 }
 
 #[cfg(test)]
+mod authz;
+#[cfg(test)]
+mod props;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::testutils::Ledger as _;
-    use soroban_sdk::Env;
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+    use soroban_sdk::{Address, Env};
 
     const START: u64 = 1_000_000;
     const PERIOD: u64 = 1_000;
     const AMOUNT: i128 = 250;
 
-    /// Build a fresh env with mocked auths, a registered contract, a
-    /// subscription, and named accounts.
+    /// Build a fresh env with mocked auths, a registered contract, a real SEP-41
+    /// token with minted funds to subscriber, a subscription, and named accounts.
     macro_rules! setup {
         () => {{
             let env = Env::default();
-            env.mock_all_auths();
+            env.mock_all_auths_allowing_non_root_auth();
             env.ledger().set_timestamp(START);
+
+            let admin = Address::generate(&env);
+            let sac = env.register_stellar_asset_contract_v2(admin);
+            let token = sac.address();
+            let token_admin = StellarAssetClient::new(&env, &token);
+            let token_client = TokenClient::new(&env, &token);
+
             let contract_id = env.register(SubscriptionPayments, ());
             let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
             let accounts = TestAccounts::generate(&env);
+
+            token_admin.mint(&accounts.user1, &10_000_i128);
+
             let subscription_id = client.subscribe(
                 &accounts.user1,
                 &accounts.validator,
-                &accounts.deployer,
+                &token,
                 &AMOUNT,
                 &PERIOD,
             );
-            (env, client, accounts, subscription_id)
+            (
+                env,
+                token,
+                token_client,
+                contract_id,
+                client,
+                accounts,
+                subscription_id,
+            )
         }};
     }
 
     #[test]
     fn subscribe_succeeds_and_is_active() {
-        let (_env, client, accounts, subscription_id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, accounts, subscription_id) = setup!();
         let subscription = client.get_subscription(&subscription_id);
         assert_eq!(subscription.subscriber, accounts.user1);
         assert_eq!(subscription.provider, accounts.validator);
@@ -343,15 +396,16 @@ mod tests {
         assert_eq!(subscription.status, SubscriptionStatus::Active);
         assert_eq!(subscription.last_charged, START);
         assert_eq!(subscription.paused_at, None);
+        assert_eq!(subscription.failed_attempts, 0);
     }
 
     #[test]
     fn subscribe_assigns_distinct_ids() {
-        let (_env, client, accounts, subscription_id) = setup!();
+        let (_env, token, _tc, _contract_id, client, accounts, subscription_id) = setup!();
         let id2 = client.subscribe(
             &accounts.user2,
             &accounts.validator,
-            &accounts.deployer,
+            &token,
             &AMOUNT,
             &PERIOD,
         );
@@ -360,12 +414,12 @@ mod tests {
 
     #[test]
     fn subscribe_rejects_zero_amount() {
-        let (_env, client, accounts, _id) = setup!();
+        let (_env, token, _tc, _contract_id, client, accounts, _id) = setup!();
         let err = client
             .try_subscribe(
                 &accounts.user1,
                 &accounts.validator,
-                &accounts.deployer,
+                &token,
                 &0_i128,
                 &PERIOD,
             )
@@ -376,12 +430,12 @@ mod tests {
 
     #[test]
     fn subscribe_rejects_zero_period() {
-        let (_env, client, accounts, _id) = setup!();
+        let (_env, token, _tc, _contract_id, client, accounts, _id) = setup!();
         let err = client
             .try_subscribe(
                 &accounts.user1,
                 &accounts.validator,
-                &accounts.deployer,
+                &token,
                 &AMOUNT,
                 &0_u64,
             )
@@ -392,48 +446,152 @@ mod tests {
 
     #[test]
     fn charge_before_period_returns_zero() {
-        let (env, client, _accounts, subscription_id) = setup!();
+        let (env, _token, tc, _contract_id, client, accounts, subscription_id) = setup!();
         env.ledger().set_timestamp(START + PERIOD - 1);
         assert_eq!(client.charge(&subscription_id), 0);
         assert_eq!(
             client.get_subscription(&subscription_id).last_charged,
             START
         );
+        assert_eq!(tc.balance(&accounts.user1), 10_000);
+        assert_eq!(tc.balance(&accounts.validator), 0);
     }
 
     #[test]
-    fn charge_at_period_bills_full_amount() {
-        let (env, client, _accounts, subscription_id) = setup!();
+    fn charge_at_period_bills_full_amount_and_transfers_tokens() {
+        let (env, _token, tc, _contract_id, client, accounts, subscription_id) = setup!();
         env.ledger().set_timestamp(START + PERIOD);
         assert_eq!(client.charge(&subscription_id), AMOUNT);
         assert_eq!(
             client.get_subscription(&subscription_id).last_charged,
             START + PERIOD
         );
+        assert_eq!(tc.balance(&accounts.user1), 10_000 - AMOUNT);
+        assert_eq!(tc.balance(&accounts.validator), AMOUNT);
     }
 
     #[test]
     fn charge_catches_up_one_period_per_call() {
-        let (env, client, _accounts, subscription_id) = setup!();
+        let (env, _token, tc, _contract_id, client, accounts, subscription_id) = setup!();
         env.ledger().set_timestamp(START + PERIOD * 3);
-        // Each call bills a single period and advances the billing point.
+        // First call bills one period
         assert_eq!(client.charge(&subscription_id), AMOUNT);
         assert_eq!(
             client.get_subscription(&subscription_id).last_charged,
             START + PERIOD
         );
+        assert_eq!(tc.balance(&accounts.validator), AMOUNT);
+
+        // Second call bills second period
+        assert_eq!(client.charge(&subscription_id), AMOUNT);
+        assert_eq!(
+            client.get_subscription(&subscription_id).last_charged,
+            START + PERIOD * 2
+        );
+        assert_eq!(tc.balance(&accounts.validator), AMOUNT * 2);
+    }
+
+    #[test]
+    fn charge_failure_transitions_to_past_due_and_retry_restores_active() {
+        let (env, token, tc, _contract_id, client, accounts, _id) = setup!();
+        let broke_user = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&broke_user, &10_i128);
+        let sub_id = client.subscribe(&broke_user, &accounts.validator, &token, &AMOUNT, &PERIOD);
+
+        env.ledger().set_timestamp(START + PERIOD);
+
+        // First charge attempt fails due to insufficient balance in real SAC token
+        let billed = client.charge(&sub_id);
+        assert_eq!(billed, 0);
+
+        let sub_past_due = client.get_subscription(&sub_id);
+        assert_eq!(sub_past_due.status, SubscriptionStatus::PastDue);
+        assert_eq!(sub_past_due.failed_attempts, 1);
+        assert_eq!(sub_past_due.last_charged, START); // Not advanced!
+
+        // Subscriber gets funds minted now
+        StellarAssetClient::new(&env, &token).mint(&broke_user, &10_000_i128);
+
+        // Retry charge succeeds!
+        let billed = client.charge(&sub_id);
+        assert_eq!(billed, AMOUNT);
+
+        let sub_active = client.get_subscription(&sub_id);
+        assert_eq!(sub_active.status, SubscriptionStatus::Active);
+        assert_eq!(sub_active.failed_attempts, 0);
+        assert_eq!(sub_active.last_charged, START + PERIOD);
+        assert_eq!(tc.balance(&accounts.validator), AMOUNT);
+    }
+
+    #[test]
+    fn max_retries_exceeded_transitions_to_cancelled() {
+        let (env, token, _tc, _contract_id, client, accounts, _id) = setup!();
+        let broke_user = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&broke_user, &10_i128);
+        let sub_id = client.subscribe(&broke_user, &accounts.validator, &token, &AMOUNT, &PERIOD);
+
+        env.ledger().set_timestamp(START + PERIOD);
+
+        // Attempt 1 -> PastDue (failed_attempts = 1)
+        assert_eq!(client.charge(&sub_id), 0);
+        assert_eq!(
+            client.get_subscription(&sub_id).status,
+            SubscriptionStatus::PastDue
+        );
+
+        // Attempt 2 -> PastDue (failed_attempts = 2)
+        assert_eq!(client.charge(&sub_id), 0);
+        assert_eq!(
+            client.get_subscription(&sub_id).status,
+            SubscriptionStatus::PastDue
+        );
+
+        // Attempt 3 -> Cancelled (failed_attempts = 3)
+        assert_eq!(client.charge(&sub_id), 0);
+        assert_eq!(
+            client.get_subscription(&sub_id).status,
+            SubscriptionStatus::Cancelled
+        );
+
+        // Attempt 4 -> InvalidInput because status is now Cancelled
+        assert_eq!(
+            client.try_charge(&sub_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+    }
+
+    #[test]
+    fn cancel_from_past_due_succeeds() {
+        let (env, token, _tc, _contract_id, client, accounts, _id) = setup!();
+        let broke_user = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&broke_user, &10_i128);
+        let sub_id = client.subscribe(&broke_user, &accounts.validator, &token, &AMOUNT, &PERIOD);
+
+        env.ledger().set_timestamp(START + PERIOD);
+        let _ = client.charge(&sub_id);
+        assert_eq!(
+            client.get_subscription(&sub_id).status,
+            SubscriptionStatus::PastDue
+        );
+
+        // Cancel from PastDue
+        client.cancel(&sub_id);
+        assert_eq!(
+            client.get_subscription(&sub_id).status,
+            SubscriptionStatus::Cancelled
+        );
     }
 
     #[test]
     fn charge_missing_subscription_is_not_found() {
-        let (_env, client, _accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, _accounts, _id) = setup!();
         let err = client.try_charge(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 
     #[test]
     fn cancel_prevents_further_charges() {
-        let (env, client, _accounts, subscription_id) = setup!();
+        let (env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         client.cancel(&subscription_id);
         assert_eq!(
             client.get_subscription(&subscription_id).status,
@@ -446,7 +604,7 @@ mod tests {
 
     #[test]
     fn cancel_twice_is_invalid() {
-        let (_env, client, _accounts, subscription_id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         client.cancel(&subscription_id);
         let err = client.try_cancel(&subscription_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
@@ -454,21 +612,21 @@ mod tests {
 
     #[test]
     fn cancel_missing_subscription_is_not_found() {
-        let (_env, client, _accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, _accounts, _id) = setup!();
         let err = client.try_cancel(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 
     #[test]
     fn get_subscription_missing_is_not_found() {
-        let (_env, client, _accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, _accounts, _id) = setup!();
         let err = client.try_get_subscription(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 
     #[test]
     fn pause_active_subscription_succeeds() {
-        let (env, client, _accounts, subscription_id) = setup!();
+        let (env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         env.ledger().set_timestamp(START + 250);
         client.pause(&subscription_id);
 
@@ -479,7 +637,7 @@ mod tests {
 
     #[test]
     fn pause_already_paused_is_invalid() {
-        let (_env, client, _accounts, subscription_id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         client.pause(&subscription_id);
         let err = client.try_pause(&subscription_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
@@ -487,7 +645,7 @@ mod tests {
 
     #[test]
     fn pause_cancelled_is_invalid() {
-        let (_env, client, _accounts, subscription_id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         client.cancel(&subscription_id);
         let err = client.try_pause(&subscription_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
@@ -495,14 +653,14 @@ mod tests {
 
     #[test]
     fn pause_missing_is_not_found() {
-        let (_env, client, _accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, _accounts, _id) = setup!();
         let err = client.try_pause(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 
     #[test]
     fn charge_paused_subscription_fails_and_does_not_advance() {
-        let (env, client, _accounts, subscription_id) = setup!();
+        let (env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         env.ledger().set_timestamp(START + 100);
         client.pause(&subscription_id);
 
@@ -517,7 +675,7 @@ mod tests {
 
     #[test]
     fn resume_paused_subscription_advances_due_date_by_elapsed() {
-        let (env, client, _accounts, subscription_id) = setup!();
+        let (env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         // Pause at START + 300 (300s into 1000s period)
         env.ledger().set_timestamp(START + 300);
         client.pause(&subscription_id);
@@ -547,7 +705,7 @@ mod tests {
 
     #[test]
     fn pause_resume_zero_length_no_drift() {
-        let (env, client, _accounts, subscription_id) = setup!();
+        let (env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         env.ledger().set_timestamp(START + 300);
         client.pause(&subscription_id);
         client.resume(&subscription_id);
@@ -564,7 +722,7 @@ mod tests {
 
     #[test]
     fn pause_across_multiple_periods_preserves_remaining_cycle() {
-        let (env, client, _accounts, subscription_id) = setup!();
+        let (env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         // 100s into cycle (900s remaining)
         env.ledger().set_timestamp(START + 100);
         client.pause(&subscription_id);
@@ -587,14 +745,14 @@ mod tests {
 
     #[test]
     fn resume_active_subscription_is_invalid() {
-        let (_env, client, _accounts, subscription_id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         let err = client.try_resume(&subscription_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
     }
 
     #[test]
     fn resume_cancelled_subscription_is_invalid() {
-        let (_env, client, _accounts, subscription_id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         client.cancel(&subscription_id);
         let err = client.try_resume(&subscription_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
@@ -602,14 +760,14 @@ mod tests {
 
     #[test]
     fn resume_missing_is_not_found() {
-        let (_env, client, _accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, _accounts, _id) = setup!();
         let err = client.try_resume(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 
     #[test]
     fn cancel_paused_subscription_succeeds_and_cannot_resume() {
-        let (env, client, _accounts, subscription_id) = setup!();
+        let (env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         env.ledger().set_timestamp(START + 200);
         client.pause(&subscription_id);
 
