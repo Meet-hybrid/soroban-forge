@@ -77,8 +77,10 @@ on-chain.
 | Entrypoint | Status | Notes |
 |---|---|---|
 | `set_royalty` | ✅ Implemented | Basis-point caps validated |
+| `disable_royalty` | ✅ Implemented | Flips an `Active` configuration to `Disabled` while preserving stored issuer data |
+| `enable_royalty` | ✅ Implemented | Restores a previously disabled configuration back to `Active` |
 | `distribute` | ⚠️ Computes only | Pure split math; **pays no recipients** (use `settle_sale`) |
-| `settle_sale` | ✅ Implemented | **Real token transfers** payer → seller, then payer → royalty recipient; transfer-before-state, totals committed last |
+| `settle_sale` | ✅ Implemented | **Real token transfers** payer → seller, then payer → royalty recipient; transfer-before-state, totals committed last; a disabled config settles full to the seller |
 | `get_royalty` | ✅ Implemented | Read-only |
 | `get_settlement_summary` | ✅ Implemented | Read-only; cumulative sales, volume, and royalties per collection |
 | Multi-recipient splits | ❌ Not implemented | Follow-up |

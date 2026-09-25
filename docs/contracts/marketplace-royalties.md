@@ -8,6 +8,8 @@ SEP-41 tokens by `settle_sale`.
 
 ```rust
 fn set_royalty(collection, recipient, bps) -> Result<(), ForgeError>
+fn disable_royalty(collection) -> Result<(), ForgeError>
+fn enable_royalty(collection) -> Result<(), ForgeError>
 fn distribute(collection, seller, amount) -> Result<i128, ForgeError>
 fn settle_sale(collection, token, payer, seller, amount) -> Result<Settlement, ForgeError>
 fn get_royalty(collection) -> Result<Royalty, ForgeError>
@@ -23,6 +25,10 @@ fn get_settlement_summary(collection) -> Result<SettlementSummary, ForgeError>
   authorized call.
 
 ## Settlement
+
+A `Disabled` configuration is intentionally reachable via the public API:
+`disable_royalty(collection)` flips the stored status to `Disabled`, and
+`enable_royalty(collection)` restores the previous `Active` configuration.
 
 `settle_sale` moves one sale's proceeds with escrow's transfer-before-state
 ordering:
@@ -52,8 +58,8 @@ moves no tokens.
 
 ## Compatibility
 
-`set_royalty`, `distribute`, and `get_royalty` are unchanged. `settle_sale`
-and `get_settlement_summary` are additive; the generated
+`set_royalty`, `distribute`, and `get_royalty` stay as-is, and the new
+`disable_royalty` / `enable_royalty` transitions are additive. The generated
 `SorobanForgeMarketplaceRoyaltiesClient` gains both automatically.
 
 ## Storage
