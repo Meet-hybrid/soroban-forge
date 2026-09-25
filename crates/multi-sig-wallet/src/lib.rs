@@ -275,6 +275,25 @@ pub trait SorobanForgeMultiSigWallet {
     /// Read a stored transaction by id (read-only view).
     fn get_tx(env: Env, tx_id: u64) -> Result<WalletTx, soroban_forge_shared_utils::ForgeError>;
 
+    /// Read transactions in ascending transaction-id order. `offset` counts
+    /// from the first transaction (id 1); a range past the end is empty.
+    /// A zero `limit` is invalid.
+    fn get_transactions(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<WalletTx>, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read matching transactions in ascending transaction-id order. `offset`
+    /// counts matching transactions, not scanned transaction ids. A zero
+    /// `limit` is invalid.
+    fn get_transactions_by_status(
+        env: Env,
+        status: TxStatus,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<WalletTx>, soroban_forge_shared_utils::ForgeError>;
+
     /// Read the configured owner set, in initialization order (read-only view).
     ///
     /// # Errors
@@ -722,6 +741,74 @@ impl MultiSigWallet {
         Self::get_tx_impl(&env, tx_id)
     }
 
+    /// Read transactions in ascending id order, with a zero-based offset.
+    pub fn get_transactions(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<WalletTx>, ForgeError> {
+        if limit == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let count = Self::get_tx_count(env.clone());
+        let start = u64::from(offset);
+        let mut transactions = Vec::new(&env);
+        if start >= count {
+            return Ok(transactions);
+        }
+
+        let end = start
+            .checked_add(u64::from(limit))
+            .ok_or(ForgeError::ArithmeticOverflow)?
+            .min(count);
+        let mut id = start.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;
+        while id <= end {
+            transactions.push_back(Self::get_tx_impl(&env, id)?);
+            if id == end {
+                break;
+            }
+            id = id.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;
+        }
+        Ok(transactions)
+    }
+
+    /// Read matching transactions, applying offset and limit to the filtered
+    /// sequence in ascending transaction-id order.
+    pub fn get_transactions_by_status(
+        env: Env,
+        status: TxStatus,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<WalletTx>, ForgeError> {
+        if limit == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let count = Self::get_tx_count(env.clone());
+        let skip = u64::from(offset);
+        let mut matched = 0_u64;
+        let mut transactions = Vec::new(&env);
+        let mut id = 1_u64;
+        while id <= count && transactions.len() < limit {
+            let wallet_tx = Self::get_tx_impl(&env, id)?;
+            if wallet_tx.status == status {
+                if matched >= skip {
+                    transactions.push_back(wallet_tx);
+                }
+                matched = matched
+                    .checked_add(1)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+            }
+            if id < count {
+                id = id.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;
+            } else {
+                break;
+            }
+        }
+        Ok(transactions)
+    }
+
     /// Read the configured owner set, in initialization order (read-only view).
     ///
     /// # Errors
@@ -904,52 +991,58 @@ fn bump_entry(env: &Env, key: &DataKey) {
 }
 
 /// Lifecycle events. The tx id is a **topic** so indexers can filter
-/// by tx cheaply; the data payload carries the full record so no read
-/// call is needed to reconstruct state.
+/// by tx cheaply; the data payload stays small so consumers can read
+/// the full transaction only when needed.
 mod events {
     use super::*;
 
     #[contractevent]
-    pub struct Submitted {
+    pub struct TxSubmitted {
         #[topic]
         pub tx_id: u64,
-        pub data: WalletTx,
+        pub submitter: Address,
+        pub payload_len: u32,
     }
 
     #[contractevent]
-    pub struct Confirmed {
+    pub struct TxConfirmed {
         #[topic]
         pub tx_id: u64,
-        pub data: WalletTx,
+        pub signer: Address,
+        pub confirmations_count: u32,
     }
 
     #[contractevent]
-    pub struct Executed {
+    pub struct TxExecuted {
         #[topic]
         pub tx_id: u64,
-        pub data: WalletTx,
+        pub confirmations_count: u32,
+        pub threshold: u32,
     }
 
     pub fn submitted(env: &Env, tx: &WalletTx) {
-        Submitted {
+        TxSubmitted {
             tx_id: tx.tx_id,
-            data: tx.clone(),
+            submitter: tx.submitter.clone(),
+            payload_len: tx.payload.len(),
         }
         .publish(env);
     }
 
     pub fn confirmed(env: &Env, tx: &WalletTx) {
-        Confirmed {
+        TxConfirmed {
             tx_id: tx.tx_id,
-            data: tx.clone(),
+            signer: tx.confirmations.get_unchecked(tx.confirmations.len() - 1),
+            confirmations_count: tx.confirmations.len(),
         }
         .publish(env);
     }
 
     pub fn executed(env: &Env, tx: &WalletTx) {
-        Executed {
+        TxExecuted {
             tx_id: tx.tx_id,
-            data: tx.clone(),
+            confirmations_count: tx.confirmations.len(),
+            threshold: env.storage().instance().get(&DataKey::Threshold).unwrap(),
         }
         .publish(env);
     }
@@ -959,9 +1052,9 @@ mod events {
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-    use soroban_sdk::{contract, contractimpl, Bytes, Env};
+    use soroban_sdk::{contract, contractimpl, Bytes, Env, FromVal, Map, Symbol, TryIntoVal, Val};
 
     /// A minimal mock target contract for testing cross-contract
     /// invocation. Its `execute` method is a no-op that accepts the
@@ -1114,6 +1207,16 @@ mod tests {
         Bytes::from_array(env, &[0x01, 0x02, 0x03])
     }
 
+    fn event_values(env: &Env) -> (soroban_sdk::Vec<Val>, Val) {
+        let events = env.events().all();
+        let event = &events.events()[0];
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+        (
+            body.topics.clone().try_into_val(env).unwrap(),
+            body.data.clone().try_into_val(env).unwrap(),
+        )
+    }
+
     fn target(env: &Env) -> Address {
         Address::generate(env)
     }
@@ -1203,6 +1306,91 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_events_emit_once_per_successful_call() {
+        let (env, client, accounts) = setup!();
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, MockTarget, ());
+
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env));
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_submitted")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "submitter")).unwrap()),
+            accounts.user1
+        );
+        assert_eq!(
+            u32::from_val(&env, &data.get(Symbol::new(&env, "payload_len")).unwrap()),
+            3
+        );
+
+        client.confirm(&tx_id, &accounts.user2);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_confirmed")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "signer")).unwrap()),
+            accounts.user2
+        );
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "confirmations_count")).unwrap()
+            ),
+            1
+        );
+
+        client.confirm(&tx_id, &accounts.user3);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_confirmed")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "confirmations_count")).unwrap()
+            ),
+            2
+        );
+
+        client.execute(&tx_id);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_executed")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "confirmations_count")).unwrap()
+            ),
+            2
+        );
+        assert_eq!(
+            u32::from_val(&env, &data.get(Symbol::new(&env, "threshold")).unwrap()),
+            client.get_threshold()
+        );
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
+    }
+
+    #[test]
     fn submit_assigns_distinct_ids() {
         let (env, client, accounts) = setup!();
         let id1 = client.submit(&accounts.user1, &target(&env), &payload(&env));
@@ -1218,6 +1406,7 @@ mod tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::Unauthorized);
+        assert_eq!(env.events().all().events().len(), 0);
     }
 
     #[test]
@@ -1254,6 +1443,7 @@ mod tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(env.events().all().events().len(), 0);
     }
 
     #[test]
@@ -1461,6 +1651,7 @@ mod tests {
         client.confirm(&tx_id, &accounts.user2);
         let err = client.try_execute(&tx_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(env.events().all().events().len(), 0);
     }
 
     #[test]
@@ -1636,6 +1827,82 @@ mod tests {
     fn get_tx_count_before_initialize_is_zero() {
         let (_env, client, _accounts) = fresh!();
         assert_eq!(client.get_tx_count(), 0);
+    }
+
+    #[test]
+    fn get_transactions_paginates_in_id_order_and_clamps_to_count() {
+        let (env, client, accounts) = setup!();
+        for _ in 0..5 {
+            client.submit(&accounts.user1, &target(&env), &payload(&env));
+        }
+
+        let first = client.get_transactions(&0, &2);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first.get_unchecked(0).tx_id, 1);
+        assert_eq!(first.get_unchecked(1).tx_id, 2);
+
+        let last = client.get_transactions(&3, &10);
+        assert_eq!(last.len(), 2);
+        assert_eq!(last.get_unchecked(0).tx_id, 4);
+        assert_eq!(last.get_unchecked(1).tx_id, 5);
+        assert!(client.get_transactions(&5, &1).is_empty());
+        assert!(client.get_transactions(&6, &1).is_empty());
+    }
+
+    #[test]
+    fn get_transactions_rejects_zero_limit_and_handles_empty_wallet() {
+        let (_env, client, _accounts) = setup!();
+        assert!(client.get_transactions(&0, &1).is_empty());
+        let err = client.try_get_transactions(&0, &0).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn get_transactions_before_initialize_is_empty() {
+        let (_env, client, _accounts) = fresh!();
+        assert!(client.get_transactions(&0, &5).is_empty());
+    }
+
+    #[test]
+    fn get_transactions_by_status_filters_then_paginates() {
+        let (env, client, accounts) = setup!();
+        let executable = env.register(MockTarget, ());
+        let pending_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let executed_id = client.submit(&accounts.user1, &executable, &payload(&env));
+        let rejected_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let pending_id_2 = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.confirm(&executed_id, &accounts.user2);
+        client.confirm(&executed_id, &accounts.user3);
+        client.execute(&executed_id);
+        client.reject(&rejected_id, &accounts.user2);
+        client.reject(&rejected_id, &accounts.user3);
+
+        let pending = client.get_transactions_by_status(&TxStatus::Pending, &0, &10);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending.get_unchecked(0).tx_id, pending_id);
+        assert_eq!(pending.get_unchecked(1).tx_id, pending_id_2);
+        let pending_page = client.get_transactions_by_status(&TxStatus::Pending, &1, &1);
+        assert_eq!(pending_page.len(), 1);
+        assert_eq!(pending_page.get_unchecked(0).tx_id, pending_id_2);
+        let executed = client.get_transactions_by_status(&TxStatus::Executed, &0, &10);
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed.get_unchecked(0).tx_id, executed_id);
+        let rejected = client.get_transactions_by_status(&TxStatus::Rejected, &0, &10);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected.get_unchecked(0).tx_id, rejected_id);
+        let err = client
+            .try_get_transactions_by_status(&TxStatus::Pending, &0, &0)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn get_transactions_by_status_before_initialize_is_empty() {
+        let (_env, client, _accounts) = fresh!();
+        assert!(client
+            .get_transactions_by_status(&TxStatus::Pending, &0, &5)
+            .is_empty());
     }
 
     #[test]
