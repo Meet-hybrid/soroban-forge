@@ -850,3 +850,9 @@ mod authz;
 
 #[cfg(test)]
 mod props;
+
+// Generates and validates `indexer/fixtures/escrow-events.json`, the ground
+// truth consumed by the reference event indexer in `packages/typescript-sdk`
+// (see `indexer/docs/event-schema.md`).
+#[cfg(test)]
+mod indexer_fixtures;

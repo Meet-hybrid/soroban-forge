@@ -376,6 +376,11 @@ fn transfer(
 }
 
 #[cfg(test)]
+mod authz;
+#[cfg(test)]
+mod props;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
