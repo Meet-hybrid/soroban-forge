@@ -77,7 +77,8 @@ compile_error!(
 );
 
 use soroban_sdk::{
-    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env, Vec,
+    contract, contractclient, contractevent, contractimpl, contracttype,
+    env::internal::StorageType, token, Address, Env, IntoVal, Vec,
 };
 
 use soroban_forge_shared_utils::ForgeError;
@@ -207,6 +208,16 @@ pub trait SorobanForgeEscrow {
     ///
     /// * [`ForgeError::NotFound`] — no escrow with this id.
     fn get_escrow(env: Env, escrow_id: u64) -> Result<EscrowData, ForgeError>;
+
+    /// Read the remaining ledger TTL on the escrow entry, as ledgers before
+    /// expiry. This is a read-only keeper signal: it does not write or bump
+    /// the entry and never requires authorization.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no escrow with this id (never existed or
+    ///   already archived from the ledger).
+    fn ttl_info(env: Env, escrow_id: u64) -> Result<u32, ForgeError>;
 
     /// List the escrow ids a participant is party to (buyer, seller, or
     /// arbiter), in creation order.
@@ -581,6 +592,23 @@ impl Escrow {
     /// Read the full escrow record.
     pub fn get_escrow(env: Env, escrow_id: u64) -> Result<EscrowData, ForgeError> {
         Self::load_escrow(&env, escrow_id)
+    }
+
+    /// Read the remaining ledger TTL on the escrow entry, measured as
+    /// `live_until - current_ledger`. This is a pure view: it does not mutate
+    /// storage or require authorization.
+    pub fn ttl_info(env: Env, escrow_id: u64) -> Result<u32, ForgeError> {
+        let key = DataKey::Escrow(escrow_id);
+        if !env.storage().persistent().has(&key) {
+            return Err(ForgeError::NotFound);
+        }
+        let live_until = env
+            .host()
+            .get_contract_data_live_until_ledger(key.into_val(&env), StorageType::Persistent)
+            .map_err(|_| ForgeError::NotFound)?;
+        live_until
+            .checked_sub(env.ledger().sequence())
+            .ok_or(ForgeError::ArithmeticOverflow)
     }
 
     /// Read the creation-order escrow ids one page at a time for a

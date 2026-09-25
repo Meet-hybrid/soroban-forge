@@ -19,10 +19,13 @@ contract** and remain open for the other four:
    partial state. Marketplace royalties and vesting have since gained
    settlement the same way; DAO governance and subscriptions still move
    nothing.
-2. **Instance-only storage** — escrow and subscription records now live in
-   per-id **persistent** entries with TTL bumps on every write and a
-   permissionless `touch_ttl` keeper entrypoint. The other four still use
-   instance storage exclusively.
+2. **Persistent TTL / expired-entry trap** — escrow and subscription records
+   now live in per-id **persistent** entries with TTL bumps on every write and a
+   permissionless `touch_ttl` keeper entrypoint. Escrow keepers should poll
+   `ttl_info(escrow_id)` before expiry; a `touch_ttl` `NotFound` means the
+   record never existed or is already archived and requires a transaction-level
+   `RestoreFootprint` recovery, not a contract-side repair. The other four
+   still use instance storage exclusively.
 3. **No events** — escrow emits `EscrowCreated`, `Deposited`, `Released`,
    `Refunded`, `Disputed`, `Resolved`, `Cancelled` (escrow id as topic).
    DAO governance also emits proposal lifecycle events; the other four are

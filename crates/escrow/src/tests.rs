@@ -640,6 +640,37 @@ fn escrows_for_participant_is_read_only() {
 // -----------------------------------------------------------------------
 
 #[test]
+fn ttl_info_returns_remaining_ledgers_and_stays_consistent() {
+    let (env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    let remaining = client.ttl_info(&id);
+
+    assert!(remaining > 0);
+    assert_eq!(
+        remaining,
+        env.storage()
+            .persistent()
+            .get_ttl(&crate::DataKey::Escrow(id))
+    );
+
+    client.deposit(&id);
+    client.touch_ttl(&id);
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+    assert!(client.ttl_info(&id) > 0);
+}
+
+#[test]
+fn ttl_info_missing_id_is_not_found() {
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let _id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+
+    let err = client.try_ttl_info(&999).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::NotFound);
+}
+
+#[test]
 fn touch_ttl_extends_and_keeps_state_intact() {
     let (_env, token, _tc, _id, client, accounts) = setup!();
     let (buyer, seller, arbiter) = parties(&accounts);
