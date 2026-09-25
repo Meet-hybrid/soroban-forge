@@ -9,6 +9,12 @@ pub struct BuildArgs {
     pub release: bool,
     #[arg(short, long, default_value_t = false)]
     pub all_targets: bool,
+    /// Build release WASM for Soroban contracts using wasm32v1-none.
+    #[arg(long, default_value_t = false)]
+    pub wasm: bool,
+    /// Check built WASM artifacts against the 150,000-byte contract budget (implies --wasm).
+    #[arg(long, default_value_t = false)]
+    pub check_size: bool,
 }
 
 #[derive(Args, Debug, Clone)]
