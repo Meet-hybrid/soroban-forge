@@ -19,9 +19,9 @@ contract** and remain open for the other four:
    partial state. Marketplace royalties and vesting have since gained
    settlement the same way; DAO governance and subscriptions still move
    nothing.
-2. **Instance-only storage** — escrow records now live in per-id
-   **persistent** entries with TTL bumps on every write and a
-   permissionless `touch_ttl` keeper entrypoint. The other five still use
+2. **Instance-only storage** — escrow and subscription records now live in
+   per-id **persistent** entries with TTL bumps on every write and a
+   permissionless `touch_ttl` keeper entrypoint. The other four still use
    instance storage exclusively.
 3. **No events** — escrow emits `EscrowCreated`, `Deposited`, `Released`,
    `Refunded`, `Disputed`, `Resolved`, `Cancelled` (escrow id as topic).

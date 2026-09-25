@@ -60,6 +60,13 @@ pub trait SorobanForgeSubscriptionPayments {
     fn cancel(env: Env, subscription_id: u64)
         -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
+    /// Permissionless TTL keeper: extend a stored subscription entry without
+    /// mutating its state.
+    fn touch_ttl(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
     /// Read a stored subscription by id (read-only view).
     fn get_subscription(
         env: Env,
@@ -99,6 +106,17 @@ pub struct Subscription {
     pub last_charged: u64,
     /// Current state.
     pub status: SubscriptionStatus,
+}
+
+/// Ledger-time constants for TTL bumps. One ledger closes roughly every 5
+/// seconds, so 17,280 ledgers ~= 1 day. `BUMP_AMOUNT` is the lifetime written
+/// on every touch; `BUMP_THRESHOLD` is how close to expiry an entry must be
+/// before we extend it. This keeps long-lived subscriptions alive without
+/// requiring a custom storage migration before every billing cycle.
+mod ttl {
+    pub const DAY_IN_LEDGERS: u32 = 17_280;
+    pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
+    pub const BUMP_THRESHOLD: u32 = BUMP_AMOUNT - DAY_IN_LEDGERS;
 }
 
 /// Instance-storage keys.
@@ -147,9 +165,9 @@ impl SubscriptionPayments {
             last_charged: env.ledger().timestamp(),
             status: SubscriptionStatus::Active,
         };
-        env.storage()
-            .instance()
-            .set(&DataKey::Subscription(subscription_id), &subscription);
+        let key = DataKey::Subscription(subscription_id);
+        env.storage().persistent().set(&key, &subscription);
+        bump_entry(&env, &key);
         Ok(subscription_id)
     }
 
@@ -175,9 +193,9 @@ impl SubscriptionPayments {
         }
 
         subscription.last_charged = next_due;
-        env.storage()
-            .instance()
-            .set(&DataKey::Subscription(subscription_id), &subscription);
+        let key = DataKey::Subscription(subscription_id);
+        env.storage().persistent().set(&key, &subscription);
+        bump_entry(&env, &key);
         Ok(subscription.amount)
     }
 
@@ -193,9 +211,20 @@ impl SubscriptionPayments {
         subscription.subscriber.require_auth();
 
         subscription.status = SubscriptionStatus::Cancelled;
-        env.storage()
-            .instance()
-            .set(&DataKey::Subscription(subscription_id), &subscription);
+        let key = DataKey::Subscription(subscription_id);
+        env.storage().persistent().set(&key, &subscription);
+        bump_entry(&env, &key);
+        Ok(())
+    }
+
+    /// Permissionless keeper: extend a stored subscription entry without
+    /// mutating its state.
+    pub fn touch_ttl(env: Env, subscription_id: u64) -> Result<(), ForgeError> {
+        let key = DataKey::Subscription(subscription_id);
+        if !env.storage().persistent().has(&key) {
+            return Err(ForgeError::NotFound);
+        }
+        bump_entry(&env, &key);
         Ok(())
     }
 
@@ -214,10 +243,19 @@ impl SubscriptionPayments {
 
     fn get_subscription_impl(env: &Env, subscription_id: u64) -> Result<Subscription, ForgeError> {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Subscription(subscription_id))
             .ok_or(ForgeError::NotFound)
     }
+}
+
+/// Bump a persistent entry's TTL to the [`ttl::BUMP_AMOUNT`] horizon when it
+/// falls inside [`ttl::BUMP_THRESHOLD`]. This mirrors the escrow and multi-sig
+/// pattern: cheap no-op while the entry is fresh, decisive near expiry.
+fn bump_entry(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, ttl::BUMP_THRESHOLD, ttl::BUMP_AMOUNT);
 }
 
 #[cfg(test)]
@@ -346,6 +384,33 @@ mod tests {
     fn charge_missing_subscription_is_not_found() {
         let (_env, client, _accounts, _id) = setup!();
         let err = client.try_charge(&999).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn subscription_record_is_persistent() {
+        let (env, client, _accounts, subscription_id) = setup!();
+        let record: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(subscription_id))
+            .unwrap();
+        assert_eq!(record.subscription_id, subscription_id);
+        assert_eq!(client.get_subscription(&subscription_id).status, SubscriptionStatus::Active);
+    }
+
+    #[test]
+    fn touch_ttl_extends_and_keeps_state_intact() {
+        let (env, client, _accounts, subscription_id) = setup!();
+        client.touch_ttl(&subscription_id);
+        assert_eq!(client.get_subscription(&subscription_id).status, SubscriptionStatus::Active);
+        assert!(env.storage().persistent().has(&DataKey::Subscription(subscription_id)));
+    }
+
+    #[test]
+    fn touch_ttl_unknown_subscription_is_not_found() {
+        let (_env, client, _accounts, _id) = setup!();
+        let err = client.try_touch_ttl(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 

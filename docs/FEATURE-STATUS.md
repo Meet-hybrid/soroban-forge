@@ -69,7 +69,9 @@ on-chain.
 | `subscribe` | ✅ Implemented | Plan validation, periodic scheduling |
 | `charge` | ⚠️ State only | Advances one period per call; **charges nothing** |
 | `cancel` | ✅ Implemented | Subscriber or owner |
+| `touch_ttl` | ✅ Implemented | Permissionless keeper for persistent subscription entries |
 | `get_subscription` | ✅ Implemented | Read-only |
+| Storage | ✅ Persistent + TTL | Per-subscription `DataKey::Subscription(id)` entries with TTL bumps on every write |
 | Plan management | ❌ Not implemented | Follow-up |
 
 ## Marketplace Royalties (`crates/marketplace-royalties`)
@@ -94,7 +96,7 @@ on-chain.
 | Checked arithmetic | ✅ Workspace-wide | Overflow-safe; vesting guards documented |
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow: proven against wrong signers via the negative-auth suite (`authz.rs`) + authorization-tree assertions; other five: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
 | Events | ⚠️ Escrow + DAO + vesting | Full lifecycle events on escrow; proposal lifecycle events on DAO governance; vesting lifecycle events for schedule creation and claims |
-| Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
+| Persistent storage + TTL | ⚠️ Escrow + subscriptions | Per-id persistent entries + `touch_ttl` keeper on escrow and subscriptions; others instance-only |
 | SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale` settles splits; multi-sig `execute` and DAO governance `execute` perform cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions still store amounts only |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
 | Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
