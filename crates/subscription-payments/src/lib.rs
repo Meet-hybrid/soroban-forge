@@ -34,8 +34,7 @@
 extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, Address, Env, Vec};
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, Env, Vec};
 
 /// Maximum consecutive failed payment attempts before transitioning to Cancelled.
 const MAX_RETRIES: u32 = 3;
@@ -775,7 +774,7 @@ mod tests {
 
     #[test]
     fn get_subscription_count_tracks_creations() {
-        let (_env, client, accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, accounts, _id) = setup!();
         assert_eq!(client.get_subscription_count(), 1);
         let id2 = client.subscribe(
             &accounts.user2,
@@ -792,7 +791,7 @@ mod tests {
 
     #[test]
     fn subscriber_index_tracks_multiple_providers() {
-        let (_env, client, accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, accounts, _id) = setup!();
         let id2 = client.subscribe(
             &accounts.user1,
             &accounts.arbiter,
@@ -810,7 +809,7 @@ mod tests {
 
     #[test]
     fn provider_index_tracks_multiple_subscribers() {
-        let (_env, client, accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, accounts, _id) = setup!();
         let id2 = client.subscribe(
             &accounts.user2,
             &accounts.validator,
@@ -828,7 +827,7 @@ mod tests {
 
     #[test]
     fn pagination_slices_across_pages() {
-        let (_env, client, accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, accounts, _id) = setup!();
         // user1 adds four more subscriptions, for ids 2..=5.
         client.subscribe(
             &accounts.user1,
@@ -876,7 +875,7 @@ mod tests {
 
     #[test]
     fn subscriptions_for_unknown_address_are_empty() {
-        let (_env, client, accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, accounts, _id) = setup!();
         assert_eq!(
             client
                 .subscriptions_for_subscriber(&accounts.arbiter, &0, &10)
@@ -888,6 +887,10 @@ mod tests {
                 .subscriptions_for_provider(&accounts.arbiter, &0, &10)
                 .len(),
             0
+        );
+    }
+
+    #[test]
     fn pause_active_subscription_succeeds() {
         let (env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         env.ledger().set_timestamp(START + 250);
@@ -968,7 +971,7 @@ mod tests {
 
     #[test]
     fn out_of_bounds_offset_returns_empty() {
-        let (_env, client, accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, accounts, _id) = setup!();
         assert_eq!(
             client
                 .subscriptions_for_subscriber(&accounts.user1, &1, &10)
@@ -985,7 +988,7 @@ mod tests {
 
     #[test]
     fn zero_limit_is_invalid_input() {
-        let (_env, client, accounts, _id) = setup!();
+        let (_env, _token, _tc, _contract_id, client, accounts, _id) = setup!();
         let err = client
             .try_subscriptions_for_subscriber(&accounts.user1, &0, &0)
             .unwrap_err()
@@ -995,6 +998,10 @@ mod tests {
             .try_subscriptions_for_provider(&accounts.validator, &0, &0)
             .unwrap_err()
             .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
     fn pause_resume_zero_length_no_drift() {
         let (env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
         env.ledger().set_timestamp(START + 300);
