@@ -4,6 +4,22 @@ This guide covers the development workflow for Soroban Forge. All commands docum
 
 ## Prerequisites
 
+### Developer CLI (soroban-forge)
+
+Build and run the developer CLI:
+
+```bash
+# Build CLI binary
+cargo build -p soroban-forge-cli
+
+# Scaffold a new Soroban contract crate
+cargo run -p soroban-forge-cli -- new my-token
+
+# Scaffold with custom path
+cargo run -p soroban-forge-cli -- new my-token --path ./custom/path/my-token
+```
+
+
 ### Rust and Toolchain
 
 The project requires **stable Rust** and the `wasm32v1-none` target for Soroban contracts.

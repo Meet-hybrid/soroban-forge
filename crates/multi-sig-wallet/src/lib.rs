@@ -991,52 +991,58 @@ fn bump_entry(env: &Env, key: &DataKey) {
 }
 
 /// Lifecycle events. The tx id is a **topic** so indexers can filter
-/// by tx cheaply; the data payload carries the full record so no read
-/// call is needed to reconstruct state.
+/// by tx cheaply; the data payload stays small so consumers can read
+/// the full transaction only when needed.
 mod events {
     use super::*;
 
     #[contractevent]
-    pub struct Submitted {
+    pub struct TxSubmitted {
         #[topic]
         pub tx_id: u64,
-        pub data: WalletTx,
+        pub submitter: Address,
+        pub payload_len: u32,
     }
 
     #[contractevent]
-    pub struct Confirmed {
+    pub struct TxConfirmed {
         #[topic]
         pub tx_id: u64,
-        pub data: WalletTx,
+        pub signer: Address,
+        pub confirmations_count: u32,
     }
 
     #[contractevent]
-    pub struct Executed {
+    pub struct TxExecuted {
         #[topic]
         pub tx_id: u64,
-        pub data: WalletTx,
+        pub confirmations_count: u32,
+        pub threshold: u32,
     }
 
     pub fn submitted(env: &Env, tx: &WalletTx) {
-        Submitted {
+        TxSubmitted {
             tx_id: tx.tx_id,
-            data: tx.clone(),
+            submitter: tx.submitter.clone(),
+            payload_len: tx.payload.len(),
         }
         .publish(env);
     }
 
     pub fn confirmed(env: &Env, tx: &WalletTx) {
-        Confirmed {
+        TxConfirmed {
             tx_id: tx.tx_id,
-            data: tx.clone(),
+            signer: tx.confirmations.get_unchecked(tx.confirmations.len() - 1),
+            confirmations_count: tx.confirmations.len(),
         }
         .publish(env);
     }
 
     pub fn executed(env: &Env, tx: &WalletTx) {
-        Executed {
+        TxExecuted {
             tx_id: tx.tx_id,
-            data: tx.clone(),
+            confirmations_count: tx.confirmations.len(),
+            threshold: env.storage().instance().get(&DataKey::Threshold).unwrap(),
         }
         .publish(env);
     }
@@ -1046,9 +1052,9 @@ mod events {
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-    use soroban_sdk::{contract, contractimpl, Bytes, Env};
+    use soroban_sdk::{contract, contractimpl, Bytes, Env, FromVal, Map, Symbol, TryIntoVal, Val};
 
     /// A minimal mock target contract for testing cross-contract
     /// invocation. Its `execute` method is a no-op that accepts the
@@ -1201,6 +1207,16 @@ mod tests {
         Bytes::from_array(env, &[0x01, 0x02, 0x03])
     }
 
+    fn event_values(env: &Env) -> (soroban_sdk::Vec<Val>, Val) {
+        let events = env.events().all();
+        let event = &events.events()[0];
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+        (
+            body.topics.clone().try_into_val(env).unwrap(),
+            body.data.clone().try_into_val(env).unwrap(),
+        )
+    }
+
     fn target(env: &Env) -> Address {
         Address::generate(env)
     }
@@ -1290,6 +1306,91 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_events_emit_once_per_successful_call() {
+        let (env, client, accounts) = setup!();
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, MockTarget, ());
+
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env));
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_submitted")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "submitter")).unwrap()),
+            accounts.user1
+        );
+        assert_eq!(
+            u32::from_val(&env, &data.get(Symbol::new(&env, "payload_len")).unwrap()),
+            3
+        );
+
+        client.confirm(&tx_id, &accounts.user2);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_confirmed")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "signer")).unwrap()),
+            accounts.user2
+        );
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "confirmations_count")).unwrap()
+            ),
+            1
+        );
+
+        client.confirm(&tx_id, &accounts.user3);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_confirmed")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "confirmations_count")).unwrap()
+            ),
+            2
+        );
+
+        client.execute(&tx_id);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_executed")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "confirmations_count")).unwrap()
+            ),
+            2
+        );
+        assert_eq!(
+            u32::from_val(&env, &data.get(Symbol::new(&env, "threshold")).unwrap()),
+            client.get_threshold()
+        );
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
+    }
+
+    #[test]
     fn submit_assigns_distinct_ids() {
         let (env, client, accounts) = setup!();
         let id1 = client.submit(&accounts.user1, &target(&env), &payload(&env));
@@ -1305,6 +1406,7 @@ mod tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::Unauthorized);
+        assert_eq!(env.events().all().events().len(), 0);
     }
 
     #[test]
@@ -1341,6 +1443,7 @@ mod tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(env.events().all().events().len(), 0);
     }
 
     #[test]
@@ -1548,6 +1651,7 @@ mod tests {
         client.confirm(&tx_id, &accounts.user2);
         let err = client.try_execute(&tx_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(env.events().all().events().len(), 0);
     }
 
     #[test]
