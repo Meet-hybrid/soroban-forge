@@ -1651,6 +1651,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "tempfile",
  "tracing-subscriber",
 ]
 
@@ -1668,6 +1669,8 @@ name = "soroban-forge-escrow"
 version = "0.2.0"
 dependencies = [
  "proptest",
+ "serde",
+ "serde_json",
  "soroban-forge-shared-utils",
  "soroban-forge-test-utils",
  "soroban-sdk",
@@ -1719,6 +1722,7 @@ dependencies = [
 name = "soroban-forge-vesting"
 version = "0.2.0"
 dependencies = [
+ "proptest",
  "soroban-forge-shared-utils",
  "soroban-forge-test-utils",
  "soroban-sdk",
