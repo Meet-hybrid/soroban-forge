@@ -75,8 +75,10 @@ well-documented foundation, audit it for your use case, and ship.
 > your own security review. The **escrow contract is the flagship**: it holds
 > and moves real SEP-41 tokens end-to-end and is verified by a conservation
 > property test. Marketplace royalties, multi-sig, and vesting have since
-> gained real settlement too; DAO governance and subscriptions remain state
-> machines awaiting the same treatment — see the
+> gained real settlement too, and DAO governance now settles a SEP-41
+> proposal bond (pulled at `propose`, refunded or forfeited at a terminal
+> transition); subscriptions remain a state machine awaiting the same
+> treatment — see the
 > [Feature Status Matrix](docs/FEATURE-STATUS.md) and
 > [Known Limitations](docs/KNOWN-LIMITATIONS.md) for exactly what is and is
 > not done.
@@ -88,7 +90,7 @@ well-documented foundation, audit it for your use case, and ship.
 | **Escrow**                | Three-party escrow holding real SEP-41 tokens: `create → deposit → release / refund / dispute → resolve / cancel`, arbiter-enforced dispute flow, lifecycle events, per-record persistent storage with TTL keeping | ✅ **Flagship** · 27 tests · conservation property verified |
 | **Vesting**               | Time-locked token release with cliff and linear release (`create_schedule → claim / claimable`) — `claim` settles through a real SEP-41 transfer                                                                   | ✅ Settlement · 27 tests                                    |
 | **Multi-Sig Wallet**      | Multi-owner wallet with configurable approval thresholds (`initialize → submit → confirm → execute`) — no dispatch yet                                                                                             | ✅ State machine · 18 tests                                 |
-| **DAO Governance**        | On-chain proposals, one-vote-per-voter voting, deadline enforcement, and finalisation — executes nothing on-chain                                                                                                  | ✅ State machine · 16 tests                                 |
+| **DAO Governance**        | On-chain proposals, one-vote-per-voter voting, deadline enforcement, and finalisation — SEP-41 proposal bonds pulled at `propose` and refunded/forfeited on settlement; dispatches approved actions on-chain | ✅ **Bond settlement** · 60 tests                          |
 | **Subscription Payments** | Recurring payment plans with periodic billing (`subscribe → charge / cancel`) — charges nothing                                                                                                                    | ✅ State machine · 12 tests                                 |
 | **Marketplace Royalties** | Asset sales with configurable basis-point royalty distribution — pays no recipients                                                                                                                                | ✅ State machine · 10 tests                                 |
 
