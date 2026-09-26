@@ -4,10 +4,11 @@ Per-entrypoint status across all six contracts. **Implemented** means:
 implemented, tested, and covered by workspace CI. The escrow contract is
 the flagship: it moves real SEP-41 tokens; marketplace royalties settles
 its splits the same way via `settle_sale`; vesting settles its claims via
-`claim`. The subscription state machine is honestly labeled where it tracks
-but does not settle; DAO governance now dispatches approved opaque actions
-on-chain and settles a SEP-41 proposal bond — pulled at `propose`, refunded
-to the proposer or forfeited to the treasury at a terminal transition.
+`claim`; subscriptions bill each due period with a real subscriber →
+provider transfer and retry past-due payments; DAO governance now
+dispatches approved opaque actions on-chain and settles a SEP-41 proposal
+bond — pulled at `propose`, refunded to the proposer or forfeited to the
+treasury at a terminal transition.
 
 **Last verified against:** the SDK 27 migration (workspace v0.2.0).
 
@@ -54,6 +55,8 @@ to the proposer or forfeited to the treasury at a terminal transition.
 | `deposit` / `balance` / `touch_ttl` | ✅ Implemented | Per-token persistent balance entries; permissionless TTL keeper |
 | `set_withdrawal_limit` / `remove_withdrawal_limit` | ✅ Implemented | `TxKind::LimitChange` txs on the same threshold+confirmation machinery; no effect below threshold |
 | `get_withdrawal_limit` / `get_window_usage` | ✅ Implemented | Read-only; `None`/`0` when no limit is configured |
+| `add_owner` / `remove_owner` / `set_threshold` | ✅ Implemented | Owner-set and threshold governance via the same typed-tx machinery: `TxKind::AddOwner` / `RemoveOwner` / `SetThreshold` must cross the **current** threshold before `execute` applies them; submission and execution both re-validate the resulting state; removed-owner confirmations are scrubbed from still-pending txs; `remove_owner` guards the final owner and `set_threshold` requires `1 <= t <= owners.len()` |
+| `get_owners` / `is_owner` / `get_confirmations` / `get_rejections` / `get_tx_count` / `get_transactions` / `get_transactions_by_status` | ✅ Implemented | Read-only views |
 
 ## DAO Governance (`crates/dao-governance`)
 
@@ -74,10 +77,13 @@ to the proposer or forfeited to the treasury at a terminal transition.
 
 | Entrypoint | Status | Notes |
 |---|---|---|
-| `subscribe` | ✅ Implemented | Plan validation, periodic scheduling |
-| `charge` | ⚠️ State only | Advances one period per call; **charges nothing** |
-| `cancel` | ✅ Implemented | Subscriber or owner |
-| `get_subscription` | ✅ Implemented | Read-only |
+| `subscribe` | ✅ Implemented | Validates `amount > 0` / `period > 0` before auth; subscriber-authorized; record + sequential id + both subscriber/provider indexes written atomically |
+| `subscribe_on_behalf_of` | ✅ Implemented | Provider-initiated; requires a **subscriber opt-in** (`ProviderOptIn`) checked before provider auth; shares the same id counter and record shape as `subscribe` |
+| `authorize_provider` / `revoke_provider` / `is_provider_authorized` | ✅ Implemented | Explicit per-relationship opt-in; subscriber-authorized; idempotent; read-only view has no auth |
+| `charge` | ✅ Implemented | Provider-authorized; bills when a full period has elapsed via a **real SEP-41 transfer** subscriber → provider; on failure increments `failed_attempts` → `PastDue`, and `Cancelled` after `MAX_RETRIES` (3) |
+| `pause` / `resume` | ✅ Implemented | Subscriber-authorized; `resume` advances the next due date by the elapsed paused duration |
+| `cancel` | ✅ Implemented | Subscriber-authorized from `Active` / `Paused` / `PastDue`; rejects already-`Cancelled` |
+| `get_subscription` / `get_subscription_count` / `subscriptions_for_subscriber` / `subscriptions_for_provider` | ✅ Implemented | Read-only views; paged by `offset`/`limit` with `limit == 0` → `InvalidInput`; empty index yields an empty page, not an error |
 | Plan management | ❌ Not implemented | Follow-up |
 
 ## Marketplace Royalties (`crates/marketplace-royalties`)
@@ -101,10 +107,11 @@ to the proposer or forfeited to the treasury at a terminal transition.
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, and DAO governance proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other three: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
 | Events | ⚠️ Escrow + Multi-Sig + DAO | Full lifecycle events on escrow, multi-sig wallet, and DAO governance |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
-| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale` settles splits; DAO `propose` pulls the proposal bond and refunds/forfeits it on settlement; multi-sig `execute` performs cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions still store amounts only |
+| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale` settles splits; DAO `propose` pulls the proposal bond and refunds/forfeits it on settlement; multi-sig `execute` performs cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions `charge` executes a real subscriber → provider transfer (past-due retry → auto-cancel after 3 failed attempts) |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
 | Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
-| TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
+| TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` from the deployed escrow ABI + five generated clients (`vesting`, `multi-sig-wallet`, `subscription-payments`, `marketplace-royalties`, `dao-governance`) via `scripts/generate-clients.sh`; all six build with `npm run build` (no own test suites yet) |
+| Next.js demo | ✅ Example | `packages/nextjs-example` — testnet escrow demo UI (Freighter connect, friendbot funding, create/deposit/release/refund/dispute/resolve, read, participant list) |
 | CI (fmt/clippy/test/audit/WASM size/provenance) | ✅ Enforced | `--locked`, `-D warnings`, stable toolchain, `wasm32v1-none`, size budget, **provenance manifest job** (SHA-256 of all six WASM artifacts from a clean rebuild) |
 | External audit | ❌ Not performed | Planned as a grant-funded tranche deliverable before any mainnet value custody |
 | Soroban SDK version | ✅ 27.0.6 | Stable Rust; `wasm32v1-none` target |
