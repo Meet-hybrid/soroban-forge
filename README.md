@@ -87,7 +87,7 @@ well-documented foundation, audit it for your use case, and ship.
 
 | Contract                  | Description                                                                                                                                                                                                        | Status                                                      |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| **Escrow**                | Three-party escrow holding real SEP-41 tokens: `create → deposit → release / refund / dispute → resolve / cancel`, arbiter-enforced dispute flow, lifecycle events, per-record persistent storage with TTL keeping | ✅ **Flagship** · 27 tests · conservation property verified |
+| **Escrow**                | Three-party escrow holding real SEP-41 tokens: `create → deposit → release_partial (×n) / release / refund / dispute → resolve / cancel`, arbiter-enforced dispute flow, partial-release accounting (`released`/`remaining`), lifecycle events, per-record persistent storage with TTL keeping | ✅ **Flagship** · 80 tests · conservation property verified |
 | **Vesting**               | Time-locked token release with cliff and linear release (`create_schedule → claim / claimable`) — `claim` settles through a real SEP-41 transfer                                                                   | ✅ Settlement · 27 tests                                    |
 | **Multi-Sig Wallet**      | Multi-owner wallet with configurable approval thresholds (`initialize → submit → confirm → execute`) — no dispatch yet                                                                                             | ✅ State machine · 18 tests                                 |
 | **DAO Governance**        | On-chain proposals, one-vote-per-voter voting, deadline enforcement, and finalisation — SEP-41 proposal bonds pulled at `propose` and refunded/forfeited on settlement; dispatches approved actions on-chain | ✅ **Bond settlement** · 60 tests                          |
@@ -136,10 +136,13 @@ it can be deployed and upgraded independently, while `shared-utils` and
 stateDiagram-v2
     [*] --> Pending: create_escrow
     Pending --> Funded: deposit
-    Funded --> Completed: release
-    Funded --> Refunded: refund (after deadline)
+    Funded --> Funded: release_partial (partial)
+    Funded --> Completed: release_partial (final) / release
+    Funded --> Refunded: refund (remaining balance)
     Pending --> Cancelled: cancel
-    Funded --> Disputed: (reserved)
+    Funded --> Disputed: dispute (remaining frozen)
+    Disputed --> Completed: resolve (seller wins)
+    Disputed --> Refunded: resolve (buyer wins)
 ```
 
 ## Repository layout
