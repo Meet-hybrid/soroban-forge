@@ -7,7 +7,7 @@
 | Multi-Sig Wallet | crates/multi-sig-wallet | State machine + tests · no execution dispatch |
 | DAO Governance | crates/dao-governance | State machine + tests · dispatches approved actions on-chain |
 | Subscription Payments | crates/subscription-payments | State machine + tests · charges nothing |
-| Marketplace Royalties | crates/marketplace-royalties | State machine + tests · **atomic SEP-41 settlement** via `settle_sale` |
+| Marketplace Royalties | crates/marketplace-royalties | State machine + tests · **atomic SEP-41 settlement** via `settle_sale` and capped batches via `settle_sales` |
 
 Per-entrypoint detail lives in the [Feature Status Matrix](../FEATURE-STATUS.md);
 the aggregate gaps (token settlement, events, storage TTL, deployments) are

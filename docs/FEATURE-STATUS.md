@@ -3,7 +3,8 @@
 Per-entrypoint status across all six contracts. **Implemented** means:
 implemented, tested, and covered by workspace CI. The escrow contract is
 the flagship: it moves real SEP-41 tokens; marketplace royalties settles
-its splits the same way via `settle_sale`; vesting settles its claims via
+its splits the same way via `settle_sale` and, for batches, `settle_sales`;
+vesting settles its claims via
 `claim`. The subscription state machine is honestly labeled where it tracks
 but does not settle; DAO governance now dispatches approved opaque actions
 on-chain and settles a SEP-41 proposal bond — pulled at `propose`, refunded
@@ -87,6 +88,7 @@ to the proposer or forfeited to the treasury at a terminal transition.
 | `set_royalty` | ✅ Implemented | Basis-point caps validated |
 | `distribute` | ⚠️ Computes only | Pure split math; **pays no recipients** (use `settle_sale`) |
 | `settle_sale` | ✅ Implemented | **Real token transfers** payer → seller, then payer → royalty recipient; transfer-before-state, totals committed last |
+| `settle_sales` | ✅ Implemented | **Atomic batch settlement**: up to 20 sales per call against one collection + one payer authorization; every validation (cap, amounts, aggregate split math) before the first transfer, per-sale seller-then-recipient order, aggregate summary committed exactly once; any failure rolls the whole batch back |
 | `get_royalty` | ✅ Implemented | Read-only |
 | `get_settlement_summary` | ✅ Implemented | Read-only; cumulative sales, volume, and royalties per collection |
 | Multi-recipient splits | ❌ Not implemented | Follow-up |
@@ -101,7 +103,7 @@ to the proposer or forfeited to the treasury at a terminal transition.
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, and DAO governance proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other three: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
 | Events | ⚠️ Escrow + Multi-Sig + DAO | Full lifecycle events on escrow, multi-sig wallet, and DAO governance |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
-| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale` settles splits; DAO `propose` pulls the proposal bond and refunds/forfeits it on settlement; multi-sig `execute` performs cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions still store amounts only |
+| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale` and `settle_sales` settle splits (single sale or capped atomic batch); DAO `propose` pulls the proposal bond and refunds/forfeits it on settlement; multi-sig `execute` performs cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions still store amounts only |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
 | Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
 | TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
