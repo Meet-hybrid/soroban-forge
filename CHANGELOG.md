@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Atomic batch settlement** for marketplace royalties
+  (`settle_sales`): settles up to `MAX_SETTLE_SALES` (20) sales of one
+  collection in a single invocation against one collection + one payer
+  authorization, so marketplaces can clear an order batch (or a payout
+  sweep) in one transaction instead of one per sale. Per-sale split math,
+  seller-then-recipient transfer order, and zero-share skips are identical
+  to `settle_sale`; every validation (config, cap, per-sale `amount > 0`,
+  aggregate split math checked against the stored summary) runs before the
+  first transfer, the cumulative summary is committed exactly once per call
+  with the batch's aggregate deltas, and any failure — including a later
+  sale's transfer after earlier sales succeeded — rolls the whole
+  invocation back. No new storage keys.
 - **Negative-authorization test suite** for escrow
   (`crates/escrow/src/authz.rs`, 19 tests): per entrypoint, proves a wrong
   signer is rejected by the host, that an armed signature cannot be
