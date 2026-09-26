@@ -1,0 +1,8 @@
+fix: docs: document deployment and storage compatibility
+
+- docs/deployment-and-storage.md
+- README.md: link deployment docs
+
+Fixes #24
+
+Signed-off-by: Vedant Madane <6527493+VedantMadane@users.noreply.github.com>

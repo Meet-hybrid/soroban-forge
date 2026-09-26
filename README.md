@@ -276,3 +276,7 @@ at your option.
 ## Acknowledgments
 
 Built for the Stellar developer community.
+
+## Deployment
+
+See [docs/deployment-and-storage.md](docs/deployment-and-storage.md).
