@@ -30,6 +30,21 @@ to the proposer or forfeited to the treasury at a terminal transition.
 | Events                      | ✅ Implemented      | `EscrowCreated`, `Deposited`, `Released`, `Refunded`, `Disputed`, `Resolved`, `Cancelled`; id as topic                                                                                                                                                                                                                                                                                     |
 | Storage                     | ✅ Persistent + TTL | Per-id persistent entries; instance storage only for the id counter                                                                                                                                                                                                                                                                                                                        |
 | Tests                       | ✅ 49               | Full lifecycle, dispute paths, failure ordering, conservation property, **randomized property suite** (proptest): conservation over random paths, tamper-resilient pool conservation, fund safety over arbitrary call sequences; **negative-auth suite** (`authz.rs`): per-entrypoint wrong-signer rejection, signature/args replay rejection, `env.auths()` authorization-tree assertions |
+| Entrypoint | Status | Notes |
+|---|---|---|
+| `create_escrow` | ✅ Implemented | Validates amount/timeout, buyer+seller auth, takes the SEP-41 token address |
+| `deposit` | ✅ Implemented | **Real token transfer** buyer → contract, before any state write |
+| `release` | ✅ Implemented | Seller-authorized; **real token transfer** contract → seller (full remaining balance) |
+| `release_partial` | ✅ Implemented | Seller-authorized; **real token transfer** of a partial amount contract → seller; `released` accounting tracked; final partial transitions to `Completed`; `refund`/`resolve` operate on remaining balance |
+| `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** of remaining balance |
+| `dispute` | ✅ Implemented | Claimant (buyer or seller) authorized, `Funded` only — see [design notes](KNOWN-LIMITATIONS.md#design-notes-not-limitations-but-worth-knowing) |
+| `resolve` | ✅ Implemented | Arbiter-only, final; pays **remaining balance** either direction via **real token transfer** |
+| `cancel` | ✅ Implemented | Buyer, `Pending` only |
+| `get_status` / `get_escrow` | ✅ Implemented | Read-only; `get_escrow` now exposes `released` + derived `remaining` |
+| `touch_ttl` | ✅ Implemented | Permissionless TTL keeper for the escrow's persistent entry |
+| Events | ✅ Implemented | `EscrowCreated`, `Deposited`, `Released`, `PartiallyReleased`, `Refunded`, `Disputed`, `Resolved`, `Cancelled`; id as topic |
+| Storage | ✅ Persistent + TTL | Per-id persistent entries; instance storage only for the id counter; **backward-compatible schema migration** via `EscrowDataV1` fallback decode (old records default `released = 0`) |
+| Tests | ✅ 80 | Full lifecycle, dispute paths, failure ordering, conservation property, partial-release (valid/multi/final/zero/negative/over-remaining/non-Funded/after-completion/→refund/→dispute→resolve, storage compat, conservation), **randomized property suite** (proptest): conservation over random paths + partial-release sequences, tamper-resilient pool conservation, fund safety over arbitrary call sequences (now includes `release_partial`); **negative-auth suite** (`authz.rs`): per-entrypoint wrong-signer rejection, `release_partial` seller-only auth + mutation test, signature/args replay rejection, `env.auths()` authorization-tree assertions |
 
 ## Vesting (`crates/vesting`)
 
