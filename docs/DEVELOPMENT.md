@@ -227,21 +227,20 @@ make release
 
 ### Persistent storage and TTL
 
-Escrow records are stored as per-id **persistent** entries. Each record is
-extended to a **30-day TTL** when it is written. State-changing escrow
+Escrow and subscription records are stored as per-id **persistent** entries.
+Each record is extended to a **30-day TTL** when it is written. State-changing
 operations that update the record extend the entry's TTL using the same
 threshold-and-extend-to pattern. `touch_ttl` is permissionless and can extend
 an existing entry while it remains present in persistent storage.
 
-An active escrow with no state-changing activity can eventually reach expiry.
-Once the persistent escrow entry has expired, `touch_ttl` cannot recover it:
-the current implementation calls `load_escrow` before attempting the TTL
-extension, and a missing entry is reported as `NotFound`. The expired record
-is therefore inaccessible through the current contract interface. Expiration
-of the record does not remove the token balance; the funds remain in the token
-contract at the escrow contract's address. Long-lived active escrows therefore
-require a keeper to call `touch_ttl` before expiry. Anyone may perform this
-keeper action because `touch_ttl` is permissionless.
+An active subscription or escrow with no state-changing activity can eventually
+reach expiry. Once the persistent record has expired, `touch_ttl` cannot
+recover it: the current implementation checks for existence before attempting
+the TTL extension, and a missing entry is reported as `NotFound`. The expired
+record is therefore inaccessible through the current contract interface. Long-
+lived active records therefore require a keeper to call `touch_ttl` before
+expiry. Anyone may perform this keeper action because `touch_ttl` is
+permissionless.
 
 ### Token trust model
 

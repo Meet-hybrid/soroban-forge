@@ -16,6 +16,17 @@ contract** and remain open for the other four:
 1. **No token settlement** — escrow now performs real SEP-41 transfers
    (`deposit` pulls from the buyer, `release`/`refund`/`resolve` pay out)
    with transfer-before-state ordering so a failed transfer leaves no
+   partial state. Marketplace royalties and vesting have since gained
+   settlement the same way; DAO governance and subscriptions still move
+   nothing.
+2. **Instance-only storage** — escrow and subscription records now live in
+   per-id **persistent** entries with TTL bumps on every write and a
+   permissionless `touch_ttl` keeper entrypoint. The other four still use
+   instance storage exclusively.
+3. **No events** — escrow emits `EscrowCreated`, `Deposited`, `Released`,
+   `Refunded`, `Disputed`, `Resolved`, `Cancelled` (escrow id as topic).
+   DAO governance also emits proposal lifecycle events; the other four are
+   still silent.
    partial state. Marketplace royalties, vesting, and DAO governance
    (proposal bonds) have since gained settlement the same way;
    subscriptions still move nothing.
@@ -54,6 +65,9 @@ bricking problem. (Escrow, multi-sig wallet, DAO governance, and marketplace roy
 
 ### 3. No events in vesting contract
 
+Escrow, vesting, and DAO governance are now observable on-chain. The
+remaining contracts still need event modules before any indexer or SDK
+integration can reconstruct those lifecycles from events alone.
 Vesting remains without an event module. Escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit typed on-chain events.
 
 

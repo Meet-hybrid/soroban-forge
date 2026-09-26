@@ -9,6 +9,8 @@ all-or-nothing batch).
 
 ```rust
 fn set_royalty(collection, recipient, bps) -> Result<(), ForgeError>
+fn disable_royalty(collection) -> Result<(), ForgeError>
+fn enable_royalty(collection) -> Result<(), ForgeError>
 fn distribute(collection, seller, amount) -> Result<i128, ForgeError>
 fn settle_sale(collection, token, payer, seller, amount) -> Result<Settlement, ForgeError>
 fn settle_sales(collection, token, payer, sales: Vec<(seller, amount)>) -> Result<Vec<Settlement>, ForgeError>
@@ -26,6 +28,10 @@ fn touch_ttl(collection) -> Result<(), ForgeError>
   authorized call.
 
 ## Settlement
+
+A `Disabled` configuration is intentionally reachable via the public API:
+`disable_royalty(collection)` flips the stored status to `Disabled`, and
+`enable_royalty(collection)` restores the previous `Active` configuration.
 
 `settle_sale` moves one sale's proceeds with escrow's transfer-before-state
 ordering:
@@ -88,6 +94,9 @@ they were before the call (no sale is half-settled).
 
 ## Compatibility
 
+`set_royalty`, `distribute`, and `get_royalty` stay as-is, and the new
+`disable_royalty` / `enable_royalty` transitions are additive. The generated
+`SorobanForgeMarketplaceRoyaltiesClient` gains both automatically.
 `set_royalty`, `distribute`, and `get_royalty` are unchanged. `settle_sale`,
 `settle_sales`, and `get_settlement_summary` are additive; the generated
 `SorobanForgeMarketplaceRoyaltiesClient` gains all three automatically, and
