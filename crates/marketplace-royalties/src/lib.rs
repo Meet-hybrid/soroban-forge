@@ -62,7 +62,9 @@
 extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{
+    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env,
+};
 
 /// Maximum number of sales one `settle_sales` invocation may settle,
 /// checked **before any transfer** and reported as
@@ -272,6 +274,7 @@ impl MarketplaceRoyalties {
         let key = DataKey::Royalty(royalty.collection.clone());
         env.storage().persistent().set(&key, &royalty);
         bump_entry(&env, &key);
+        events::royalty_configured(&env, &royalty);
         Ok(())
     }
 
@@ -353,10 +356,21 @@ impl MarketplaceRoyalties {
 
         // Both transfers succeeded; only now commit settlement state.
         let summary_key = DataKey::Summary(collection.clone());
-        let royalty_key = DataKey::Royalty(collection);
+        let royalty_key = DataKey::Royalty(collection.clone());
         env.storage().persistent().set(&summary_key, &summary);
         bump_entry(&env, &royalty_key);
         bump_entry(&env, &summary_key);
+        events::sale_settled(
+            &env,
+            &collection,
+            &token,
+            &payer,
+            &seller,
+            &royalty.recipient,
+            amount,
+            seller_net,
+            royalty_share,
+        );
 
         Ok(Settlement {
             royalty_share,
@@ -597,6 +611,66 @@ fn transfer(
     }
 }
 
+/// Lifecycle events emitted by the marketplace royalties contract.
+mod events {
+    use super::*;
+
+    #[contractevent]
+    pub struct RoyaltyConfigured {
+        #[topic]
+        pub collection: Address,
+        pub recipient: Address,
+        pub bps: u32,
+    }
+
+    #[contractevent]
+    pub struct SaleSettled {
+        #[topic]
+        pub collection: Address,
+        pub token: Address,
+        pub payer: Address,
+        pub seller: Address,
+        pub royalty_recipient: Address,
+        pub gross_amount: i128,
+        pub seller_net: i128,
+        pub royalty_share: i128,
+    }
+
+    pub fn royalty_configured(env: &Env, royalty: &Royalty) {
+        RoyaltyConfigured {
+            collection: royalty.collection.clone(),
+            recipient: royalty.recipient.clone(),
+            bps: royalty.bps,
+        }
+        .publish(env);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn sale_settled(
+        env: &Env,
+        collection: &Address,
+        token: &Address,
+        payer: &Address,
+        seller: &Address,
+        royalty_recipient: &Address,
+        gross_amount: i128,
+        seller_net: i128,
+        royalty_share: i128,
+    ) {
+        SaleSettled {
+            collection: collection.clone(),
+            token: token.clone(),
+            payer: payer.clone(),
+            seller: seller.clone(),
+            royalty_recipient: royalty_recipient.clone(),
+            gross_amount,
+            seller_net,
+            royalty_share,
+        }
+        .publish(env);
+    }
+}
+
 #[cfg(test)]
 mod authz;
 #[cfg(test)]
@@ -606,7 +680,7 @@ mod props;
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::Env;
 
@@ -1527,5 +1601,22 @@ mod tests {
         let unknown = Address::generate(&env);
         let err = client.try_touch_ttl(&unknown).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn events_emitted_on_set_royalty_and_settle() {
+        let (env, token, _tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        client.set_royalty(collection, &accounts.user2, &500_u32);
+        client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+        );
+
+        let events = env.events().all();
+        assert!(!events.events().is_empty());
     }
 }
