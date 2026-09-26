@@ -269,6 +269,14 @@ pub trait SorobanForgeEscrow {
     ///   the payout.
     fn resolve(env: Env, escrow_id: u64, in_favor_of_seller: bool) -> Result<(), ForgeError>;
 
+    /// Resolve a dispute with a basis-point split between seller and buyer.
+    ///
+    /// Requires the arbiter; only valid while `Disputed` and only for
+    /// `seller_bps <= 10_000`. The seller share is computed as
+    /// `amount * seller_bps / 10_000`, with the remainder retained by the
+    /// buyer. The split is final and settles both transfers atomically.
+    fn resolve_split(env: Env, escrow_id: u64, seller_bps: u32) -> Result<(), ForgeError>;
+
     /// Cancel a `Pending` escrow before it is funded. Requires the buyer.
     ///
     /// # Errors
@@ -778,6 +786,47 @@ impl Escrow {
         Ok(())
     }
 
+    /// Resolve a dispute by splitting the escrowed amount between the seller
+    /// and buyer according to `seller_bps` out of 10_000.
+    ///
+    /// The seller share is floored at `amount * seller_bps / 10_000` and the
+    /// remainder stays with the buyer. `seller_bps == 0` resolves to a
+    /// buyer-only refund and `seller_bps == 10_000` resolves to a full seller
+    /// payout. A failed second payout rolls back the whole invocation.
+    pub fn resolve_split(env: Env, escrow_id: u64, seller_bps: u32) -> Result<(), ForgeError> {
+        let escrow = Self::load_escrow(&env, escrow_id)?;
+        if escrow.status != EscrowStatus::Disputed {
+            return Err(ForgeError::InvalidInput);
+        }
+        if seller_bps > 10_000 {
+            return Err(ForgeError::InvalidInput);
+        }
+        escrow.arbiter.require_auth();
+
+        let (seller_share, buyer_share) = split_amount(escrow.amount, seller_bps)?;
+        let mut resolved = escrow;
+
+        if seller_share > 0 {
+            transfer_from_contract(&env, &resolved.token, &resolved.seller, seller_share)?;
+        }
+        if buyer_share > 0 {
+            transfer_from_contract(&env, &resolved.token, &resolved.buyer, buyer_share)?;
+        }
+
+        resolved.status = if seller_share == 0 {
+            EscrowStatus::Refunded
+        } else {
+            EscrowStatus::Completed
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &resolved);
+        bump_entry(&env, &DataKey::Escrow(escrow_id));
+        events::resolved_split(&env, &resolved, seller_bps, seller_share, buyer_share);
+        Ok(())
+    }
+
     /// Cancel a `Pending` escrow. Requires the buyer. Nothing has moved,
     /// so no token transfer occurs.
     pub fn cancel(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
@@ -1060,6 +1109,16 @@ mod events {
     }
 
     #[contractevent]
+    pub struct ResolvedSplit {
+        #[topic]
+        pub escrow_id: u64,
+        pub data: EscrowData,
+        pub seller_bps: u32,
+        pub seller_share: i128,
+        pub buyer_share: i128,
+    }
+
+    #[contractevent]
     pub struct Cancelled {
         #[topic]
         pub escrow_id: u64,
@@ -1122,6 +1181,23 @@ mod events {
             escrow_id: escrow.escrow_id,
             data: escrow.clone(),
             in_favor_of_seller,
+        }
+        .publish(env);
+    }
+
+    pub fn resolved_split(
+        env: &Env,
+        escrow: &EscrowData,
+        seller_bps: u32,
+        seller_share: i128,
+        buyer_share: i128,
+    ) {
+        ResolvedSplit {
+            escrow_id: escrow.escrow_id,
+            data: escrow.clone(),
+            seller_bps,
+            seller_share,
+            buyer_share,
         }
         .publish(env);
     }
