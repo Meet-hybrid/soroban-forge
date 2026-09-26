@@ -48,6 +48,15 @@ to the proposer or forfeited to the treasury at a terminal transition.
 
 ## Vesting (`crates/vesting`)
 
+| Entrypoint | Status | Notes |
+|---|---|---|
+| `create_schedule` | ✅ Implemented | Validates `total_amount > 0`, `duration > 0`, `cliff <= duration` |
+| `claim` | ✅ Implemented | **Real token transfer** contract → beneficiary before the state write (transfer-before-state); zero-claim calls skip the transfer; a failed transfer surfaces as `ForgeError::TokenTransferFailed` with `claimed`/`status` unchanged |
+| `claimable` | ✅ Implemented | Read-only |
+| `get_status` | ✅ Implemented | Read-only |
+| Events | ✅ Implemented | `ScheduleCreated` and `Claimed`; `schedule_id` as topic; payload carries the schedule state and payout amount |
+| Revocation | ❌ Not implemented | `Revoked` status reserved |
+| `VestingSchedule.token` field | ✅ Wired | Read by `claim` for the SEP-41 payout |
 | Entrypoint                    | Status             | Notes                                                                                                                                                                                                                                |
 | ----------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `create_schedule`             | ✅ Implemented     | Validates `total_amount > 0`, `duration > 0`, `cliff <= duration`                                                                                                                                                                    |
@@ -118,7 +127,10 @@ to the proposer or forfeited to the treasury at a terminal transition.
 | Entrypoint | Status | Notes |
 |---|---|---|
 | `set_royalty` | ✅ Implemented | Basis-point caps validated |
+| `disable_royalty` | ✅ Implemented | Flips an `Active` configuration to `Disabled` while preserving stored issuer data |
+| `enable_royalty` | ✅ Implemented | Restores a previously disabled configuration back to `Active` |
 | `distribute` | ⚠️ Computes only | Pure split math; **pays no recipients** (use `settle_sale`) |
+| `settle_sale` | ✅ Implemented | **Real token transfers** payer → seller, then payer → royalty recipient; transfer-before-state, totals committed last; a disabled config settles full to the seller |
 | `settle_sale` | ✅ Implemented | **Real token transfers** payer → seller, then payer → royalty recipient; transfer-before-state, totals committed last |
 | `settle_sales` | ✅ Implemented | **Atomic batch settlement**: up to 20 sales per call against one collection + one payer authorization; every validation (cap, amounts, aggregate split math) before the first transfer, per-sale seller-then-recipient order, aggregate summary committed exactly once; any failure rolls the whole batch back |
 | `get_royalty` | ✅ Implemented | Read-only |
@@ -145,6 +157,8 @@ to the proposer or forfeited to the treasury at a terminal transition.
 | Concern | Status | Notes |
 |---|---|---|
 | Checked arithmetic | ✅ Workspace-wide | Overflow-safe; vesting guards documented |
+| `require_auth` on every state change | ✅ Workspace-wide | Escrow: proven against wrong signers via the negative-auth suite (`authz.rs`) + authorization-tree assertions; other five: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
+| Events | ⚠️ Escrow + DAO + vesting | Full lifecycle events on escrow; proposal lifecycle events on DAO governance; vesting lifecycle events for schedule creation and claims |
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, and DAO governance proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other three: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
 | Events | ⚠️ Escrow + Multi-Sig + DAO | Full lifecycle events on escrow, multi-sig wallet, and DAO governance |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |

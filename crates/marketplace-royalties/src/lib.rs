@@ -93,6 +93,19 @@ pub trait SorobanForgeMarketplaceRoyalties {
         bps: u32,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
+    /// Disable royalty enforcement for `collection` while preserving the
+    /// underlying recipient and basis points for later re-enablement.
+    fn disable_royalty(
+        env: Env,
+        collection: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Re-enable a previously disabled royalty configuration for `collection`.
+    fn enable_royalty(
+        env: Env,
+        collection: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
     /// Distribute `amount` from a sale of `collection`, returning the net to
     /// the seller after royalties. Pure computation: no tokens move.
     fn distribute(
@@ -275,6 +288,45 @@ impl MarketplaceRoyalties {
         env.storage().persistent().set(&key, &royalty);
         bump_entry(&env, &key);
         events::royalty_configured(&env, &royalty);
+        Ok(())
+    }
+
+    /// Disable royalty enforcement for `collection` while preserving the stored
+    /// recipient and basis points for re-enablement.
+    pub fn disable_royalty(env: Env, collection: Address) -> Result<(), ForgeError> {
+        let mut royalty: Royalty = env
+            .storage()
+            .instance()
+            .get(&DataKey::Royalty(collection.clone()))
+            .ok_or(ForgeError::NotFound)?;
+        if royalty.status == RoyaltyStatus::Disabled {
+            return Err(ForgeError::InvalidInput);
+        }
+        collection.require_auth();
+
+        royalty.status = RoyaltyStatus::Disabled;
+        env.storage()
+            .instance()
+            .set(&DataKey::Royalty(collection), &royalty);
+        Ok(())
+    }
+
+    /// Re-enable a previously disabled royalty configuration.
+    pub fn enable_royalty(env: Env, collection: Address) -> Result<(), ForgeError> {
+        let mut royalty: Royalty = env
+            .storage()
+            .instance()
+            .get(&DataKey::Royalty(collection.clone()))
+            .ok_or(ForgeError::NotFound)?;
+        if royalty.status == RoyaltyStatus::Active {
+            return Err(ForgeError::InvalidInput);
+        }
+        collection.require_auth();
+
+        royalty.status = RoyaltyStatus::Active;
+        env.storage()
+            .instance()
+            .set(&DataKey::Royalty(collection), &royalty);
         Ok(())
     }
 
@@ -769,6 +821,54 @@ mod tests {
     }
 
     #[test]
+    fn disable_and_enable_royalty_round_trip_preserves_config() {
+        let (_env, client, accounts) = setup!();
+        client.disable_royalty(&accounts.arbiter);
+        let disabled = client.get_royalty(&accounts.arbiter);
+        assert_eq!(disabled.status, RoyaltyStatus::Disabled);
+        assert_eq!(disabled.bps, 500);
+
+        client.enable_royalty(&accounts.arbiter);
+        let enabled = client.get_royalty(&accounts.arbiter);
+        assert_eq!(enabled.status, RoyaltyStatus::Active);
+        assert_eq!(enabled.bps, 500);
+        assert_eq!(enabled.recipient, accounts.user2);
+    }
+
+    #[test]
+    fn disable_royalty_rejects_missing_or_already_disabled_config() {
+        let (_env, client, accounts) = setup!();
+        let err = client
+            .try_disable_royalty(&accounts.validator)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+
+        client.disable_royalty(&accounts.arbiter);
+        let err = client
+            .try_disable_royalty(&accounts.arbiter)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn enable_royalty_rejects_missing_or_already_active_config() {
+        let (_env, client, accounts) = setup!();
+        let err = client
+            .try_enable_royalty(&accounts.validator)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+
+        let err = client
+            .try_enable_royalty(&accounts.arbiter)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
     fn distribute_100_percent_returns_zero_net() {
         let (_env, client, accounts) = setup!();
         client.set_royalty(&accounts.arbiter, &accounts.user2, &10_000_u32);
@@ -888,12 +988,13 @@ mod tests {
 
     #[test]
     fn settle_disabled_config_settles_in_full_to_seller() {
-        let (env, token, tc, contract_id, client, accounts) = setup_settlement!();
+        let (_env, token, tc, _contract_id, client, accounts) = setup_settlement!();
         let payer = &accounts.user1;
         let recipient = &accounts.user2;
         let seller = &accounts.user3;
         let collection = &accounts.arbiter;
 
+        client.disable_royalty(collection);
         // `set_royalty` has no public "disable" switch (it always stores
         // `Active`), so write the `Disabled` record directly — the same gap
         // the compute-only `distribute` suite documents.
@@ -915,6 +1016,10 @@ mod tests {
         assert_eq!(settled.seller_net, 1_000);
         assert_eq!(tc.balance(seller), 1_000);
         assert_eq!(tc.balance(recipient), 0);
+        assert_eq!(
+            client.get_royalty(collection).status,
+            RoyaltyStatus::Disabled
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use super::*;
 use soroban_forge_test_utils::TestAccounts;
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::Env;
+use soroban_sdk::{xdr, Env};
 
 const START: u64 = 1_000_000;
 const CLIFF: u64 = 1_000;
@@ -59,6 +59,70 @@ fn create_schedule_assigns_distinct_ids() {
     let id1 = create(&client, &token, &accounts);
     let id2 = create(&client, &token, &accounts);
     assert_ne!(id1, id2);
+}
+
+#[test]
+fn schedule_creation_emits_event_with_schedule_id_topic() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+
+    let id = client.create_schedule(&accounts.user1, &token, &TOTAL, &CLIFF, &DURATION);
+    let events = env.events().all().events().to_vec();
+
+    assert_eq!(events.len(), 1);
+    assert!(events[0].contract_id.is_some());
+    let xdr::ContractEventBody::V0(body) = &events[0].body;
+    assert_eq!(body.topics.len(), 1);
+    match &body.topics[0] {
+        xdr::ScVal::U64(topic_id) => assert_eq!(*topic_id, id),
+        other => panic!("expected U64 topic, got {other:?}"),
+    }
+
+    let schedule: VestingSchedule = soroban_sdk::FromVal::from_val(&env, &body.data);
+    assert_eq!(schedule.beneficiary, accounts.user1);
+    assert_eq!(schedule.token, token);
+    assert_eq!(schedule.total_amount, TOTAL);
+    assert_eq!(schedule.claimed, 0);
+    assert_eq!(schedule.status, VestingStatus::Locked);
+    assert_eq!(contract_id.to_string().len(), 56);
+}
+
+#[test]
+fn claim_emits_event_with_updated_schedule_payload() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    env.ledger()
+        .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
+    let amount = client.claim(&id);
+
+    let events = env.events().all().events().to_vec();
+    assert_eq!(events.len(), 1);
+    let xdr::ContractEventBody::V0(body) = &events[0].body;
+    assert_eq!(body.topics.len(), 1);
+    match &body.topics[0] {
+        xdr::ScVal::U64(topic_id) => assert_eq!(*topic_id, id),
+        other => panic!("expected U64 topic, got {other:?}"),
+    }
+
+    let schedule: VestingSchedule = soroban_sdk::FromVal::from_val(&env, &body.data);
+    assert_eq!(amount, TOTAL / 2);
+    assert_eq!(schedule.claimed, TOTAL / 2);
+    assert_eq!(schedule.status, VestingStatus::Vesting);
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+    assert_eq!(client.claimable(&id), 0);
+}
+
+#[test]
+fn zero_claim_emits_no_event() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    env.ledger().set_timestamp(START + CLIFF / 2);
+    let amount = client.claim(&id);
+
+    assert_eq!(amount, 0);
+    assert_eq!(env.events().all().events().len(), 0);
+    assert_eq!(client.claimable(&id), 0);
 }
 
 #[test]
