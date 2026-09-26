@@ -25,6 +25,10 @@
 //! - `charge` requires the provider (who pulls payment) and bills when a
 //!   full period has elapsed since the last charge, executing a SEP-41 token
 //!   transfer from subscriber to provider.
+//! - `charge_catchup` requires the provider and atomically bills multiple
+//!   elapsed periods, bounded by [`MAX_CATCHUP_PERIODS`]. It refuses
+//!   `PastDue` subscriptions so arrears retry semantics remain owned by
+//!   `charge`.
 //! - `pause` requires the subscriber.
 //! - `resume` requires the subscriber.
 //! - `cancel` requires the subscriber (works from `Active`, `Paused`, or `PastDue`).
@@ -38,6 +42,13 @@ use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, A
 
 /// Maximum consecutive failed payment attempts before transitioning to Cancelled.
 const MAX_RETRIES: u32 = 3;
+
+/// Hard upper bound for one catch-up invocation.
+///
+/// Keeping the loop bounded protects Soroban instruction limits while still
+/// covering practical keeper downtime without requiring one transaction per
+/// missed period.
+const MAX_CATCHUP_PERIODS: u32 = 32;
 
 /// Public interface for the Soroban Forge subscription payments contract.
 #[contractclient(name = "SorobanForgeSubscriptionPaymentsClient")]
@@ -60,6 +71,19 @@ pub trait SorobanForgeSubscriptionPayments {
     fn charge(
         env: Env,
         subscription_id: u64,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
+
+    /// Atomically charge up to `max_periods` elapsed periods.
+    ///
+    /// Returns the total billed amount. `max_periods` must not exceed the
+    /// contract's hard catch-up bound. A transfer failure returns
+    /// [`ForgeError::TokenTransferFailed`] and rolls back all transfers and
+    /// subscription state. `PastDue` subscriptions must use `charge` to
+    /// preserve the existing retry policy.
+    fn charge_catchup(
+        env: Env,
+        subscription_id: u64,
+        max_periods: u32,
     ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 
     /// Pause an active subscription, preventing further charges while paused.
@@ -291,6 +315,64 @@ impl SubscriptionPayments {
                 Ok(0)
             }
         }
+    }
+
+    /// Atomically bill multiple elapsed periods.
+    pub fn charge_catchup(
+        env: Env,
+        subscription_id: u64,
+        max_periods: u32,
+    ) -> Result<i128, ForgeError> {
+        if max_periods > MAX_CATCHUP_PERIODS {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let mut subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        if subscription.status != SubscriptionStatus::Active {
+            return Err(ForgeError::InvalidInput);
+        }
+        subscription.provider.require_auth();
+
+        if max_periods == 0 {
+            return Ok(0);
+        }
+
+        let now = env.ledger().timestamp();
+        let elapsed = now
+            .checked_sub(subscription.last_charged)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let elapsed_periods = elapsed / subscription.period;
+        let periods = core::cmp::min(max_periods as u64, elapsed_periods);
+
+        let mut total = 0_i128;
+        for _ in 0..periods {
+            let next_due = subscription
+                .last_charged
+                .checked_add(subscription.period)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            let transfer_result = token::TokenClient::new(&env, &subscription.token).try_transfer(
+                &subscription.subscriber,
+                &subscription.provider,
+                &subscription.amount,
+            );
+            if !matches!(transfer_result, Ok(Ok(()))) {
+                return Err(ForgeError::TokenTransferFailed);
+            }
+            total = total
+                .checked_add(subscription.amount)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            subscription.last_charged = next_due;
+        }
+
+        if periods > 0 {
+            subscription.failed_attempts = 0;
+            subscription.status = SubscriptionStatus::Active;
+            subscription.paused_at = None;
+            env.storage()
+                .instance()
+                .set(&DataKey::Subscription(subscription_id), &subscription);
+        }
+        Ok(total)
     }
 
     /// Pause an active subscription, preventing charges while paused.
@@ -637,6 +719,101 @@ mod tests {
             START + PERIOD * 2
         );
         assert_eq!(tc.balance(&accounts.validator), AMOUNT * 2);
+    }
+
+    #[test]
+    fn charge_catchup_bills_elapsed_periods_and_respects_max_periods() {
+        let (env, _token, tc, _contract_id, client, accounts, subscription_id) = setup!();
+        env.ledger().set_timestamp(START + PERIOD * 3);
+
+        assert_eq!(client.charge_catchup(&subscription_id, &2), AMOUNT * 2);
+        let subscription = client.get_subscription(&subscription_id);
+        assert_eq!(subscription.last_charged, START + PERIOD * 2);
+        assert_eq!(tc.balance(&accounts.validator), AMOUNT * 2);
+
+        assert_eq!(client.charge_catchup(&subscription_id, &2), AMOUNT);
+        assert_eq!(
+            client.get_subscription(&subscription_id).last_charged,
+            START + PERIOD * 3
+        );
+        assert_eq!(tc.balance(&accounts.validator), AMOUNT * 3);
+    }
+
+    #[test]
+    fn charge_catchup_zero_and_before_due_are_noops() {
+        let (env, _token, tc, _contract_id, client, accounts, subscription_id) = setup!();
+        assert_eq!(client.charge_catchup(&subscription_id, &0), 0);
+        env.ledger().set_timestamp(START + PERIOD - 1);
+        assert_eq!(client.charge_catchup(&subscription_id, &2), 0);
+        assert_eq!(
+            client.get_subscription(&subscription_id).last_charged,
+            START
+        );
+        assert_eq!(tc.balance(&accounts.validator), 0);
+    }
+
+    #[test]
+    fn charge_catchup_rejects_values_over_hard_cap() {
+        let (_env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
+        let err = client
+            .try_charge_catchup(&subscription_id, &33)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn charge_catchup_handles_u64_max_timestamp_without_overflow() {
+        let (env, token, tc, _contract_id, client, accounts, _id) = setup!();
+        let subscription_id = client.subscribe(
+            &accounts.user2,
+            &accounts.validator,
+            &token,
+            &1_i128,
+            &u64::MAX,
+        );
+        StellarAssetClient::new(&env, &token).mint(&accounts.user2, &1_i128);
+        env.ledger().set_timestamp(u64::MAX);
+
+        assert_eq!(client.charge_catchup(&subscription_id, &1), 0);
+        assert_eq!(tc.balance(&accounts.validator), 0);
+    }
+
+    #[test]
+    fn charge_catchup_refuses_past_due_and_preserves_retry_state() {
+        let (env, token, _tc, _contract_id, client, accounts, _id) = setup!();
+        let broke_user = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&broke_user, &10_i128);
+        let sub_id = client.subscribe(&broke_user, &accounts.validator, &token, &AMOUNT, &PERIOD);
+        env.ledger().set_timestamp(START + PERIOD);
+        assert_eq!(client.charge(&sub_id), 0);
+
+        let before = client.get_subscription(&sub_id);
+        let err = client.try_charge_catchup(&sub_id, &2).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(client.get_subscription(&sub_id), before);
+    }
+
+    #[test]
+    fn charge_catchup_transfer_failure_rolls_back_prior_periods() {
+        let (env, token, tc, _contract_id, client, accounts, _id) = setup!();
+        let broke_user = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&broke_user, &(AMOUNT + 1));
+        let sub_id = client.subscribe(&broke_user, &accounts.validator, &token, &AMOUNT, &PERIOD);
+        env.ledger().set_timestamp(START + PERIOD * 2);
+
+        let err = client.try_charge_catchup(&sub_id, &2).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::TokenTransferFailed);
+        assert_eq!(tc.balance(&broke_user), AMOUNT + 1);
+        assert_eq!(tc.balance(&accounts.validator), 0);
+        assert_eq!(client.get_subscription(&sub_id).last_charged, START);
+    }
+
+    #[test]
+    fn charge_catchup_missing_subscription_is_not_found() {
+        let (_env, _token, _tc, _contract_id, client, _accounts, _id) = setup!();
+        let err = client.try_charge_catchup(&999, &1).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
     }
 
     #[test]

@@ -1,14 +1,14 @@
 # Subscription Payments Contract
 
 Recurring, on-chain subscription billing: a subscriber authorizes a provider to
-pull a fixed `amount` per `period` (seconds). This iteration tracks subscription
-state and billing cadence; token settlement is out of scope.
+pull a fixed `amount` per `period` (seconds) through SEP-41 token transfers.
 
 ## Interface
 
 ```rust
 fn subscribe(subscriber, provider, token, amount, period) -> Result<u64, ForgeError>
 fn charge(subscription_id) -> Result<i128, ForgeError>
+fn charge_catchup(subscription_id, max_periods: u32) -> Result<i128, ForgeError>
 fn cancel(subscription_id) -> Result<(), ForgeError>
 fn get_subscription(subscription_id) -> Result<Subscription, ForgeError>
 fn get_subscription_count() -> u64
@@ -17,14 +17,21 @@ fn subscriptions_for_provider(provider, offset, limit) -> Result<Vec<Subscriptio
 ```
 
 - `subscribe` requires the subscriber and returns a stable, monotonic id.
-- `charge` requires the provider and bills at most one full period per call.
+- `charge` requires the provider and settles at most one full period per call.
+- `charge_catchup` requires the provider and settles `min(max_periods,
+elapsed_periods)` periods in one atomic invocation. `max_periods == 0` is a
+  no-op; values above the hard cap of 32 are rejected. The cap bounds Soroban
+  instruction use and token outlay for keeper calls.
+- `charge_catchup` refuses `PastDue`; call `charge` to use the existing retry
+  policy. A failed catch-up transfer returns `TokenTransferFailed` and rolls
+  back all transfers and `last_charged` through Soroban frame rollback.
 - `cancel` requires the subscriber and prevents further charges.
 
 ## Subscription States
 
 - `Active` — chargeable
 - `Cancelled` — no further charges
-- `PastDue` — reserved for a failed-payment retry model in a follow-up
+- `PastDue` — a failed single-period payment requiring `charge` retry semantics
 
 ## Secondary Indices
 
@@ -63,4 +70,6 @@ of `0` fails with `ForgeError::InvalidInput`.
 ## Payment Semantics
 
 `charge` returns the billed amount, or `0` when no full period has elapsed since
-the last charge. Repeating the call catches up at most one period at a time.
+the last charge. `charge_catchup` returns the total billed amount and advances
+`last_charged` once per successfully settled period. Period and total arithmetic
+uses checked operations.
