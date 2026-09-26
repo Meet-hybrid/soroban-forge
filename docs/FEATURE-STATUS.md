@@ -6,7 +6,8 @@ the flagship: it moves real SEP-41 tokens; marketplace royalties settles
 its splits the same way via `settle_sale`; vesting settles its claims via
 `claim`. The subscription state machine is honestly labeled where it tracks
 but does not settle; DAO governance now dispatches approved opaque actions
-on-chain.
+on-chain and settles a SEP-41 proposal bond — pulled at `propose`, refunded
+to the proposer or forfeited to the treasury at a terminal transition.
 
 **Last verified against:** the SDK 27 migration (workspace v0.2.0).
 
@@ -58,11 +59,15 @@ on-chain.
 
 | Entrypoint | Status | Notes |
 |---|---|---|
-| `propose` | ✅ Implemented | Stores the target contract, opaque action payload, and voting deadline |
+| `configure_bond` | ✅ Implemented | One-time permissionless config (token, amount, treasury); first caller wins; `propose` is rejected with `NotInitialized` while unconfigured |
+| `propose` | ✅ Implemented | Stores the target contract, opaque action payload, and voting deadline; **real token transfer** proposer → contract for the bond, before any state write |
 | `vote` | ✅ Implemented | One-vote-per-voter enforced |
-| `execute` | ✅ Implemented | Permissionless majority finalisation, then `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Succeeded` |
+| `execute` | ✅ Implemented | Permissionless majority finalisation, then `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Succeeded`; on terminal transitions the bond is **refunded** to the proposer (`Executed`) or **forfeited** to the treasury (`Defeated`) in the same frame |
+| `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; **real token transfer** refund of the bond |
 | `get_proposal` | ✅ Implemented | Read-only |
-| Events | ✅ Implemented | `Proposed`, `VoteCast`, and `Finalised` (`proposal_id` as topic) |
+| `get_bond_config` | ✅ Implemented | Read-only; `NotInitialized` when no bond is configured |
+| Events | ✅ Implemented | `Proposed`, `VoteCast`, `Finalised`, `BondPosted`, `BondReleased` (`proposal_id` as topic) |
+| Tests | ✅ 60 | Bond custody lifecycle (post/refund/forfeit/conservation), arithmetic boundary tests, rollback-on-failure ordering, plus a **negative-auth suite** (`authz.rs`): wrong-signer and args-replay rejection, the nested token authorization frame for the bond pull, `env.auths()` authorization-tree assertions |
 | Weighted voting | ❌ Not implemented | Follow-up |
 
 ## Subscription Payments (`crates/subscription-payments`)
@@ -93,10 +98,10 @@ on-chain.
 | Concern | Status | Notes |
 |---|---|---|
 | Checked arithmetic | ✅ Workspace-wide | Overflow-safe; vesting guards documented |
-| `require_auth` on every state change | ✅ Workspace-wide | Escrow: proven against wrong signers via the negative-auth suite (`authz.rs`) + authorization-tree assertions; other five: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
+| `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, and DAO governance proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other three: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
 | Events | ⚠️ Escrow + Multi-Sig + DAO | Full lifecycle events on escrow, multi-sig wallet, and DAO governance |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
-| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale` settles splits; multi-sig `execute` and DAO governance `execute` perform cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions still store amounts only |
+| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale` settles splits; DAO `propose` pulls the proposal bond and refunds/forfeits it on settlement; multi-sig `execute` performs cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions still store amounts only |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
 | Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
 | TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |

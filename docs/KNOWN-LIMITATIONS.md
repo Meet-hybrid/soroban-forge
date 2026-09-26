@@ -16,9 +16,9 @@ contract** and remain open for the other four:
 1. **No token settlement** — escrow now performs real SEP-41 transfers
    (`deposit` pulls from the buyer, `release`/`refund`/`resolve` pay out)
    with transfer-before-state ordering so a failed transfer leaves no
-   partial state. Marketplace royalties and vesting have since gained
-   settlement the same way; DAO governance and subscriptions still move
-   nothing.
+   partial state. Marketplace royalties, vesting, and DAO governance
+   (proposal bonds) have since gained settlement the same way;
+   subscriptions still move nothing.
 2. **Instance-only storage** — escrow records now live in per-id
    **persistent** entries with TTL bumps on every write and a
    permissionless `touch_ttl` keeper entrypoint. The other five still use
@@ -36,17 +36,20 @@ contract** and remain open for the other four:
 
 ## Still open
 
-### 1. Token settlement for the remaining two contracts
+### 1. Token settlement for subscription payments
 
 Subscriptions remain state machines: amounts are validated and stored, never
-moved. DAO governance now dispatches approved opaque actions.
-(Marketplace royalties moved off this list: `settle_sale` transfers
+moved. (Marketplace royalties moved off this list: `settle_sale` transfers
 real SEP-41 tokens with the escrow pattern. Multi-sig wallet also
 moved off this list: `execute` performs real cross-contract
 invocations via `try_invoke_contract`. Vesting also moved off this
 list: `claim` transfers the vested amount to the beneficiary with
-transfer-before-state ordering.) Each remaining contract gets
-its own tranche using the escrow pattern (see
+transfer-before-state ordering. DAO governance also moved off this list:
+`propose` pulls a SEP-41 proposal bond into contract custody and the bond is
+refunded to the proposer (`Executed`, `Cancelled`) or forfeited to the
+configured treasury (`Defeated`) in the same frame as the terminal
+transition.) The remaining contract gets its own tranche using the escrow
+pattern (see
 [RESUBMISSION.md](RESUBMISSION.md#phase-1--flagship-escrow-primitive-3-weeks)).
 
 ### 2. Instance-only storage outside escrow
@@ -61,20 +64,23 @@ Only escrow, multi-sig wallet, and DAO governance are observable on-chain.
 The remaining three contracts (vesting, subscriptions, and marketplace
 royalties) need event modules before any indexer or SDK integration.
 
-### 4. Negative authorization coverage outside escrow
+### 4. Negative authorization coverage outside escrow, vesting, and DAO governance
 
-**Closed for escrow and vesting** (was the open item here): dedicated negative-auth
-suites (`crates/escrow/src/authz.rs`, `crates/vesting/src/authz.rs`) prove per
-entrypoint that a wrong signer is rejected by the host, that armed signatures cannot
-be replayed over different arguments or schedule IDs, and — via `env.auths()` tree assertions
-— pin the exact authorized-invocation tree every creation and payout path demands.
+**Closed for escrow, vesting, and DAO governance** (was the open item here): dedicated
+negative-auth suites (`crates/escrow/src/authz.rs`, `crates/vesting/src/authz.rs`,
+`crates/dao-governance/src/authz.rs`) prove per entrypoint that a wrong signer is
+rejected by the host, that armed signatures cannot be replayed over different
+arguments or schedule IDs, and — via `env.auths()` tree assertions — pin the exact
+authorized-invocation tree every creation and payout path demands. The DAO suite
+additionally covers the bond-bearing paths: the proposer's signature must carry the
+nested token `transfer` authorization for the bond pull, and the outgoing
+refund/forfeit transfers are covered by contract self-authorization (blank envelope).
 They also document the verified mechanics: contract self-authorization is implicit
 (the host auto-approves `require_auth` from the executing contract), which is why
 a party signature alone legitimately completes a payout.
 
 Still open: the other three contracts' entrypoints are proven at call-graph
-level only; DAO governance now dispatches approved actions, while subscriptions
-still move nothing.
+level only; subscriptions still move nothing.
 
 ### 5. Vesting rounding residue
 
@@ -146,6 +152,7 @@ contributions have landed yet.
 
 ## Out of scope for the flagship phase (deliberate)
 
-- Settlement work for the five non-flagship contracts (one tranche each)
+- Settlement work for subscription payments (the last contract that never
+  moves tokens)
 - Weighted voting, plan management, multi-recipient royalties
 - Formal verification, external audit (planned before any mainnet use)
