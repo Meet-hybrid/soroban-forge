@@ -437,3 +437,132 @@ fn execute_forfeits_the_bond_under_a_blank_envelope() {
     assert_eq!(tc.balance(&accounts.user1), FUNDS - BOND);
     assert_eq!(tc.balance(&accounts.deployer), BOND);
 }
+
+// -----------------------------------------------------------------------
+// vote — voter authorization
+// -----------------------------------------------------------------------
+
+#[test]
+fn vote_accepts_the_voter_signature() {
+    let (env, _token, _tc, contract_id, client, accounts, target_id) = setup!();
+    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+
+    // The voter's entrypoint signature alone completes the vote — no token
+    // transfer occurs, so there is no nested sub-invocation.
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user2,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "vote",
+            args: (id, &accounts.user2, true).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_vote(&id, &accounts.user2, &true)
+        .expect("outer ok")
+        .expect("contract ok");
+
+    let proposal = client.get_proposal(&id);
+    assert_eq!(proposal.for_votes, 1);
+    assert_eq!(proposal.against_votes, 0);
+}
+
+#[test]
+fn vote_rejects_signature_from_a_different_address() {
+    let (env, _token, _tc, contract_id, client, accounts, target_id) = setup!();
+    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+
+    // A stranger (user3) arms their own signature for a vote whose `voter`
+    // argument names user2. The contract calls `voter.require_auth()`, so the
+    // host must reject the mismatch outright.
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user3,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "vote",
+            args: (id, &accounts.user2, true).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_vote(&id, &accounts.user2, &true);
+    assert_auth_abort!(res);
+
+    // The tally must be untouched.
+    let proposal = client.get_proposal(&id);
+    assert_eq!(proposal.for_votes, 0);
+    assert_eq!(proposal.against_votes, 0);
+}
+
+#[test]
+fn vote_rejects_signature_over_different_args() {
+    let (env, _token, _tc, contract_id, client, accounts, target_id) = setup!();
+    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+
+    // Correct signer, but the armed authorization covers a *different
+    // support value* than the invocation performs. A captured signature
+    // must not be replayable with flipped intent.
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user2,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "vote",
+            args: (id, &accounts.user2, false).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    // The actual call casts `true` (for), but the armed auth covers `false` (against).
+    let res = client.try_vote(&id, &accounts.user2, &true);
+    assert_auth_abort!(res);
+
+    let proposal = client.get_proposal(&id);
+    assert_eq!(proposal.for_votes, 0);
+    assert_eq!(proposal.against_votes, 0);
+}
+
+#[test]
+fn vote_authorization_tree_is_the_voter_entrypoint_frame() {
+    let (env, _token, _tc, contract_id, client, accounts, target_id) = setup!();
+    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+
+    // Under mock_all_auths, cast a vote and pin the recorded auth tree.
+    client.vote(&id, &accounts.user2, &true);
+
+    // No token transfer occurs, so the tree is the voter's entrypoint
+    // frame only — no sub-invocations.
+    assert_eq!(
+        env.auths(),
+        [(
+            accounts.user2.clone(),
+            soroban_sdk::testutils::AuthorizedInvocation {
+                function: soroban_sdk::testutils::AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "vote"),
+                    (id, accounts.user2.clone(), true).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
+}
+
+#[test]
+fn blank_envelope_aborts_vote_and_preserves_tally() {
+    let (env, _token, _tc, _contract_id, client, accounts, target_id) = setup!();
+    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+
+    // No authorization entries: every require_auth fails.
+    env.set_auths(&[]);
+
+    let res = client.try_vote(&id, &accounts.user2, &true);
+    assert_auth_abort!(res);
+
+    // Under a blank envelope the tally must be untouched.
+    env.mock_all_auths();
+    let proposal = client.get_proposal(&id);
+    assert_eq!(proposal.for_votes, 0);
+    assert_eq!(proposal.against_votes, 0);
+}

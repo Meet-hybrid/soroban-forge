@@ -2204,3 +2204,8 @@ mod tests {
 // two-layer pattern (issue #62's scope, extended to the new entrypoints).
 #[cfg(test)]
 mod authz;
+
+// Randomized property suite covering the vote-tally, deadline/lifecycle,
+// and finalization-outcome invariants (issue #62).
+#[cfg(test)]
+mod props;
