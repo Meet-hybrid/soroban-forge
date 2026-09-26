@@ -8,19 +8,70 @@
 //! custodies the tokens until release, refund, or arbitration:
 //!
 //! ```text
-//! Pending --deposit--> Funded --release--> Completed (seller paid)
-//!                     |        --refund--> Refunded  (buyer back)
+//! Pending --deposit--> Funded --release_partial (×n)--> Funded  (partial)
+//!                     |                                  |
+//!                     |                                  +--> Completed (final partial)
+//!                     |        --release--> Completed (full, direct)
+//!                     |        --refund--> Refunded   (buyer back, remaining only)
 //!                     |        --dispute--> Disputed --resolve--> Completed | Refunded
 //!          --cancel--> Cancelled (before funding only)
 //! ```
+//!
+//! ## Partial releases
+//!
+//! `release_partial(escrow_id, amount)` allows the seller to receive funds
+//! incrementally while the escrow remains `Funded`. The accounting is:
+//!
+//! ```text
+//! remaining = deposited - released
+//! ```
+//!
+//! * Each `release_partial` transfers exactly `amount` to the seller and
+//!   increments `released` by that amount.
+//! * When `amount == remaining` (the final partial payment), the escrow
+//!   transitions to `Completed` exactly once.
+//! * `refund` and `resolve` operate on the **remaining** balance only.
+//! * The existing `release` entrypoint pays the full remaining balance in
+//!   one shot and is unchanged; it still transitions directly to `Completed`.
+//!
+//! ## Storage compatibility
+//!
+//! `EscrowData` now carries a `released: i128` field. Records written by
+//! earlier contract versions do not contain this field. Soroban
+//! `#[contracttype]` structs are stored as XDR symbol-keyed maps; the host's
+//! `map_unpack_to_slice` rejects any map whose entry count differs from the
+//! struct's field count. To stay backward compatible while keeping
+//! `DataKey::Escrow(id)` unchanged, `load_escrow` attempts to deserialize the
+//! stored value as the current `EscrowData` first, and on failure falls back
+//! to deserializing as `EscrowDataV1` (the pre-partial-release shape) and
+//! converts it by defaulting `released` to `0`. No migration is required;
+//! the conversion happens lazily on first read, and the upgraded record is
+//! written back at the same key on the next state-changing call.
+//!
+//! **Document of record:** the chosen strategy is a two-type fallback decode
+//! inside `load_escrow`. `EscrowDataV1` is the exact nine-field struct that
+//! existed before this feature. It carries no `released` field and is never
+//! written by new code. On a successful `EscrowDataV1` decode the result is
+//! immediately upcast to `EscrowData` with `released = 0`.
+//!
+//! ## Events
+//!
+//! A new `PartiallyReleased` event is emitted by `release_partial` rather
+//! than reusing `Released`. The two events carry different semantics: a
+//! `Released` event signals terminal completion; a `PartiallyReleased` event
+//! signals an incremental payout with a non-zero remaining balance (except
+//! when it is also the final partial, in which case the `EscrowData` in the
+//! payload will carry `status = Completed`). Extending the existing `Released`
+//! event would silently break existing indexers that treat `Released` as a
+//! terminal signal.
 //!
 //! ## Custody model
 //!
 //! On `deposit`, the token contract moves `amount` from the buyer to this
 //! contract's own address. From that moment the funds are inside the
-//! contract and can only leave via `release` (to seller), `refund` (to
-//! buyer), or `resolve` (either, by arbiter decision). There is no admin
-//! key and no other exit.
+//! contract and can only leave via `release` / `release_partial` (to
+//! seller), `refund` (to buyer), or `resolve` (either, by arbiter decision).
+//! There is no admin key and no other exit.
 //!
 //! ## Ordering discipline (load-bearing)
 //!
@@ -45,6 +96,9 @@
 //! - `release` — seller authorizes, confirming delivery. The buyer
 //!   authorizing their own payout would make this a confirmation flow,
 //!   not escrow.
+//! - `release_partial` — **seller authorizes**, same rationale as `release`.
+//!   Invalid requests (zero/negative amount, amount > remaining, non-Funded
+//!   status) return `InvalidInput` without modifying storage.
 //! - `refund` — seller before the deadline; buyer may reclaim after the
 //!   deadline.
 //! - `dispute` — the **claimant** (buyer or seller) is passed explicitly
@@ -136,8 +190,13 @@ pub trait SorobanForgeEscrow {
     ///   token, or undeployed token contract).
     fn deposit(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
-    /// Release funds to the seller. Requires the seller (confirms
-    /// delivery); only valid while `Funded`.
+    /// Release the full remaining balance to the seller. Requires the
+    /// seller (confirms delivery); only valid while `Funded`.
+    ///
+    /// Equivalent to calling `release_partial` with the full remaining
+    /// balance, but in a single call. Backward-compatible with pre-partial-
+    /// release code: behaves identically to the old `release` when no
+    /// partial releases have been made.
     ///
     /// # Errors
     ///
@@ -147,10 +206,33 @@ pub trait SorobanForgeEscrow {
     ///   the payout.
     fn release(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
+    /// Release a partial amount to the seller. Requires the seller;
+    /// only valid while `Funded`.
+    ///
+    /// * `amount` must be positive and must not exceed the remaining balance
+    ///   (`deposited - released`). Invalid requests return `InvalidInput`
+    ///   without modifying any storage.
+    /// * When `amount == remaining`, the escrow transitions to `Completed`.
+    /// * Emits a `PartiallyReleased` event (even on the final partial that
+    ///   completes the escrow).
+    ///
+    /// The token transfer is performed **before** any state write (transfer-
+    /// before-state ordering).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Funded`, `amount <= 0`,
+    ///   or `amount > remaining`.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the payout.
+    fn release_partial(env: Env, escrow_id: u64, amount: i128) -> Result<(), ForgeError>;
+
     /// Refund the buyer.
     ///
     /// Before the deadline the seller may refund; after the deadline the
-    /// buyer may reclaim. Only valid while `Funded`.
+    /// buyer may reclaim. Only valid while `Funded`. Refunds the
+    /// **remaining** balance only (i.e., `deposited - released`).
     ///
     /// # Errors
     ///
@@ -163,7 +245,8 @@ pub trait SorobanForgeEscrow {
 
     /// Raise a dispute. `claimant` must be the buyer or the seller and
     /// must authorize the call; only valid while `Funded`. Freezes the
-    /// escrow until the arbiter resolves it.
+    /// escrow until the arbiter resolves it. Only the **remaining** balance
+    /// is at stake.
     ///
     /// # Errors
     ///
@@ -174,8 +257,8 @@ pub trait SorobanForgeEscrow {
     fn dispute(env: Env, escrow_id: u64, claimant: Address) -> Result<(), ForgeError>;
 
     /// Resolve a dispute. Requires the arbiter; only valid while
-    /// `Disputed`. Pays the full amount to the seller (`true`) or back to
-    /// the buyer (`false`). The decision is final.
+    /// `Disputed`. Pays the **remaining** balance to the seller (`true`)
+    /// or back to the buyer (`false`). The decision is final.
     ///
     /// # Errors
     ///
@@ -201,7 +284,8 @@ pub trait SorobanForgeEscrow {
     /// * [`ForgeError::NotFound`] — no escrow with this id.
     fn get_status(env: Env, escrow_id: u64) -> Result<EscrowStatus, ForgeError>;
 
-    /// Read the full escrow record.
+    /// Read the full escrow record, including `released` and derived
+    /// `remaining` accounting.
     ///
     /// # Errors
     ///
@@ -255,7 +339,7 @@ pub enum EscrowStatus {
     Pending,
     /// Tokens held by the contract.
     Funded,
-    /// Released to the seller.
+    /// Released to the seller (full release or final partial release).
     Completed,
     /// Refunded to the buyer.
     Refunded,
@@ -266,6 +350,23 @@ pub enum EscrowStatus {
 }
 
 /// A single three-party escrow record.
+///
+/// ## Accounting fields
+///
+/// * `amount` — total tokens deposited by the buyer; never changes after
+///   `deposit`.
+/// * `released` — cumulative tokens already transferred to the seller via
+///   `release_partial`; `0` before any partial release is made.
+/// * `remaining` (derived) — `amount - released`; the balance currently
+///   held in custody. `refund` and `resolve` pay this amount; `release`
+///   and the final `release_partial` must consume it entirely.
+///
+/// ## Storage compatibility
+///
+/// Records written by contract versions prior to the partial-release feature
+/// do not contain a `released` field. They are loaded via a backward-compat
+/// decode path that defaults `released` to `0` (see `load_escrow` internals
+/// and the module-level storage compatibility note).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct EscrowData {
@@ -280,14 +381,80 @@ pub struct EscrowData {
     pub arbiter: Address,
     /// SEP-41 token contract custodied by this escrow.
     pub token: Address,
-    /// Amount of `token` held in custody.
+    /// Total amount of `token` deposited by the buyer. Never changes after
+    /// `deposit`.
     pub amount: i128,
+    /// Cumulative amount already transferred to the seller via
+    /// `release_partial`. `0` until the first partial release.
+    pub released: i128,
     /// Seconds after `created_at` at which the buyer may self-refund.
     pub timeout: u64,
     /// Current lifecycle state.
     pub status: EscrowStatus,
     /// Unix timestamp of creation.
     pub created_at: u64,
+}
+
+impl EscrowData {
+    /// The balance currently held in custody: `amount - released`.
+    pub fn remaining(&self) -> i128 {
+        self.amount
+            .checked_sub(self.released)
+            .expect("released never exceeds amount by contract invariant")
+    }
+}
+
+/// Pre-partial-release escrow record shape (schema V1).
+///
+/// Used **only** by [`load_escrow`] for backward-compatible decoding of
+/// storage entries written by contract versions that pre-date the
+/// `released` field. New code never writes this type; it is a read-only
+/// migration aid.
+///
+/// Soroban `#[contracttype]` structs are XDR symbol-keyed maps. The host
+/// rejects deserialization when the map's entry count differs from the
+/// struct's field count. Old records have 9 fields (no `released`), so they
+/// fail to decode as the 10-field `EscrowData`. `load_escrow` catches that
+/// failure and retries as `EscrowDataV1`, then upgrades to `EscrowData` with
+/// `released = 0`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EscrowDataV1 {
+    /// Matches `EscrowData::escrow_id`.
+    pub escrow_id: u64,
+    /// Matches `EscrowData::buyer`.
+    pub buyer: Address,
+    /// Matches `EscrowData::seller`.
+    pub seller: Address,
+    /// Matches `EscrowData::arbiter`.
+    pub arbiter: Address,
+    /// Matches `EscrowData::token`.
+    pub token: Address,
+    /// Matches `EscrowData::amount`.
+    pub amount: i128,
+    /// Matches `EscrowData::timeout`.
+    pub timeout: u64,
+    /// Matches `EscrowData::status`.
+    pub status: EscrowStatus,
+    /// Matches `EscrowData::created_at`.
+    pub created_at: u64,
+}
+
+impl From<EscrowDataV1> for EscrowData {
+    fn from(v1: EscrowDataV1) -> Self {
+        EscrowData {
+            escrow_id: v1.escrow_id,
+            buyer: v1.buyer,
+            seller: v1.seller,
+            arbiter: v1.arbiter,
+            token: v1.token,
+            amount: v1.amount,
+            released: 0,
+            timeout: v1.timeout,
+            status: v1.status,
+            created_at: v1.created_at,
+        }
+    }
 }
 
 /// A page of escrow ids involving a participant.
@@ -310,7 +477,7 @@ pub struct ParticipantEscrowsPage {
 /// byte budget scales per record; only the id counter lives in instance
 /// storage (one small entry, written once per creation).
 #[contracttype]
-enum DataKey {
+pub enum DataKey {
     /// The escrow record for `u64` id.
     Escrow(u64),
     /// Monotonic id counter.
@@ -397,6 +564,7 @@ impl Escrow {
             arbiter,
             token,
             amount,
+            released: 0,
             timeout,
             status: EscrowStatus::Pending,
             created_at: env.ledger().timestamp(),
@@ -440,8 +608,13 @@ impl Escrow {
         Ok(())
     }
 
-    /// Release funds to the seller. Seller-authorized: delivery
-    /// confirmation by the paid party, not the paying one.
+    /// Release the full remaining balance to the seller. Seller-authorized:
+    /// delivery confirmation by the paid party, not the paying one.
+    ///
+    /// Backward-compatible: behaves identically to the pre-partial-release
+    /// `release` when `released == 0`. When partial releases have already
+    /// been made, only the **remaining** balance (`amount - released`) is
+    /// transferred — maintaining the conservation invariant.
     pub fn release(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
         let escrow = Self::load_escrow(&env, escrow_id)?;
         escrow.seller.require_auth();
@@ -450,10 +623,12 @@ impl Escrow {
             return Err(ForgeError::InvalidInput);
         }
 
-        // Pay out before mutating state, mirroring `deposit`.
-        transfer_from_contract(&env, &escrow.token, &escrow.seller, escrow.amount)?;
+        let remaining = escrow.remaining();
+        // Pay out the remaining balance before mutating state.
+        transfer_from_contract(&env, &escrow.token, &escrow.seller, remaining)?;
 
         let mut completed = escrow;
+        completed.released = completed.amount; // full release
         completed.status = EscrowStatus::Completed;
         env.storage()
             .persistent()
@@ -463,10 +638,58 @@ impl Escrow {
         Ok(())
     }
 
+    /// Release a partial `amount` to the seller. Seller-authorized.
+    ///
+    /// Only valid while `Funded`. `amount` must be positive and must not
+    /// exceed the remaining balance. When `amount == remaining`, the escrow
+    /// transitions to `Completed` in the same call.
+    ///
+    /// Transfer-before-state ordering is preserved: the token payout happens
+    /// before any storage write, so a failed transfer leaves no partial state.
+    pub fn release_partial(env: Env, escrow_id: u64, amount: i128) -> Result<(), ForgeError> {
+        let escrow = Self::load_escrow(&env, escrow_id)?;
+        escrow.seller.require_auth();
+
+        // All validation before any state change or transfer.
+        if escrow.status != EscrowStatus::Funded {
+            return Err(ForgeError::InvalidInput);
+        }
+        if amount <= 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        let remaining = escrow.remaining();
+        if amount > remaining {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        // Transfer first (transfer-before-state ordering).
+        transfer_from_contract(&env, &escrow.token, &escrow.seller, amount)?;
+
+        let new_released = escrow
+            .released
+            .checked_add(amount)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+
+        let mut updated = escrow;
+        updated.released = new_released;
+        // Final partial: consume remaining → Completed.
+        if amount == remaining {
+            updated.status = EscrowStatus::Completed;
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &updated);
+        bump_entry(&env, &DataKey::Escrow(escrow_id));
+        events::partially_released(&env, &updated, amount);
+        Ok(())
+    }
+
     /// Refund the buyer.
     ///
     /// Pre-deadline: seller authorizes (voluntary refund). Post-deadline:
-    /// buyer authorizes (reclaim of unfulfilled funds).
+    /// buyer authorizes (reclaim of unfulfilled funds). Refunds only the
+    /// **remaining** balance (`amount - released`).
     pub fn refund(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
         let escrow = Self::load_escrow(&env, escrow_id)?;
         if escrow.status != EscrowStatus::Funded {
@@ -485,9 +708,11 @@ impl Escrow {
             escrow.seller.require_auth();
         }
 
-        transfer_from_contract(&env, &escrow.token, &escrow.buyer, escrow.amount)?;
+        let remaining = escrow.remaining();
+        transfer_from_contract(&env, &escrow.token, &escrow.buyer, remaining)?;
 
         let mut refunded = escrow;
+        refunded.released = refunded.amount; // account for full payout
         refunded.status = EscrowStatus::Refunded;
         env.storage()
             .persistent()
@@ -498,7 +723,7 @@ impl Escrow {
     }
 
     /// Raise a dispute: the claimant (buyer or seller) authorizes, while
-    /// `Funded`. Freezes all payout paths until the arbiter resolves.
+    /// `Funded`. Freezes the remaining balance until the arbiter resolves.
     pub fn dispute(env: Env, escrow_id: u64, claimant: Address) -> Result<(), ForgeError> {
         let escrow = Self::load_escrow(&env, escrow_id)?;
         if escrow.status != EscrowStatus::Funded {
@@ -523,8 +748,8 @@ impl Escrow {
         Ok(())
     }
 
-    /// Resolve a dispute: arbiter only, final. Pays the full amount to the
-    /// seller (`true`) or refunds the buyer (`false`).
+    /// Resolve a dispute: arbiter only, final. Pays the **remaining**
+    /// balance to the seller (`true`) or refunds it to the buyer (`false`).
     pub fn resolve(env: Env, escrow_id: u64, in_favor_of_seller: bool) -> Result<(), ForgeError> {
         let escrow = Self::load_escrow(&env, escrow_id)?;
         if escrow.status != EscrowStatus::Disputed {
@@ -534,12 +759,15 @@ impl Escrow {
         // resolve must fail without touching the token contract.
         escrow.arbiter.require_auth();
 
+        let remaining = escrow.remaining();
         let mut resolved = escrow;
         if in_favor_of_seller {
-            transfer_from_contract(&env, &resolved.token, &resolved.seller, resolved.amount)?;
+            transfer_from_contract(&env, &resolved.token, &resolved.seller, remaining)?;
+            resolved.released = resolved.amount; // full payout
             resolved.status = EscrowStatus::Completed;
         } else {
-            transfer_from_contract(&env, &resolved.token, &resolved.buyer, resolved.amount)?;
+            transfer_from_contract(&env, &resolved.token, &resolved.buyer, remaining)?;
+            resolved.released = resolved.amount; // full payout
             resolved.status = EscrowStatus::Refunded;
         }
         env.storage()
@@ -578,7 +806,10 @@ impl Escrow {
         Ok(Self::load_escrow(&env, escrow_id)?.status)
     }
 
-    /// Read the full escrow record.
+    /// Read the full escrow record. The returned `EscrowData` exposes
+    /// `released` (cumulative seller payments) and `remaining()` (balance
+    /// in custody). For records created before the partial-release feature
+    /// was deployed, `released` will be `0`.
     pub fn get_escrow(env: Env, escrow_id: u64) -> Result<EscrowData, ForgeError> {
         Self::load_escrow(&env, escrow_id)
     }
@@ -633,13 +864,33 @@ impl Escrow {
     // Internals
     // -------------------------------------------------------------------
 
-    /// Load an escrow record by id (internal, reference-taking form of
-    /// [`Self::get_escrow`] for use inside entrypoints that own `Env`).
+    /// Load an escrow record by id with backward-compatible schema migration.
+    ///
+    /// Attempt to deserialize as `EscrowData` (current schema, 10 fields
+    /// including `released`). If that fails — which happens for records
+    /// written by contract versions that pre-date the `released` field —
+    /// retry as `EscrowDataV1` (9 fields, no `released`) and upcast to
+    /// `EscrowData` with `released = 0`.
+    ///
+    /// The fallback path is zero-cost for new records; it only fires on
+    /// legacy records. The upgraded value is **not** written back here —
+    /// the next state-changing call will write the current schema, lazily
+    /// migrating the record on first use.
     fn load_escrow(env: &Env, escrow_id: u64) -> Result<EscrowData, ForgeError> {
-        env.storage()
+        let key = DataKey::Escrow(escrow_id);
+        // Try current schema first.
+        if let Some(data) = env.storage().persistent().get::<DataKey, EscrowData>(&key) {
+            return Ok(data);
+        }
+        // Fallback: legacy schema (no `released` field).
+        if let Some(v1) = env
+            .storage()
             .persistent()
-            .get(&DataKey::Escrow(escrow_id))
-            .ok_or(ForgeError::NotFound)
+            .get::<DataKey, EscrowDataV1>(&key)
+        {
+            return Ok(EscrowData::from(v1));
+        }
+        Err(ForgeError::NotFound)
     }
 
     /// Allocate the next monotonic escrow id. Instance storage: one small
@@ -729,6 +980,22 @@ fn bump_entry(env: &Env, key: &DataKey) {
 /// Lifecycle events. The escrow id is a **topic** so indexers can filter
 /// by escrow cheaply; the data payload carries the full record so no read
 /// call is needed to reconstruct state.
+///
+/// ## Event decision for partial releases
+///
+/// `release_partial` emits `PartiallyReleased` rather than reusing the
+/// existing `Released` event. The rationale:
+///
+/// * `Released` is treated as a terminal signal by existing indexers
+///   (the `status` in its payload is always `Completed`). Emitting it for
+///   non-terminal partial releases would silently break those consumers.
+/// * `PartiallyReleased` carries `partial_amount` (the incremental payment)
+///   alongside the full `EscrowData` (which exposes `released`, `remaining()`,
+///   and `status`). Consumers can derive everything they need.
+/// * The final partial release (where `amount == remaining`, causing
+///   `status = Completed`) still emits `PartiallyReleased` (not `Released`),
+///   keeping the event type consistent with the call site. Consumers that
+///   care about completion should inspect `data.status`.
 mod events {
     use super::*;
 
@@ -750,6 +1017,23 @@ mod events {
     pub struct Released {
         #[topic]
         pub escrow_id: u64,
+        pub data: EscrowData,
+    }
+
+    /// Emitted by `release_partial` for every incremental seller payout.
+    ///
+    /// `partial_amount` is the amount transferred in this call; `data`
+    /// carries the post-update `EscrowData` (including updated `released`
+    /// and the new `status`). Check `data.status` to determine whether
+    /// this partial release was the final one.
+    #[contractevent]
+    pub struct PartiallyReleased {
+        #[topic]
+        pub escrow_id: u64,
+        /// The amount transferred to the seller in this particular call.
+        pub partial_amount: i128,
+        /// Full escrow record after this partial release, including updated
+        /// `released` and `status` fields.
         pub data: EscrowData,
     }
 
@@ -803,6 +1087,15 @@ mod events {
     pub fn released(env: &Env, escrow: &EscrowData) {
         Released {
             escrow_id: escrow.escrow_id,
+            data: escrow.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn partially_released(env: &Env, escrow: &EscrowData, partial_amount: i128) {
+        PartiallyReleased {
+            escrow_id: escrow.escrow_id,
+            partial_amount,
             data: escrow.clone(),
         }
         .publish(env);

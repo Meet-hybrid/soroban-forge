@@ -136,10 +136,13 @@ it can be deployed and upgraded independently, while `shared-utils` and
 stateDiagram-v2
     [*] --> Pending: create_escrow
     Pending --> Funded: deposit
-    Funded --> Completed: release
-    Funded --> Refunded: refund (after deadline)
+    Funded --> Funded: release_partial (partial)
+    Funded --> Completed: release_partial (final) / release
+    Funded --> Refunded: refund (remaining balance)
     Pending --> Cancelled: cancel
-    Funded --> Disputed: (reserved)
+    Funded --> Disputed: dispute (remaining frozen)
+    Disputed --> Completed: resolve (seller wins)
+    Disputed --> Refunded: resolve (buyer wins)
 ```
 
 ## Repository layout
