@@ -42,6 +42,19 @@ Derived from ledger time and the claimed amount (always current between
 claims): `Locked` before the cliff, `Vesting` after the cliff, `Completed`
 once fully claimed. `Revoked` is reserved for a follow-up revocation method.
 
+## Events
+
+The vesting contract emits a lifecycle event for each observable state change:
+
+- `ScheduleCreated` — published once per successful `create_schedule`, with
+  `schedule_id` as the event topic and the full `VestingSchedule` payload as
+the data.
+- `Claimed` — published once per successful positive claim, with
+  `schedule_id` as the event topic, the payout amount in the event data, and
+  the updated `VestingSchedule` payload as the final record.
+- Zero-claim calls return `0` early and emit nothing; read-only calls emit
+  nothing.
+
 ## Authorization
 
 - `create_schedule` requires the beneficiary.

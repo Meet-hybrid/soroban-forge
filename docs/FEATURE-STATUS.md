@@ -48,6 +48,15 @@ to the proposer or forfeited to the treasury at a terminal transition.
 
 ## Vesting (`crates/vesting`)
 
+| Entrypoint | Status | Notes |
+|---|---|---|
+| `create_schedule` | ✅ Implemented | Validates `total_amount > 0`, `duration > 0`, `cliff <= duration` |
+| `claim` | ✅ Implemented | **Real token transfer** contract → beneficiary before the state write (transfer-before-state); zero-claim calls skip the transfer; a failed transfer surfaces as `ForgeError::TokenTransferFailed` with `claimed`/`status` unchanged |
+| `claimable` | ✅ Implemented | Read-only |
+| `get_status` | ✅ Implemented | Read-only |
+| Events | ✅ Implemented | `ScheduleCreated` and `Claimed`; `schedule_id` as topic; payload carries the schedule state and payout amount |
+| Revocation | ❌ Not implemented | `Revoked` status reserved |
+| `VestingSchedule.token` field | ✅ Wired | Read by `claim` for the SEP-41 payout |
 | Entrypoint                    | Status             | Notes                                                                                                                                                                                                                                |
 | ----------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `create_schedule`             | ✅ Implemented     | Validates `total_amount > 0`, `duration > 0`, `cliff <= duration`                                                                                                                                                                    |
@@ -145,6 +154,8 @@ to the proposer or forfeited to the treasury at a terminal transition.
 | Concern | Status | Notes |
 |---|---|---|
 | Checked arithmetic | ✅ Workspace-wide | Overflow-safe; vesting guards documented |
+| `require_auth` on every state change | ✅ Workspace-wide | Escrow: proven against wrong signers via the negative-auth suite (`authz.rs`) + authorization-tree assertions; other five: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
+| Events | ⚠️ Escrow + DAO + vesting | Full lifecycle events on escrow; proposal lifecycle events on DAO governance; vesting lifecycle events for schedule creation and claims |
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, and DAO governance proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other three: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
 | Events | ⚠️ Escrow + Multi-Sig + DAO | Full lifecycle events on escrow, multi-sig wallet, and DAO governance |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |

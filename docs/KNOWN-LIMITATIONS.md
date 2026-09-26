@@ -54,6 +54,9 @@ bricking problem. (Escrow, multi-sig wallet, DAO governance, and marketplace roy
 
 ### 3. No events in vesting contract
 
+Escrow, vesting, and DAO governance are now observable on-chain. The
+remaining contracts still need event modules before any indexer or SDK
+integration can reconstruct those lifecycles from events alone.
 Vesting remains without an event module. Escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit typed on-chain events.
 
 
