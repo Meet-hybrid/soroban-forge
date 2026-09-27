@@ -1932,6 +1932,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "soroban-forge-composition-tests"
+version = "0.2.0"
+dependencies = [
+ "soroban-forge-shared-utils",
+ "soroban-forge-test-utils",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "soroban-forge-dao-governance"
 version = "0.2.0"
 dependencies = [

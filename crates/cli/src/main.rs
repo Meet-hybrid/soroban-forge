@@ -12,7 +12,7 @@ mod cli;
 mod commands;
 
 use clap::{Parser, Subcommand};
-use cli::{BuildArgs, DeployArgs, LintArgs, NewArgs, TestArgs};
+use cli::{BuildArgs, DeployArgs, EventsArgs, InvokeArgs, LintArgs, NewArgs, TestArgs};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -33,6 +33,8 @@ pub enum Commands {
     Test(TestArgs),
     Deploy(DeployArgs),
     New(NewArgs),
+    Invoke(InvokeArgs),
+    Events(EventsArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -45,6 +47,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Test(args) => commands::test::run(args)?,
         Commands::Deploy(args) => commands::deploy::run(args)?,
         Commands::New(args) => commands::new::run(args)?,
+        Commands::Invoke(args) => commands::invoke::run(args)?,
+        Commands::Events(args) => commands::events::run(args)?,
     }
 
     Ok(())
