@@ -12,7 +12,11 @@ pub fn run(args: LintArgs) -> Result<()> {
 }
 
 fn exit_code_for_status(status: &std::process::ExitStatus) -> i32 {
-    if status.success() { 0 } else { 1 }
+    if status.success() {
+        0
+    } else {
+        1
+    }
 }
 
 fn lint_args(fix: bool) -> Vec<String> {
@@ -36,7 +40,14 @@ mod tests {
     fn lint_args_without_fix_uses_workspace_and_clippy_warnings_tail() {
         assert_eq!(
             lint_args(false),
-            vec!["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+            vec![
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings"
+            ]
         );
     }
 

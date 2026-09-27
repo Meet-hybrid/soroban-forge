@@ -12,7 +12,11 @@ pub fn run(args: TestArgs) -> Result<()> {
 }
 
 fn exit_code_for_status(status: &std::process::ExitStatus) -> i32 {
-    if status.success() { 0 } else { 1 }
+    if status.success() {
+        0
+    } else {
+        1
+    }
 }
 
 fn test_args(package: Option<&str>) -> Vec<String> {
