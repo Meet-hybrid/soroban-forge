@@ -92,7 +92,9 @@
 extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, Env, Vec};
+use soroban_sdk::{
+    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env, Vec,
+};
 
 /// Maximum number of tranches a single schedule may carry.
 ///
