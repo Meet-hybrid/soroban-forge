@@ -182,9 +182,20 @@
 //! storage would force a full-state restore. Every balance write bumps the
 //! entry's TTL with the standard threshold/extend pattern, and `touch_ttl`
 //! is a permissionless keeper entrypoint for balances that sit idle near
-//! expiry. The `Owners`/`Threshold`/`Count`/`Tx` keys stay in instance
-//! storage: they are small, hot, written by the existing entrypoints, and
-//! their semantics are unchanged by this custody layer.
+//! expiry.
+//!
+//! Transaction records (`DataKey::Tx(tx_id)`) migrated to **persistent
+//! storage** for the same reason: instance storage is byte-budgeted as one
+//! shared entry that every read taxes, while persistent entries scale per
+//! record and carry their own extensible TTL. Every tx write bumps the
+//! entry's TTL with the standard threshold/extend pattern, and
+//! `touch_tx_ttl` is a permissionless keeper entrypoint for long-lived
+//! pending txs that approach expiry. A tx whose TTL lapses is no longer
+//! present — reads return [`ForgeError::NotFound`] and the record cannot be
+//! revived, though the id counter (`DataKey::Count`) is untouched. The
+//! `Owners`/`Threshold`/`Count` keys stay in instance storage: they are
+//! small, hot, written by the existing entrypoints, and their semantics are
+//! unchanged by this storage layer.
 //!
 //! The withdrawal-limit keys follow the same split for the same reasons.
 //! `DataKey::WithdrawalLimit(token)` holds one small policy record, and
@@ -409,6 +420,15 @@ pub trait SorobanForgeMultiSigWallet {
     ///   `token`.
     fn touch_ttl(env: Env, token: Address) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
+    /// Permissionless TTL keeper: bumps the transaction record's TTL for
+    /// `tx_id` to the standard horizon without changing any state.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction record exists (or its TTL
+    ///   has already expired).
+    fn touch_tx_ttl(env: Env, tx_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
     /// Read the current approval threshold (read-only view).
     fn get_threshold(env: Env) -> Result<u32, soroban_forge_shared_utils::ForgeError>;
 
@@ -578,27 +598,28 @@ pub struct WalletTx {
 }
 
 /// Storage keys, split by class (see the storage-and-TTL notes in the
-/// module docs). Config and tx records stay in **instance** storage: they
-/// are small, hot, and their semantics predate the custody layer. Token
-/// balances live in **per-token persistent** entries so the byte budget
-/// scales with the number of custodied tokens instead of inflating the
-/// shared instance entry, and so each balance carries its own extensible
-/// TTL — instance storage is the wrong home for anything the wallet
-/// custodies long-term. The per-token withdrawal-limit and window-usage
-/// keys join the balances there for the same reason: both are scoped to one
-/// token and both carry their own TTL.
+/// module docs). Config keys (`Owners`/`Threshold`/`Count`) stay in
+/// **instance** storage: they are small, hot, and their semantics predate
+/// the custody layer. Transaction records live in **per-id persistent**
+/// entries so the byte budget scales with the transaction count instead of
+/// inflating the shared instance entry, and so each record carries its own
+/// extensible TTL — instance storage is the wrong home for tx history that
+/// can grow unbounded. The per-token custody keys join the tx records there
+/// for the same reason: both are scoped to one record/token and both carry
+/// their own TTL.
 #[contracttype]
 enum DataKey {
     // --- instance storage: small, hot, bounded config/state ---
-    /// The transaction record for `u64` id.
-    Tx(u64),
     /// The wallet's owner set.
     Owners,
     /// The approval threshold required to execute.
     Threshold,
     /// Monotonic transaction id counter.
     Count,
-    // --- persistent storage: per-token custody accounting ---
+    // --- persistent storage: per-record tx history and per-token
+    // --- custody accounting ---
+    /// The transaction record for `u64` id.
+    Tx(u64),
     /// The wallet's custody balance of the token at `Address`.
     Balance(Address),
     /// The rolling withdrawal limit for the token at `Address`.
@@ -676,8 +697,9 @@ impl MultiSigWallet {
             kind: TxKind::Opaque,
         };
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        bump_entry(&env, &DataKey::Tx(tx_id));
         events::submitted(&env, &wallet_tx);
         Ok(tx_id)
     }
@@ -706,8 +728,9 @@ impl MultiSigWallet {
         }
         wallet_tx.confirmations.push_back(signer);
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        bump_entry(&env, &DataKey::Tx(tx_id));
         events::confirmed(&env, &wallet_tx);
         Ok(())
     }
@@ -747,8 +770,9 @@ impl MultiSigWallet {
             wallet_tx.status = TxStatus::Rejected;
         }
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        bump_entry(&env, &DataKey::Tx(tx_id));
         Ok(())
     }
 
@@ -832,8 +856,9 @@ impl MultiSigWallet {
 
         wallet_tx.status = TxStatus::Executed;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        bump_entry(&env, &DataKey::Tx(tx_id));
         events::executed(&env, &wallet_tx);
         Ok(())
     }
@@ -905,8 +930,9 @@ impl MultiSigWallet {
             }),
         };
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        bump_entry(&env, &DataKey::Tx(tx_id));
         Ok(tx_id)
     }
 
@@ -995,6 +1021,18 @@ impl MultiSigWallet {
     /// any state (see the trait docs).
     pub fn touch_ttl(env: Env, token: Address) -> Result<(), ForgeError> {
         let key = DataKey::Balance(token);
+        if !env.storage().persistent().has(&key) {
+            return Err(ForgeError::NotFound);
+        }
+        bump_entry(&env, &key);
+        Ok(())
+    }
+
+    /// Permissionless TTL keeper: bump a transaction record's TTL without
+    /// changing confirmations, rejections, status, or any other state (see
+    /// the trait docs).
+    pub fn touch_tx_ttl(env: Env, tx_id: u64) -> Result<(), ForgeError> {
+        let key = DataKey::Tx(tx_id);
         if !env.storage().persistent().has(&key) {
             return Err(ForgeError::NotFound);
         }
@@ -1278,8 +1316,9 @@ impl MultiSigWallet {
             kind: TxKind::LimitChange(change),
         };
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        bump_entry(&env, &DataKey::Tx(tx_id));
         Ok(tx_id)
     }
 
@@ -1326,7 +1365,7 @@ impl MultiSigWallet {
 
     fn get_tx_impl(env: &Env, tx_id: u64) -> Result<WalletTx, ForgeError> {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Tx(tx_id))
             .ok_or(ForgeError::NotFound)
     }
@@ -2631,6 +2670,29 @@ mod tests {
         let (env, client, _accounts, _token, _token_client) = custody!();
         let unknown = Address::generate(&env);
         let err = client.try_touch_ttl(&unknown).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    // -------------------------------------------------------------------
+    // Tx record persistence: TTL keeper
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn touch_tx_ttl_extends_and_keeps_tx_state_intact() {
+        let (_env, client, accounts, _token, _token_client) = custody!();
+        let tx_id = client.submit(&accounts.user1, &accounts.arbiter, &Bytes::new(&_env));
+
+        client.touch_tx_ttl(&tx_id);
+
+        let tx = client.get_tx(&tx_id);
+        assert_eq!(tx.status, TxStatus::Pending);
+        assert_eq!(tx.confirmations.len(), 0);
+    }
+
+    #[test]
+    fn touch_tx_ttl_unknown_tx_is_not_found() {
+        let (_env, client, _accounts, _token, _token_client) = custody!();
+        let err = client.try_touch_tx_ttl(&99).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
     }
 

@@ -17,7 +17,9 @@ contract** and remain open for the other four:
    (`deposit` pulls from the buyer, `release`/`refund`/`resolve` pay out)
    with transfer-before-state ordering so a failed transfer leaves no
    partial state. Marketplace royalties, vesting, and DAO governance
-   (proposal bonds) have since gained settlement the same way;
+   (proposal bonds) have since gained settlement the same way — including
+   `distribute`'s real royalty payout — and multi-sig `execute` performs
+   real cross-contract invocations;
    subscriptions still move nothing.
 2. **Instance-only storage** — escrow, multi-sig wallet, DAO governance, and marketplace royalties now use **persistent** entries with TTL bumps on every write and permissionless `touch_ttl` keeper entrypoints. Vesting and subscriptions still use instance storage.
 3. **No events** — escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit lifecycle events; only vesting remains silent.
@@ -50,7 +52,13 @@ pattern (see
 
 Vesting and subscriptions keep state in `env.storage().instance()`.
 Long-lived records there still face the byte budget and TTL-expiry
-bricking problem. (Escrow, multi-sig wallet, DAO governance, and marketplace royalties migrated per-record data to persistent storage with `touch_ttl` keeper entrypoints).
+bricking problem. (Escrow, multi-sig wallet, DAO governance, and marketplace royalties migrated per-record data to persistent storage with `touch_ttl`/`touch_tx_ttl` keeper entrypoints.)
+
+Persistent entries have their own TTL cost: a multi-sig transaction or DAO
+proposal that sits below threshold / waiting for votes still needs its TTL
+extended. The permissionless keepers (`touch_tx_ttl`, `touch_ttl`) cover
+this, but who runs them is an operational question — off-chain keepers must
+visit live transactions and proposals within the 30-day horizon.
 
 ### 3. No events in vesting contract
 

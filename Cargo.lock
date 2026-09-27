@@ -1927,6 +1927,9 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
  "tracing-subscriber",
 ]
