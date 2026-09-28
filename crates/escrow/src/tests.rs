@@ -19,11 +19,15 @@
 //! signature testing needs `set_auths` fixtures and is tracked in the
 //! security-invariant backlog.
 
-use crate::{Escrow, EscrowData, EscrowStatus, SorobanForgeEscrowClient};
+extern crate std;
+
+use crate::{
+    BasketAsset, BasketEscrowData, Escrow, EscrowData, EscrowStatus, SorobanForgeEscrowClient,
+};
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{Address, Env, Vec};
 
 const START: u64 = 1_000_000;
 const TIMEOUT: u64 = 1_000;
@@ -1094,4 +1098,555 @@ fn conservation_holds_on_every_terminal_path() {
             );
         }
     }
+}
+
+// -----------------------------------------------------------------------
+// Multi-Asset Basket Escrows
+// -----------------------------------------------------------------------
+
+fn setup_multi_tokens(
+    env: &Env,
+    count: usize,
+) -> (
+    std::vec::Vec<Address>,
+    std::vec::Vec<TokenClient<'static>>,
+    std::vec::Vec<StellarAssetClient<'static>>,
+) {
+    extern crate std;
+    let mut tokens = std::vec::Vec::new();
+    let mut clients = std::vec::Vec::new();
+    let mut admins = std::vec::Vec::new();
+    for _ in 0..count {
+        let admin = Address::generate(env);
+        let sac = env.register_stellar_asset_contract_v2(admin);
+        let token = sac.address();
+        let token_admin = StellarAssetClient::new(env, &token);
+        let token_client = TokenClient::new(env, &token);
+        tokens.push(token);
+        clients.push(token_client);
+        admins.push(token_admin);
+    }
+    (tokens, clients, admins)
+}
+
+#[test]
+fn create_escrow_multi_validation_empty_basket_rejected() {
+    let (env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let assets = Vec::new(&env);
+    let res = client.try_create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+}
+
+#[test]
+fn create_escrow_multi_validation_oversized_basket_rejected() {
+    let (env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, _, _) = setup_multi_tokens(&env, 11);
+    let mut assets = Vec::new(&env);
+    for t in tokens {
+        assets.push_back(BasketAsset {
+            token: t,
+            amount: 100,
+        });
+    }
+    let res = client.try_create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+}
+
+#[test]
+fn create_escrow_multi_validation_duplicate_tokens_rejected() {
+    let (env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, _, _) = setup_multi_tokens(&env, 2);
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 100,
+    });
+    assets.push_back(BasketAsset {
+        token: tokens[1].clone(),
+        amount: 200,
+    });
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(), // Duplicate token
+        amount: 300,
+    });
+    let res = client.try_create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+}
+
+#[test]
+fn create_escrow_multi_validation_non_positive_amount_rejected() {
+    let (env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, _, _) = setup_multi_tokens(&env, 2);
+
+    let mut zero_assets = Vec::new(&env);
+    zero_assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 0,
+    });
+    let res = client.try_create_escrow_multi(buyer, seller, arbiter, &zero_assets, &TIMEOUT);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+
+    let mut neg_assets = Vec::new(&env);
+    neg_assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 100,
+    });
+    neg_assets.push_back(BasketAsset {
+        token: tokens[1].clone(),
+        amount: -50,
+    });
+    let res = client.try_create_escrow_multi(buyer, seller, arbiter, &neg_assets, &TIMEOUT);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+}
+
+#[test]
+fn create_escrow_multi_validation_zero_timeout_rejected() {
+    let (env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, _, _) = setup_multi_tokens(&env, 1);
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 100,
+    });
+    let res = client.try_create_escrow_multi(buyer, seller, arbiter, &assets, &0);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+}
+
+#[test]
+fn create_escrow_multi_success_indexes_participants() {
+    let (env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, _, _) = setup_multi_tokens(&env, 3);
+    let mut assets = Vec::new(&env);
+    for t in tokens {
+        assets.push_back(BasketAsset {
+            token: t,
+            amount: 100,
+        });
+    }
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let basket: BasketEscrowData = client.get_basket_escrow(&id);
+    assert_eq!(basket.escrow_id, id);
+    assert_eq!(basket.status, EscrowStatus::Pending);
+    assert_eq!(basket.assets.len(), 3);
+    assert_eq!(client.get_status(&id), EscrowStatus::Pending);
+
+    assert_full_index(&client, buyer, &[id]);
+    assert_full_index(&client, seller, &[id]);
+    assert_full_index(&client, arbiter, &[id]);
+}
+
+#[test]
+fn basket_escrow_full_lifecycle_deposit_and_release() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, token_clients, token_admins) = setup_multi_tokens(&env, 3);
+
+    let amounts = [500i128, 1000i128, 1500i128];
+    let mut assets = Vec::new(&env);
+    for (i, t) in tokens.iter().enumerate() {
+        token_admins[i].mint(buyer, &amounts[i]);
+        assets.push_back(BasketAsset {
+            token: t.clone(),
+            amount: amounts[i],
+        });
+    }
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+    for (i, tc) in token_clients.iter().enumerate() {
+        assert_eq!(tc.balance(buyer), 0);
+        assert_eq!(tc.balance(&contract_id), amounts[i]);
+        assert_eq!(tc.balance(seller), 0);
+    }
+
+    client.release_multi(&id);
+    assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+    for (i, tc) in token_clients.iter().enumerate() {
+        assert_eq!(tc.balance(buyer), 0);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(tc.balance(seller), amounts[i]);
+    }
+}
+
+#[test]
+fn basket_escrow_lifecycle_refund_pre_deadline() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, token_clients, token_admins) = setup_multi_tokens(&env, 2);
+
+    let amounts = [300i128, 700i128];
+    let mut assets = Vec::new(&env);
+    for (i, t) in tokens.iter().enumerate() {
+        token_admins[i].mint(buyer, &amounts[i]);
+        assets.push_back(BasketAsset {
+            token: t.clone(),
+            amount: amounts[i],
+        });
+    }
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    // Pre-deadline refund (authorized by seller)
+    client.refund_multi(&id);
+    assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
+    for (i, tc) in token_clients.iter().enumerate() {
+        assert_eq!(tc.balance(buyer), amounts[i]);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(tc.balance(seller), 0);
+    }
+}
+
+#[test]
+fn basket_escrow_lifecycle_refund_post_deadline() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, token_clients, token_admins) = setup_multi_tokens(&env, 2);
+
+    let amounts = [400i128, 800i128];
+    let mut assets = Vec::new(&env);
+    for (i, t) in tokens.iter().enumerate() {
+        token_admins[i].mint(buyer, &amounts[i]);
+        assets.push_back(BasketAsset {
+            token: t.clone(),
+            amount: amounts[i],
+        });
+    }
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    // Advance ledger timestamp past deadline
+    env.ledger().set_timestamp(START + TIMEOUT + 1);
+
+    // Post-deadline refund (authorized by buyer)
+    client.refund_multi(&id);
+    assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
+    for (i, tc) in token_clients.iter().enumerate() {
+        assert_eq!(tc.balance(buyer), amounts[i]);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(tc.balance(seller), 0);
+    }
+}
+
+#[test]
+fn basket_escrow_dispute_and_resolve_in_favor_of_seller() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, token_clients, token_admins) = setup_multi_tokens(&env, 2);
+
+    let amounts = [250i128, 650i128];
+    let mut assets = Vec::new(&env);
+    for (i, t) in tokens.iter().enumerate() {
+        token_admins[i].mint(buyer, &amounts[i]);
+        assets.push_back(BasketAsset {
+            token: t.clone(),
+            amount: amounts[i],
+        });
+    }
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    // Dispute raised by seller
+    client.dispute_multi(&id, seller);
+    assert_eq!(client.get_status(&id), EscrowStatus::Disputed);
+
+    // Resolve in favor of seller
+    client.resolve_multi(&id, &true);
+    assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+    for (i, tc) in token_clients.iter().enumerate() {
+        assert_eq!(tc.balance(buyer), 0);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(tc.balance(seller), amounts[i]);
+    }
+}
+
+#[test]
+fn basket_escrow_dispute_and_resolve_in_favor_of_buyer() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, token_clients, token_admins) = setup_multi_tokens(&env, 2);
+
+    let amounts = [350i128, 950i128];
+    let mut assets = Vec::new(&env);
+    for (i, t) in tokens.iter().enumerate() {
+        token_admins[i].mint(buyer, &amounts[i]);
+        assets.push_back(BasketAsset {
+            token: t.clone(),
+            amount: amounts[i],
+        });
+    }
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    // Dispute raised by buyer
+    client.dispute_multi(&id, buyer);
+    assert_eq!(client.get_status(&id), EscrowStatus::Disputed);
+
+    // Resolve in favor of buyer
+    client.resolve_multi(&id, &false);
+    assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
+    for (i, tc) in token_clients.iter().enumerate() {
+        assert_eq!(tc.balance(buyer), amounts[i]);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(tc.balance(seller), 0);
+    }
+}
+
+#[test]
+fn basket_escrow_dispute_by_outsider_rejected() {
+    let (env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, _, token_admins) = setup_multi_tokens(&env, 1);
+    token_admins[0].mint(buyer, &500);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    let outsider = Address::generate(&env);
+    let res = client.try_dispute_multi(&id, &outsider);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+}
+
+#[test]
+fn basket_escrow_cancel_removes_from_participant_indices() {
+    let (env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, _, _) = setup_multi_tokens(&env, 2);
+
+    let mut assets1 = Vec::new(&env);
+    assets1.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 100,
+    });
+    let mut assets2 = Vec::new(&env);
+    assets2.push_back(BasketAsset {
+        token: tokens[1].clone(),
+        amount: 200,
+    });
+
+    let id1 = client.create_escrow_multi(buyer, seller, arbiter, &assets1, &TIMEOUT);
+    let id2 = client.create_escrow_multi(buyer, seller, arbiter, &assets2, &TIMEOUT);
+
+    assert_full_index(&client, buyer, &[id1, id2]);
+    assert_full_index(&client, seller, &[id1, id2]);
+    assert_full_index(&client, arbiter, &[id1, id2]);
+
+    // Cancel id1
+    client.cancel_multi(&id1);
+    assert_eq!(client.get_status(&id1), EscrowStatus::Cancelled);
+
+    assert_full_index(&client, buyer, &[id2]);
+    assert_full_index(&client, seller, &[id2]);
+    assert_full_index(&client, arbiter, &[id2]);
+}
+
+#[test]
+fn basket_escrow_invalid_state_transitions() {
+    let (env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, _, token_admins) = setup_multi_tokens(&env, 1);
+    token_admins[0].mint(buyer, &500);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+
+    // Cannot release, refund, dispute, resolve while Pending
+    assert_eq!(
+        client.try_release_multi(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_refund_multi(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_dispute_multi(&id, buyer).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_resolve_multi(&id, &true).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    client.deposit_multi(&id);
+
+    // Cannot deposit or cancel once Funded
+    assert_eq!(
+        client.try_deposit_multi(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_cancel_multi(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_resolve_multi(&id, &true).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    client.release_multi(&id);
+
+    // Completed: cannot perform further state-changing calls
+    assert_eq!(
+        client.try_deposit_multi(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_release_multi(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_refund_multi(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_dispute_multi(&id, buyer).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_resolve_multi(&id, &true).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_cancel_multi(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+}
+
+#[test]
+fn basket_escrow_not_found_on_missing_id() {
+    let (_env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, _seller, _arbiter) = parties(&accounts);
+    let missing_id = 999_999u64;
+
+    assert_eq!(
+        client
+            .try_get_basket_escrow(&missing_id)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(
+        client.try_get_status(&missing_id).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(
+        client.try_deposit_multi(&missing_id).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(
+        client.try_release_multi(&missing_id).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(
+        client.try_refund_multi(&missing_id).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(
+        client
+            .try_dispute_multi(&missing_id, buyer)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(
+        client
+            .try_resolve_multi(&missing_id, &true)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(
+        client.try_cancel_multi(&missing_id).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(
+        client.try_touch_ttl(&missing_id).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+}
+
+#[test]
+fn basket_escrow_get_status_and_touch_ttl() {
+    let (env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, _, _) = setup_multi_tokens(&env, 1);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 100,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    assert_eq!(client.get_status(&id), EscrowStatus::Pending);
+    assert!(client.try_touch_ttl(&id).is_ok());
+}
+
+#[test]
+fn basket_escrow_deposit_atomicity_rolls_back_on_partial_failure() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let (tokens, token_clients, token_admins) = setup_multi_tokens(&env, 3);
+
+    // Buyer is minted balance for asset 0 and asset 2, but has INSUFFICIENT balance for asset 1!
+    token_admins[0].mint(buyer, &500);
+    token_admins[1].mint(buyer, &50); // Need 1000, only has 50!
+    token_admins[2].mint(buyer, &1500);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+    assets.push_back(BasketAsset {
+        token: tokens[1].clone(),
+        amount: 1000,
+    });
+    assets.push_back(BasketAsset {
+        token: tokens[2].clone(),
+        amount: 1500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+
+    // deposit_multi will pull asset 0 successfully, then fail on asset 1.
+    let res = client.try_deposit_multi(&id);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::TokenTransferFailed);
+
+    // Soroban host rollback guarantee:
+    // Buyer's balance for asset 0 was restored! Contract has 0 for all assets!
+    assert_eq!(token_clients[0].balance(buyer), 500);
+    assert_eq!(token_clients[1].balance(buyer), 50);
+    assert_eq!(token_clients[2].balance(buyer), 1500);
+
+    assert_eq!(token_clients[0].balance(&contract_id), 0);
+    assert_eq!(token_clients[1].balance(&contract_id), 0);
+    assert_eq!(token_clients[2].balance(&contract_id), 0);
+
+    // Escrow state remains Pending, not Funded!
+    assert_eq!(client.get_status(&id), EscrowStatus::Pending);
 }

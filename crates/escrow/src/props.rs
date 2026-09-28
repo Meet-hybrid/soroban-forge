@@ -34,7 +34,9 @@
 //! seed); a failure prints its case seed for replay. Override the case count
 //! with `PROPTEST_CASES=n cargo test -p soroban-forge-escrow props`.
 
-use crate::{Escrow, EscrowData, EscrowStatus, SorobanForgeEscrowClient};
+extern crate std;
+
+use crate::{BasketAsset, Escrow, EscrowData, EscrowStatus, SorobanForgeEscrowClient};
 use proptest::prelude::*;
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::testutils::{Address as _, Ledger as _};
@@ -88,10 +90,15 @@ fn assert_participant_indexes_consistent(w: &World, ids: &Vec<u64>, parties: &[A
         let mut expected = Vec::new(&w.env);
         for index in 0..ids.len() {
             let id = ids.get_unchecked(index);
-            let record: EscrowData = client.get_escrow(&id);
-            let involved =
-                record.buyer == *party || record.seller == *party || record.arbiter == *party;
-            if involved && record.status != EscrowStatus::Cancelled {
+            let (buyer, seller, arbiter, status) = if let Ok(record) = client.try_get_escrow(&id) {
+                let r = record.unwrap();
+                (r.buyer, r.seller, r.arbiter, r.status)
+            } else {
+                let b = client.get_basket_escrow(&id);
+                (b.buyer, b.seller, b.arbiter, b.status)
+            };
+            let involved = buyer == *party || seller == *party || arbiter == *party;
+            if involved && status != EscrowStatus::Cancelled {
                 expected.push_back(id);
             }
         }
@@ -101,8 +108,8 @@ fn assert_participant_indexes_consistent(w: &World, ids: &Vec<u64>, parties: &[A
         assert_eq!(page.total, expected.len());
         for index in 0..page.ids.len() {
             let id = page.ids.get_unchecked(index);
-            let record: EscrowData = client.get_escrow(&id);
-            assert_ne!(record.status, EscrowStatus::Cancelled);
+            let status = client.get_status(&id);
+            assert_ne!(status, EscrowStatus::Cancelled);
             for earlier in 0..index {
                 assert_ne!(
                     page.ids.get_unchecked(earlier),
@@ -708,6 +715,168 @@ proptest! {
                     );
                 } else {
                     prop_assert_eq!(continued.ids.len(), 0);
+                }
+            }
+
+            assert_participant_indexes_consistent(&w, &ids, &parties);
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn p1_multi_asset_conservation_on_random_terminal_paths(
+        amounts in prop::collection::vec(1i128..=MAX_AMOUNT, 2..=5),
+        timeout in 1u64..=MAX_TIMEOUT,
+        path in terminal_path(),
+        claimant in claimant_pick(),
+        pay_seller in prop::bool::ANY,
+    ) {
+        let w = setup_world();
+        let mut tokens = std::vec::Vec::new();
+        let mut token_clients = std::vec::Vec::new();
+        let mut assets = Vec::new(&w.env);
+
+        for &amt in amounts.iter() {
+            let admin = Address::generate(&w.env);
+            let sac = w.env.register_stellar_asset_contract_v2(admin);
+            let t = sac.address();
+            StellarAssetClient::new(&w.env, &t).mint(&w.buyer, &amt);
+            token_clients.push(TokenClient::new(&w.env, &t));
+            assets.push_back(BasketAsset {
+                token: t.clone(),
+                amount: amt,
+            });
+            tokens.push(t);
+        }
+
+        let id = w.escrow_client().create_escrow_multi(
+            &w.buyer,
+            &w.seller,
+            &w.arbiter,
+            &assets,
+            &timeout,
+        );
+        w.escrow_client().deposit_multi(&id);
+
+        for (i, tc) in token_clients.iter().enumerate() {
+            prop_assert_eq!(tc.balance(&w.buyer), 0);
+            prop_assert_eq!(tc.balance(&w.escrow), amounts[i]);
+            prop_assert_eq!(tc.balance(&w.seller), 0);
+        }
+
+        match path {
+            0 => w.escrow_client().release_multi(&id),
+            1 => w.escrow_client().refund_multi(&id),
+            _ => {
+                let claimant_addr = match claimant {
+                    0 => &w.buyer,
+                    _ => &w.seller,
+                };
+                w.escrow_client().dispute_multi(&id, claimant_addr);
+                w.escrow_client().resolve_multi(&id, &pay_seller);
+            }
+        }
+
+        for (i, tc) in token_clients.iter().enumerate() {
+            let c = tc.balance(&w.escrow);
+            let b = tc.balance(&w.buyer);
+            let s = tc.balance(&w.seller);
+            prop_assert_eq!(c, 0, "contract must retain zero balance per asset");
+            prop_assert_eq!(b + s, amounts[i], "per-asset conservation must hold exactly");
+        }
+
+        let status = w.escrow_client().get_status(&id);
+        prop_assert!(status == EscrowStatus::Completed || status == EscrowStatus::Refunded);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn p4_participant_indexes_match_live_escrows_with_baskets(
+        actions in prop::collection::vec((0u8..=2, 0u8..=3), 1..=12),
+    ) {
+        let w = setup_world();
+        let buyer_a = Address::generate(&w.env);
+        let buyer_b = Address::generate(&w.env);
+        let seller_a = Address::generate(&w.env);
+        let seller_b = Address::generate(&w.env);
+        let parties = [
+            buyer_a.clone(),
+            buyer_b.clone(),
+            seller_a.clone(),
+            seller_b.clone(),
+            w.arbiter.clone(),
+        ];
+        let mut ids = Vec::new(&w.env);
+
+        let admin2 = Address::generate(&w.env);
+        let token2 = w.env.register_stellar_asset_contract_v2(admin2).address();
+
+        for (operation, choice) in actions {
+            let mut pending_count = 0_u32;
+            for index in 0..ids.len() {
+                let id = ids.get_unchecked(index);
+                if w.escrow_client().get_status(&id) == EscrowStatus::Pending {
+                    pending_count += 1;
+                }
+            }
+
+            if operation == 0 {
+                // Create single escrow
+                let buyer = if choice & 1 == 0 { &buyer_a } else { &buyer_b };
+                let seller = if choice & 2 == 0 { &seller_a } else { &seller_b };
+                let id = w.escrow_client().create_escrow(
+                    buyer,
+                    seller,
+                    &w.arbiter,
+                    &w.token,
+                    &1_i128,
+                    &1_u64,
+                );
+                ids.push_back(id);
+            } else if operation == 1 {
+                // Create basket escrow
+                let buyer = if choice & 1 == 0 { &buyer_a } else { &buyer_b };
+                let seller = if choice & 2 == 0 { &seller_a } else { &seller_b };
+                let mut assets = Vec::new(&w.env);
+                assets.push_back(BasketAsset {
+                    token: w.token.clone(),
+                    amount: 1,
+                });
+                assets.push_back(BasketAsset {
+                    token: token2.clone(),
+                    amount: 2,
+                });
+                let id = w.escrow_client().create_escrow_multi(
+                    buyer,
+                    seller,
+                    &w.arbiter,
+                    &assets,
+                    &1_u64,
+                );
+                ids.push_back(id);
+            } else if pending_count > 0 {
+                // Cancel pending (either single or basket)
+                let target = u32::from(choice) % pending_count;
+                let mut pending_at = 0_u32;
+                for index in 0..ids.len() {
+                    let id = ids.get_unchecked(index);
+                    if w.escrow_client().get_status(&id) == EscrowStatus::Pending {
+                        if pending_at == target {
+                            if w.escrow_client().try_get_escrow(&id).is_ok() {
+                                w.escrow_client().cancel(&id);
+                            } else {
+                                w.escrow_client().cancel_multi(&id);
+                            }
+                            break;
+                        }
+                        pending_at += 1;
+                    }
                 }
             }
 

@@ -13,8 +13,16 @@ fn refund(escrow_id) -> Result<(), ForgeError>
 fn dispute(escrow_id, claimant) -> Result<(), ForgeError>
 fn resolve(escrow_id, in_favor_of_seller) -> Result<(), ForgeError>
 fn cancel(escrow_id) -> Result<(), ForgeError>
+fn create_escrow_multi(buyer, seller, arbiter, assets, timeout) -> Result<u64, ForgeError>
+fn deposit_multi(escrow_id) -> Result<(), ForgeError>
+fn release_multi(escrow_id) -> Result<(), ForgeError>
+fn refund_multi(escrow_id) -> Result<(), ForgeError>
+fn dispute_multi(escrow_id, claimant) -> Result<(), ForgeError>
+fn resolve_multi(escrow_id, in_favor_of_seller) -> Result<(), ForgeError>
+fn cancel_multi(escrow_id) -> Result<(), ForgeError>
 fn get_status(escrow_id) -> Result<EscrowStatus, ForgeError>
 fn get_escrow(escrow_id) -> Result<EscrowData, ForgeError>
+fn get_basket_escrow(escrow_id) -> Result<BasketEscrowData, ForgeError>
 fn escrows_for_participant(participant, cursor, limit) -> ParticipantEscrowsPage
 fn touch_ttl(escrow_id) -> Result<(), ForgeError>
 ```
@@ -102,6 +110,46 @@ carries `partial_amount` (the incremental transfer) and the full `EscrowData`
 (including updated `released` and `status`). The existing `Released` event
 remains exclusively for the `release` entrypoint and signals terminal
 completion to indexers.
+
+## Multi-Asset Basket Escrows
+
+Multi-asset basket escrows support custody and settlement of baskets containing $1 \le N \le 10$ distinct SEP-41 assets under all-or-nothing settlement semantics.
+
+### Basket Asset Types & Validation
+
+- `BasketAsset { token: Address, amount: i128 }`
+- `BasketEscrowData { escrow_id, buyer, seller, arbiter, assets, timeout, status, created_at }`
+- **Validation**:
+  - Basket size bounded to `1..=10` assets.
+  - Duplicate token addresses are strictly rejected with `ForgeError::InvalidInput`.
+  - Every asset must have `amount > 0`.
+  - `timeout > 0`.
+
+### Settlement & Atomicity Semantics
+
+- **All-or-Nothing Funding**: `deposit_multi` transfers all basket assets into the contract. It transitions from `Pending` to `Funded` if and only if all transfers succeed.
+- **Transfer-Before-State Discipline**: All token transfers across the basket are executed in sequence before persistent storage state is mutated. If any transfer fails, the Soroban host reverts the entire invocation, restoring all token balances and leaving contract storage untouched.
+- **Per-Asset Conservation**: Across all terminal payout paths (`release_multi`, `refund_multi`, `resolve_multi`), all $N$ assets are transferred to the recipient (seller or buyer), ensuring exact per-asset balance equality with contract balances ending at zero.
+- **Dispute & Arbitration**: `dispute_multi` freezes all assets in the basket under `EscrowStatus::Disputed`. `resolve_multi` pays out all basket assets all-or-nothing to the seller (`true`) or back to the buyer (`false`).
+- **Cancellation**: `cancel_multi` cancels a `Pending` basket escrow and cleans up participant index entries while preserving survivor order.
+
+### Basket Events
+
+Dedicated events with `escrow_id` as the topic:
+- `BasketEscrowCreated { escrow_id, data }`
+- `BasketDeposited { escrow_id, data }`
+- `BasketReleased { escrow_id, data }`
+- `BasketRefunded { escrow_id, data }`
+- `BasketDisputed { escrow_id, data }`
+- `BasketResolved { escrow_id, data, in_favor_of_seller }`
+- `BasketCancelled { escrow_id, data }`
+
+### Storage & Shared ID Space
+
+- Isolated storage key `DataKey::BasketEscrow(u64)` prevents schema interference or XDR map mismatches with single-asset `DataKey::Escrow(u64)`.
+- Monotonic counter `DataKey::Count` allocates ids sequentially across both single and basket escrows.
+- `get_status(id)` and `touch_ttl(id)` transparently support both single and basket escrow ids.
+- `get_basket_escrow(id)` retrieves the full basket record.
 
 ## Storage Compatibility
 

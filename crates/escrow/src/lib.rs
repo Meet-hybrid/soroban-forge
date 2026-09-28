@@ -340,6 +340,100 @@ pub trait SorobanForgeEscrow {
     ///
     /// * [`ForgeError::NotFound`] — no escrow with this id.
     fn touch_ttl(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    /// Create a new multi-asset basket escrow and return its stable id.
+    ///
+    /// Requires `1 <= assets.len() <= 10`, no duplicate tokens, `amount > 0`
+    /// for every asset, and `timeout > 0`. Only the buyer authorizes creation.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — empty or oversized basket, duplicate
+    ///   token address, non-positive asset amount, or zero timeout.
+    /// * [`ForgeError::ArithmeticOverflow`] — the id counter overflowed.
+    fn create_escrow_multi(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        assets: Vec<BasketAsset>,
+        timeout: u64,
+    ) -> Result<u64, ForgeError>;
+
+    /// Fund the multi-asset basket escrow, pulling all assets from the
+    /// buyer into this contract with all-or-nothing atomicity. Requires the
+    /// buyer; only valid while `Pending`.
+    ///
+    /// Token transfers are performed **before** any state is written.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no basket escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Pending`.
+    /// * [`ForgeError::TokenTransferFailed`] — any token contract rejected
+    ///   its transfer.
+    fn deposit_multi(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    /// Release all assets in the basket escrow to the seller. Requires the
+    /// seller; only valid while `Funded`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no basket escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Funded`.
+    /// * [`ForgeError::TokenTransferFailed`] — any token payout failed.
+    fn release_multi(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    /// Refund all assets in the basket escrow to the buyer.
+    ///
+    /// Before the deadline the seller may refund; after the deadline the
+    /// buyer may reclaim. Only valid while `Funded`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no basket escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Funded`.
+    /// * [`ForgeError::Unauthorized`] — wrong party for current phase.
+    /// * [`ForgeError::TokenTransferFailed`] — any token payout failed.
+    fn refund_multi(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    /// Raise a dispute on a basket escrow. Claimant must be buyer or seller
+    /// and must authorize; only valid while `Funded`. Freezes the entire
+    /// basket until arbitration.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no basket escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Funded`, or claimant
+    ///   is neither buyer nor seller.
+    fn dispute_multi(env: Env, escrow_id: u64, claimant: Address) -> Result<(), ForgeError>;
+
+    /// Resolve a dispute on a basket escrow. Requires the arbiter; only
+    /// valid while `Disputed`. Pays all basket assets all-or-nothing to
+    /// the seller (`true`) or back to the buyer (`false`).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no basket escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Disputed`.
+    /// * [`ForgeError::TokenTransferFailed`] — any token payout failed.
+    fn resolve_multi(env: Env, escrow_id: u64, in_favor_of_seller: bool) -> Result<(), ForgeError>;
+
+    /// Cancel a `Pending` basket escrow before funding. Requires the buyer
+    /// and cleans up distinct participant index entries.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no basket escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Pending`.
+    fn cancel_multi(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    /// Read the full multi-asset basket escrow record.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no basket escrow with this id.
+    fn get_basket_escrow(env: Env, escrow_id: u64) -> Result<BasketEscrowData, ForgeError>;
 }
 
 /// Lifecycle state of an escrow.
@@ -468,6 +562,39 @@ impl From<EscrowDataV1> for EscrowData {
     }
 }
 
+/// A single asset within a multi-asset escrow basket.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BasketAsset {
+    /// SEP-41 token contract custodied by this escrow.
+    pub token: Address,
+    /// Amount of `token` custodied by this escrow.
+    pub amount: i128,
+}
+
+/// A multi-asset escrow record.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BasketEscrowData {
+    /// Stable id, never reused.
+    pub escrow_id: u64,
+    /// Party funding the escrow and the default refund recipient.
+    pub buyer: Address,
+    /// Party paid on release.
+    pub seller: Address,
+    /// Neutral party deciding disputes. Recorded at creation; authorizes
+    /// only `resolve_multi`.
+    pub arbiter: Address,
+    /// The assets in the basket (1 to 10 distinct tokens).
+    pub assets: Vec<BasketAsset>,
+    /// Seconds after `created_at` at which the buyer may self-refund.
+    pub timeout: u64,
+    /// Current lifecycle state.
+    pub status: EscrowStatus,
+    /// Unix timestamp of creation.
+    pub created_at: u64,
+}
+
 /// A page of escrow ids involving a participant.
 ///
 /// Returned by [`SorobanForgeEscrow::escrows_for_participant`]; powered by
@@ -491,6 +618,8 @@ pub struct ParticipantEscrowsPage {
 pub enum DataKey {
     /// The escrow record for `u64` id.
     Escrow(u64),
+    /// The basket escrow record for `u64` id.
+    BasketEscrow(u64),
     /// Monotonic id counter.
     Count,
     /// Creation-order ids of every non-cancelled escrow the `Address`
@@ -812,13 +941,221 @@ impl Escrow {
         Ok(())
     }
 
+    /// Create a new multi-asset basket escrow and return its stable id.
+    pub fn create_escrow_multi(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        assets: Vec<BasketAsset>,
+        timeout: u64,
+    ) -> Result<u64, ForgeError> {
+        if timeout == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        Self::validate_basket_assets(&assets)?;
+        buyer.require_auth();
+
+        let id = Self::next_id(&env)?;
+        let mut participants = Vec::new(&env);
+        participants.push_back(buyer.clone());
+        if seller != buyer {
+            participants.push_back(seller.clone());
+        }
+        if arbiter != buyer && arbiter != seller {
+            participants.push_back(arbiter.clone());
+        }
+        let escrow = BasketEscrowData {
+            escrow_id: id,
+            buyer,
+            seller,
+            arbiter,
+            assets,
+            timeout,
+            status: EscrowStatus::Pending,
+            created_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::BasketEscrow(id), &escrow);
+        bump_entry(&env, &DataKey::BasketEscrow(id));
+        Self::index_participants(&env, id, &participants);
+        events::basket_escrow_created(&env, &escrow);
+        Ok(id)
+    }
+
+    /// Fund the multi-asset basket escrow, pulling all assets with transfer-before-state ordering.
+    pub fn deposit_multi(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
+        let escrow = Self::load_basket_escrow(&env, escrow_id)?;
+        escrow.buyer.require_auth();
+
+        if escrow.status != EscrowStatus::Pending {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        for i in 0..escrow.assets.len() {
+            let asset = escrow.assets.get_unchecked(i);
+            transfer_to_contract(&env, &asset.token, &escrow.buyer, asset.amount)?;
+        }
+
+        let mut funded = escrow;
+        funded.status = EscrowStatus::Funded;
+        env.storage()
+            .persistent()
+            .set(&DataKey::BasketEscrow(escrow_id), &funded);
+        bump_entry(&env, &DataKey::BasketEscrow(escrow_id));
+        events::basket_deposited(&env, &funded);
+        Ok(())
+    }
+
+    /// Release all assets in the basket escrow to the seller.
+    pub fn release_multi(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
+        let escrow = Self::load_basket_escrow(&env, escrow_id)?;
+        escrow.seller.require_auth();
+
+        if escrow.status != EscrowStatus::Funded {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        for i in 0..escrow.assets.len() {
+            let asset = escrow.assets.get_unchecked(i);
+            transfer_from_contract(&env, &asset.token, &escrow.seller, asset.amount)?;
+        }
+
+        let mut completed = escrow;
+        completed.status = EscrowStatus::Completed;
+        env.storage()
+            .persistent()
+            .set(&DataKey::BasketEscrow(escrow_id), &completed);
+        bump_entry(&env, &DataKey::BasketEscrow(escrow_id));
+        events::basket_released(&env, &completed);
+        Ok(())
+    }
+
+    /// Refund all assets in the basket escrow to the buyer.
+    pub fn refund_multi(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
+        let escrow = Self::load_basket_escrow(&env, escrow_id)?;
+        if escrow.status != EscrowStatus::Funded {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let now = env.ledger().timestamp();
+        let deadline = escrow
+            .created_at
+            .checked_add(escrow.timeout)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+
+        if now >= deadline {
+            escrow.buyer.require_auth();
+        } else {
+            escrow.seller.require_auth();
+        }
+
+        for i in 0..escrow.assets.len() {
+            let asset = escrow.assets.get_unchecked(i);
+            transfer_from_contract(&env, &asset.token, &escrow.buyer, asset.amount)?;
+        }
+
+        let mut refunded = escrow;
+        refunded.status = EscrowStatus::Refunded;
+        env.storage()
+            .persistent()
+            .set(&DataKey::BasketEscrow(escrow_id), &refunded);
+        bump_entry(&env, &DataKey::BasketEscrow(escrow_id));
+        events::basket_refunded(&env, &refunded);
+        Ok(())
+    }
+
+    /// Raise a dispute on a basket escrow.
+    pub fn dispute_multi(env: Env, escrow_id: u64, claimant: Address) -> Result<(), ForgeError> {
+        let escrow = Self::load_basket_escrow(&env, escrow_id)?;
+        if escrow.status != EscrowStatus::Funded {
+            return Err(ForgeError::InvalidInput);
+        }
+        if claimant != escrow.buyer && claimant != escrow.seller {
+            return Err(ForgeError::InvalidInput);
+        }
+        claimant.require_auth();
+
+        let mut disputed = escrow;
+        disputed.status = EscrowStatus::Disputed;
+        env.storage()
+            .persistent()
+            .set(&DataKey::BasketEscrow(escrow_id), &disputed);
+        bump_entry(&env, &DataKey::BasketEscrow(escrow_id));
+        events::basket_disputed(&env, &disputed);
+        Ok(())
+    }
+
+    /// Resolve a dispute on a basket escrow.
+    pub fn resolve_multi(
+        env: Env,
+        escrow_id: u64,
+        in_favor_of_seller: bool,
+    ) -> Result<(), ForgeError> {
+        let escrow = Self::load_basket_escrow(&env, escrow_id)?;
+        if escrow.status != EscrowStatus::Disputed {
+            return Err(ForgeError::InvalidInput);
+        }
+        escrow.arbiter.require_auth();
+
+        let recipient = if in_favor_of_seller {
+            &escrow.seller
+        } else {
+            &escrow.buyer
+        };
+
+        for i in 0..escrow.assets.len() {
+            let asset = escrow.assets.get_unchecked(i);
+            transfer_from_contract(&env, &asset.token, recipient, asset.amount)?;
+        }
+
+        let mut resolved = escrow;
+        resolved.status = if in_favor_of_seller {
+            EscrowStatus::Completed
+        } else {
+            EscrowStatus::Refunded
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::BasketEscrow(escrow_id), &resolved);
+        bump_entry(&env, &DataKey::BasketEscrow(escrow_id));
+        events::basket_resolved(&env, &resolved, in_favor_of_seller);
+        Ok(())
+    }
+
+    /// Cancel a `Pending` basket escrow.
+    pub fn cancel_multi(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
+        let escrow = Self::load_basket_escrow(&env, escrow_id)?;
+        if escrow.status != EscrowStatus::Pending {
+            return Err(ForgeError::InvalidInput);
+        }
+        escrow.buyer.require_auth();
+
+        let mut cancelled = escrow;
+        cancelled.status = EscrowStatus::Cancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::BasketEscrow(escrow_id), &cancelled);
+        bump_entry(&env, &DataKey::BasketEscrow(escrow_id));
+        Self::remove_basket_participant_indexes(&env, escrow_id, &cancelled);
+        events::basket_cancelled(&env, &cancelled);
+        Ok(())
+    }
+
     // -------------------------------------------------------------------
     // Views
     // -------------------------------------------------------------------
 
-    /// Read the current lifecycle status.
+    /// Read the current lifecycle status for single or basket escrows.
     pub fn get_status(env: Env, escrow_id: u64) -> Result<EscrowStatus, ForgeError> {
-        Ok(Self::load_escrow(&env, escrow_id)?.status)
+        if let Ok(escrow) = Self::load_escrow(&env, escrow_id) {
+            return Ok(escrow.status);
+        }
+        if let Ok(basket) = Self::load_basket_escrow(&env, escrow_id) {
+            return Ok(basket.status);
+        }
+        Err(ForgeError::NotFound)
     }
 
     /// Read the full escrow record. The returned `EscrowData` exposes
@@ -827,6 +1164,11 @@ impl Escrow {
     /// was deployed, `released` will be `0`.
     pub fn get_escrow(env: Env, escrow_id: u64) -> Result<EscrowData, ForgeError> {
         Self::load_escrow(&env, escrow_id)
+    }
+
+    /// Read the full multi-asset basket escrow record.
+    pub fn get_basket_escrow(env: Env, escrow_id: u64) -> Result<BasketEscrowData, ForgeError> {
+        Self::load_basket_escrow(&env, escrow_id)
     }
 
     /// Read the current creation-order escrow ids for a participant one page
@@ -870,13 +1212,17 @@ impl Escrow {
     }
 
     /// Permissionless keeper: bump the escrow entry's TTL without changing
-    /// any state. The existence check is deliberate — touching a missing
-    /// id must fail loudly so a keeper can distinguish "extended" from
-    /// "no such escrow".
+    /// any state. Supports both single and basket escrow records.
     pub fn touch_ttl(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
-        Self::load_escrow(&env, escrow_id)?;
-        bump_entry(&env, &DataKey::Escrow(escrow_id));
-        Ok(())
+        if Self::load_escrow(&env, escrow_id).is_ok() {
+            bump_entry(&env, &DataKey::Escrow(escrow_id));
+            Ok(())
+        } else if Self::load_basket_escrow(&env, escrow_id).is_ok() {
+            bump_entry(&env, &DataKey::BasketEscrow(escrow_id));
+            Ok(())
+        } else {
+            Err(ForgeError::NotFound)
+        }
     }
 
     // -------------------------------------------------------------------
@@ -948,6 +1294,47 @@ impl Escrow {
         if escrow.arbiter != escrow.buyer && escrow.arbiter != escrow.seller {
             Self::remove_index(env, &escrow.arbiter, id);
         }
+    }
+
+    /// Remove `id` from each distinct basket participant's index while preserving
+    /// the relative creation order of every remaining id.
+    fn remove_basket_participant_indexes(env: &Env, id: u64, escrow: &BasketEscrowData) {
+        Self::remove_index(env, &escrow.buyer, id);
+        if escrow.seller != escrow.buyer {
+            Self::remove_index(env, &escrow.seller, id);
+        }
+        if escrow.arbiter != escrow.buyer && escrow.arbiter != escrow.seller {
+            Self::remove_index(env, &escrow.arbiter, id);
+        }
+    }
+
+    /// Load a basket escrow record by id.
+    fn load_basket_escrow(env: &Env, escrow_id: u64) -> Result<BasketEscrowData, ForgeError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BasketEscrow(escrow_id))
+            .ok_or(ForgeError::NotFound)
+    }
+
+    /// Validate basket assets: 1..=10 assets, positive amounts, no duplicate tokens.
+    fn validate_basket_assets(assets: &Vec<BasketAsset>) -> Result<(), ForgeError> {
+        let len = assets.len();
+        if len == 0 || len > 10 {
+            return Err(ForgeError::InvalidInput);
+        }
+        for i in 0..len {
+            let asset = assets.get_unchecked(i);
+            if asset.amount <= 0 {
+                return Err(ForgeError::InvalidInput);
+            }
+            for j in (i + 1)..len {
+                let other = assets.get_unchecked(j);
+                if asset.token == other.token {
+                    return Err(ForgeError::InvalidInput);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Remove one id from a participant's index without reordering survivors.
@@ -1118,6 +1505,56 @@ mod events {
         pub data: EscrowData,
     }
 
+    #[contractevent]
+    pub struct BasketEscrowCreated {
+        #[topic]
+        pub escrow_id: u64,
+        pub data: BasketEscrowData,
+    }
+
+    #[contractevent]
+    pub struct BasketDeposited {
+        #[topic]
+        pub escrow_id: u64,
+        pub data: BasketEscrowData,
+    }
+
+    #[contractevent]
+    pub struct BasketReleased {
+        #[topic]
+        pub escrow_id: u64,
+        pub data: BasketEscrowData,
+    }
+
+    #[contractevent]
+    pub struct BasketRefunded {
+        #[topic]
+        pub escrow_id: u64,
+        pub data: BasketEscrowData,
+    }
+
+    #[contractevent]
+    pub struct BasketDisputed {
+        #[topic]
+        pub escrow_id: u64,
+        pub data: BasketEscrowData,
+    }
+
+    #[contractevent]
+    pub struct BasketResolved {
+        #[topic]
+        pub escrow_id: u64,
+        pub data: BasketEscrowData,
+        pub in_favor_of_seller: bool,
+    }
+
+    #[contractevent]
+    pub struct BasketCancelled {
+        #[topic]
+        pub escrow_id: u64,
+        pub data: BasketEscrowData,
+    }
+
     // Publishers: thin functions so call sites read as intent, not
     // mechanics, and so a future payload change touches one module.
     pub fn escrow_created(env: &Env, escrow: &EscrowData) {
@@ -1180,6 +1617,63 @@ mod events {
 
     pub fn cancelled(env: &Env, escrow: &EscrowData) {
         Cancelled {
+            escrow_id: escrow.escrow_id,
+            data: escrow.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn basket_escrow_created(env: &Env, escrow: &BasketEscrowData) {
+        BasketEscrowCreated {
+            escrow_id: escrow.escrow_id,
+            data: escrow.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn basket_deposited(env: &Env, escrow: &BasketEscrowData) {
+        BasketDeposited {
+            escrow_id: escrow.escrow_id,
+            data: escrow.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn basket_released(env: &Env, escrow: &BasketEscrowData) {
+        BasketReleased {
+            escrow_id: escrow.escrow_id,
+            data: escrow.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn basket_refunded(env: &Env, escrow: &BasketEscrowData) {
+        BasketRefunded {
+            escrow_id: escrow.escrow_id,
+            data: escrow.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn basket_disputed(env: &Env, escrow: &BasketEscrowData) {
+        BasketDisputed {
+            escrow_id: escrow.escrow_id,
+            data: escrow.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn basket_resolved(env: &Env, escrow: &BasketEscrowData, in_favor_of_seller: bool) {
+        BasketResolved {
+            escrow_id: escrow.escrow_id,
+            data: escrow.clone(),
+            in_favor_of_seller,
+        }
+        .publish(env);
+    }
+
+    pub fn basket_cancelled(env: &Env, escrow: &BasketEscrowData) {
+        BasketCancelled {
             escrow_id: escrow.escrow_id,
             data: escrow.clone(),
         }

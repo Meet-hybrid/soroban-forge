@@ -38,7 +38,7 @@
 //!   *buyer* (not the executing contract) and so is a real, matchable
 //!   sub-invocation.
 
-use crate::{Escrow, EscrowStatus, SorobanForgeEscrowClient};
+use crate::{BasketAsset, Escrow, EscrowStatus, SorobanForgeEscrowClient};
 use soroban_forge_shared_utils::ForgeError;
 // The test harness links std even in a no_std crate; AuthorizedInvocation's
 // sub_invocations field is a std Vec, so re-expose std here for `vec!`.
@@ -47,7 +47,7 @@ use soroban_sdk::testutils::{
     Address as _, AuthorizedFunction, AuthorizedInvocation, Ledger as _, MockAuth, MockAuthInvoke,
 };
 use soroban_sdk::token::StellarAssetClient;
-use soroban_sdk::{Address, Env, IntoVal, InvokeError, Symbol};
+use soroban_sdk::{Address, Env, IntoVal, InvokeError, Symbol, Vec};
 
 const START: u64 = 1_000_000;
 const TIMEOUT: u64 = 1_000;
@@ -863,4 +863,630 @@ fn release_partial_mutation_test_no_auth_aborts() {
         .expect("outer ok")
         .expect("seller auth must succeed after auth is restored");
     assert_eq!(tc.balance(seller), AMOUNT / 2);
+}
+
+// -----------------------------------------------------------------------
+// Multi-Asset Basket Authorization Tests
+// -----------------------------------------------------------------------
+
+fn setup_multi(
+    env: &Env,
+    count: usize,
+) -> (
+    std::vec::Vec<Address>,
+    std::vec::Vec<soroban_sdk::token::Client<'static>>,
+    std::vec::Vec<StellarAssetClient<'static>>,
+) {
+    let mut tokens = std::vec::Vec::new();
+    let mut clients = std::vec::Vec::new();
+    let mut admins = std::vec::Vec::new();
+    for _ in 0..count {
+        let admin = Address::generate(env);
+        let sac = env.register_stellar_asset_contract_v2(admin);
+        let token = sac.address();
+        let token_admin = StellarAssetClient::new(env, &token);
+        let token_client = soroban_sdk::token::Client::new(env, &token);
+        tokens.push(token);
+        clients.push(token_client);
+        admins.push(token_admin);
+    }
+    (tokens, clients, admins)
+}
+
+#[test]
+fn create_escrow_multi_accepts_buyer_signature_with_matching_args() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, _, _) = setup_multi(&env, 2);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+    assets.push_back(BasketAsset {
+        token: tokens[1].clone(),
+        amount: 1000,
+    });
+
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create_escrow_multi",
+            args: (buyer, seller, arbiter, assets.clone(), TIMEOUT).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let id = client
+        .try_create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT)
+        .expect("outer ok")
+        .expect("contract ok");
+    assert_eq!(client.get_status(&id), EscrowStatus::Pending);
+}
+
+#[test]
+fn create_escrow_multi_rejects_signature_from_non_buyer() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, _, _) = setup_multi(&env, 2);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+    assets.push_back(BasketAsset {
+        token: tokens[1].clone(),
+        amount: 1000,
+    });
+
+    // Seller signs instead of buyer
+    env.mock_auths(&[MockAuth {
+        address: seller,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create_escrow_multi",
+            args: (buyer, seller, arbiter, assets.clone(), TIMEOUT).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn create_escrow_multi_rejects_signature_over_different_args() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, _, _) = setup_multi(&env, 2);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+    assets.push_back(BasketAsset {
+        token: tokens[1].clone(),
+        amount: 1000,
+    });
+
+    let mut tampered_assets = Vec::new(&env);
+    tampered_assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 600, // tampered amount
+    });
+    tampered_assets.push_back(BasketAsset {
+        token: tokens[1].clone(),
+        amount: 1000,
+    });
+
+    // Signature armed for tampered args
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create_escrow_multi",
+            args: (buyer, seller, arbiter, tampered_assets, TIMEOUT).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn deposit_multi_accepts_full_buyer_authorization_chain() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, token_clients, token_admins) = setup_multi(&env, 2);
+
+    token_admins[0].mint(buyer, &500);
+    token_admins[1].mint(buyer, &1000);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+    assets.push_back(BasketAsset {
+        token: tokens[1].clone(),
+        amount: 1000,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[
+                MockAuthInvoke {
+                    contract: &tokens[0],
+                    fn_name: "transfer",
+                    args: transfer_args(&env, buyer, &contract_id, 500),
+                    sub_invokes: &[],
+                },
+                MockAuthInvoke {
+                    contract: &tokens[1],
+                    fn_name: "transfer",
+                    args: transfer_args(&env, buyer, &contract_id, 1000),
+                    sub_invokes: &[],
+                },
+            ],
+        },
+    }]);
+
+    client.try_deposit_multi(&id).expect("outer ok").unwrap();
+    assert_eq!(token_clients[0].balance(buyer), 0);
+    assert_eq!(token_clients[0].balance(&contract_id), 500);
+    assert_eq!(token_clients[1].balance(buyer), 0);
+    assert_eq!(token_clients[1].balance(&contract_id), 1000);
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+}
+
+#[test]
+fn deposit_multi_rejects_non_buyer() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, _, token_admins) = setup_multi(&env, 1);
+    token_admins[0].mint(buyer, &500);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+
+    // Armed for seller instead of buyer
+    env.mock_auths(&[MockAuth {
+        address: seller,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_deposit_multi(&id);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn deposit_multi_rejects_missing_token_authorizations() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, _, token_admins) = setup_multi(&env, 2);
+    token_admins[0].mint(buyer, &500);
+    token_admins[1].mint(buyer, &1000);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+    assets.push_back(BasketAsset {
+        token: tokens[1].clone(),
+        amount: 1000,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+
+    // Only armed at root entrypoint, no sub_invokes for tokens
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_deposit_multi(&id);
+    assert!(matches!(res, Err(Ok(ForgeError::TokenTransferFailed))));
+}
+
+#[test]
+fn deposit_multi_rejects_token_authorization_over_different_amount() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, _, token_admins) = setup_multi(&env, 1);
+    token_admins[0].mint(buyer, &500);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+
+    // Armed for transfer of 400 instead of 500
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &tokens[0],
+                fn_name: "transfer",
+                args: transfer_args(&env, buyer, &contract_id, 400),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    let res = client.try_deposit_multi(&id);
+    assert!(matches!(res, Err(Ok(ForgeError::TokenTransferFailed))));
+}
+
+#[test]
+fn release_multi_accepts_seller_signature() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, token_clients, token_admins) = setup_multi(&env, 2);
+    token_admins[0].mint(buyer, &500);
+    token_admins[1].mint(buyer, &1000);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+    assets.push_back(BasketAsset {
+        token: tokens[1].clone(),
+        amount: 1000,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    env.mock_auths(&[MockAuth {
+        address: seller,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "release_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.try_release_multi(&id).expect("outer ok").unwrap();
+    assert_eq!(token_clients[0].balance(seller), 500);
+    assert_eq!(token_clients[1].balance(seller), 1000);
+    assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+}
+
+#[test]
+fn release_multi_rejects_non_seller() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, _, token_admins) = setup_multi(&env, 1);
+    token_admins[0].mint(buyer, &500);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    // Buyer attempts to authorize release_multi
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "release_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_release_multi(&id);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn release_multi_blank_envelope_aborts() {
+    let (env, _token, _tc, _contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, _, token_admins) = setup_multi(&env, 1);
+    token_admins[0].mint(buyer, &500);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    env.set_auths(&[]);
+    let res = client.try_release_multi(&id);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn refund_multi_pre_deadline_accepts_seller_and_rejects_buyer() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, token_clients, token_admins) = setup_multi(&env, 1);
+    token_admins[0].mint(buyer, &500);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    // Pre-deadline: buyer auth is rejected
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "refund_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let res = client.try_refund_multi(&id);
+    assert_auth_abort!(res);
+
+    // Seller auth succeeds
+    env.mock_auths(&[MockAuth {
+        address: seller,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "refund_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.try_refund_multi(&id).expect("outer ok").unwrap();
+    assert_eq!(token_clients[0].balance(buyer), 500);
+}
+
+#[test]
+fn refund_multi_post_deadline_accepts_buyer_and_rejects_seller() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, token_clients, token_admins) = setup_multi(&env, 1);
+    token_admins[0].mint(buyer, &500);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    env.ledger().set_timestamp(START + TIMEOUT + 10);
+
+    // Post-deadline: seller auth is rejected
+    env.mock_auths(&[MockAuth {
+        address: seller,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "refund_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let res = client.try_refund_multi(&id);
+    assert_auth_abort!(res);
+
+    // Buyer auth succeeds
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "refund_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.try_refund_multi(&id).expect("outer ok").unwrap();
+    assert_eq!(token_clients[0].balance(buyer), 500);
+}
+
+#[test]
+fn dispute_multi_accepts_claimant_and_rejects_non_claimant() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, _, token_admins) = setup_multi(&env, 1);
+    token_admins[0].mint(buyer, &500);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+
+    // Claimant named is buyer, but seller signs
+    env.mock_auths(&[MockAuth {
+        address: seller,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "dispute_multi",
+            args: (id, buyer).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let res = client.try_dispute_multi(&id, buyer);
+    assert_auth_abort!(res);
+
+    // Claimant named is buyer, buyer signs -> succeeds
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "dispute_multi",
+            args: (id, buyer).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client
+        .try_dispute_multi(&id, buyer)
+        .expect("outer ok")
+        .unwrap();
+    assert_eq!(client.get_status(&id), EscrowStatus::Disputed);
+}
+
+#[test]
+fn resolve_multi_accepts_arbiter_and_rejects_non_arbiter() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, token_clients, token_admins) = setup_multi(&env, 1);
+    token_admins[0].mint(buyer, &500);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+    client.deposit_multi(&id);
+    client.dispute_multi(&id, buyer);
+
+    // Seller attempts to resolve -> rejected
+    env.mock_auths(&[MockAuth {
+        address: seller,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "resolve_multi",
+            args: (id, true).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let res = client.try_resolve_multi(&id, &true);
+    assert_auth_abort!(res);
+
+    // Arbiter resolves -> succeeds
+    env.mock_auths(&[MockAuth {
+        address: arbiter,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "resolve_multi",
+            args: (id, true).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client
+        .try_resolve_multi(&id, &true)
+        .expect("outer ok")
+        .unwrap();
+    assert_eq!(token_clients[0].balance(seller), 500);
+}
+
+#[test]
+fn cancel_multi_accepts_buyer_and_rejects_non_buyer() {
+    let (env, _token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let (tokens, _, _) = setup_multi(&env, 1);
+
+    let mut assets = Vec::new(&env);
+    assets.push_back(BasketAsset {
+        token: tokens[0].clone(),
+        amount: 500,
+    });
+
+    let id = client.create_escrow_multi(buyer, seller, arbiter, &assets, &TIMEOUT);
+
+    // Seller attempts to cancel
+    env.mock_auths(&[MockAuth {
+        address: seller,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let res = client.try_cancel_multi(&id);
+    assert_auth_abort!(res);
+
+    // Buyer cancels -> succeeds
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel_multi",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.try_cancel_multi(&id).expect("outer ok").unwrap();
+    assert_eq!(client.get_status(&id), EscrowStatus::Cancelled);
 }
