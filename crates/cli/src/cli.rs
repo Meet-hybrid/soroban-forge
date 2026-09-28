@@ -62,6 +62,9 @@ pub struct VerifyArgs {
     /// Crate to rebuild; inferred from the WASM file name when omitted.
     #[arg(short, long)]
     pub package: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct InvokeArgs {
     /// Contract address or alias
     #[arg(long)]
