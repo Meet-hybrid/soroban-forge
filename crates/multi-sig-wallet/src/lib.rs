@@ -1779,7 +1779,7 @@ impl MultiSigWallet {
             .unwrap_or(0);
         for id in 1..=count {
             let key = DataKey::Tx(id);
-            let Some(mut wallet_tx) = env.storage().instance().get::<_, WalletTx>(&key) else {
+            let Some(mut wallet_tx) = env.storage().persistent().get::<_, WalletTx>(&key) else {
                 continue;
             };
             if wallet_tx.status != TxStatus::Pending {
@@ -1795,7 +1795,8 @@ impl MultiSigWallet {
             }
             if kept.len() != before {
                 wallet_tx.confirmations = kept;
-                env.storage().instance().set(&key, &wallet_tx);
+                env.storage().persistent().set(&key, &wallet_tx);
+                bump_entry(env, &key);
             }
         }
     }
