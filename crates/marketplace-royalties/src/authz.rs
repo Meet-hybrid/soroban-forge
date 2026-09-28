@@ -191,6 +191,38 @@ fn distribute_rejects_payer_signature_without_token_authorization() {
     // Only the entrypoint frames are armed; the nested SAC transfer pull
     // has no authorization. Funds must not move on entrypoint signatures
     // alone.
+    env.mock_auths(&[
+        MockAuth {
+            address: &collection,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "distribute",
+                args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "distribute",
+                args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+
+    // The unmatched nested auth is not a root abort: the SAC rejects the
+    // pull and the contract buckets the token error.
+    let res = client.try_distribute(&collection, &token, &payer, &seller, &AMOUNT);
+    assert!(matches!(
+        res,
+        Err(Ok(
+            soroban_forge_shared_utils::ForgeError::TokenTransferFailed
+        ))
+    ));
+}
+
 fn settle_sale_accepts_collection_and_payer_signatures_and_records_auth_tree() {
     use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 
@@ -297,7 +329,6 @@ fn settle_sale_rejects_non_party_signature_in_place_of_payer() {
             address: &collection,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
-                fn_name: "distribute",
                 fn_name: "settle_sale",
                 args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
                 sub_invokes: &[],
@@ -339,7 +370,6 @@ fn settle_sale_rejects_replayed_signature_with_altered_args() {
             address: &payer,
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
-                fn_name: "distribute",
                 fn_name: "settle_sale",
                 args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
                 sub_invokes: &[],

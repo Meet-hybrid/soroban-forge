@@ -507,4 +507,3 @@ mod tests {
             .contains("not a known Soroban Forge contract package"));
     }
 }
-
