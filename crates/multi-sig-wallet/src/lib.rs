@@ -894,8 +894,9 @@ impl MultiSigWallet {
             }),
         };
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        bump_entry(&env, &DataKey::Tx(tx_id));
         events::submitted(&env, &wallet_tx);
         Ok(tx_id)
     }
@@ -1666,8 +1667,9 @@ impl MultiSigWallet {
             kind,
         };
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
+        bump_entry(env, &DataKey::Tx(tx_id));
         Ok(tx_id)
     }
 
