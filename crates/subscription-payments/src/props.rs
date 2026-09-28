@@ -167,10 +167,11 @@ proptest! {
             prop_assert_eq!(w.client().charge(&id), 0);
 
             let sub = w.client().get_subscription(&id);
+            let status = sub.status.clone();
             prop_assert!(sub.failed_attempts >= previous_failed_attempts);
             prop_assert_eq!(sub.failed_attempts, failure);
             prop_assert_eq!(
-                sub.status,
+                status,
                 if failure == MAX_RETRIES {
                     SubscriptionStatus::Cancelled
                 } else {
@@ -182,7 +183,7 @@ proptest! {
             prop_assert_eq!(token_client.balance(&w.provider), provider_balance);
             previous_failed_attempts = sub.failed_attempts;
 
-            if sub.status == SubscriptionStatus::PastDue {
+            if status == SubscriptionStatus::PastDue {
                 let before = sub;
                 let catchup = w.client().try_charge_catchup(&id, &1);
                 prop_assert_eq!(catchup.unwrap().unwrap_err(), ForgeError::InvalidInput.into());
