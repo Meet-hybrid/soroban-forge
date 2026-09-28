@@ -3881,7 +3881,7 @@ mod call_tests {
 
         // Initialize with simple 1-of-2 setup for testing
         let owners = vec![&env, accounts.user1.clone(), accounts.user2.clone()];
-        let _ = client.initialize(&owners, &1);
+        client.initialize(&owners, &1);
 
         // Submit a call transaction
         let target = accounts.deployer.clone(); // Dummy target
@@ -3920,7 +3920,7 @@ mod call_tests {
 
         // Initialize with owners
         let owners = vec![&env, accounts.user1.clone(), accounts.user2.clone()];
-        let _ = client.initialize(&owners, &1);
+        client.initialize(&owners, &1);
 
         // Try to submit as non-owner
         let target = accounts.deployer.clone();
