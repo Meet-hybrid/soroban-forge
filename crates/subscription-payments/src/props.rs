@@ -171,7 +171,7 @@ proptest! {
             prop_assert!(sub.failed_attempts >= previous_failed_attempts);
             prop_assert_eq!(sub.failed_attempts, failure);
             prop_assert_eq!(
-                status,
+                status.clone(),
                 if failure == MAX_RETRIES {
                     SubscriptionStatus::Cancelled
                 } else {
