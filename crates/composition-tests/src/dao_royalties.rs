@@ -10,8 +10,8 @@ use super::*;
 /// 5. Verify all balances and state updates
 #[test]
 fn dao_settles_royalties() {
-    let (_env, _contracts, _accounts) = setup_env();
-    
+    let (_env, _accounts) = setup_env();
+
     // TODO: Implement DAO to royalties composition test
     // This requires understanding the current DAO and royalties APIs
     // For now, this is a placeholder to establish the test structure

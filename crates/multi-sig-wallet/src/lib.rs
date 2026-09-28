@@ -3202,37 +3202,37 @@ mod call_tests {
     fn submit_call_basic() {
         let env = new_env();
         let accounts = TestAccounts::generate(&env);
-        
+
         // Deploy contract
-        let contract_id = env.register(MultiSigWallet{}, MultiSigWallet{});
+        let contract_id = env.register(MultiSigWallet, ());
         let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
-        
+
         // Initialize with simple 1-of-2 setup for testing
         let owners = vec![&env, accounts.user1.clone(), accounts.user2.clone()];
         let _ = client.initialize(&owners, &1);
-        
+
         // Submit a call transaction
         let target = accounts.deployer.clone(); // Dummy target
         let fn_name = symbol_short!("test");
-        let args = vec![&env, Val::from_u32(42)];
-        
-        let tx_id = client.submit_call(&accounts.user1, &target, &fn_name, &args).unwrap();
+        let args: Vec<Val> = vec![&env, Val::from_u32(42).into()];
+
+        let tx_id = client.submit_call(&accounts.user1, &target, &fn_name, &args);
         assert_eq!(tx_id, 1);
-        
+
         // Verify transaction was stored correctly
-        let tx = client.get_tx(&tx_id).unwrap();
+        let tx = client.get_tx(&tx_id);
         assert_eq!(tx.tx_id, tx_id);
         assert_eq!(tx.submitter, accounts.user1);
         assert_eq!(tx.target, target);
         assert_eq!(tx.status, TxStatus::Pending);
-        
+
         // Verify it's a Call transaction
         match tx.kind {
             TxKind::Call(call) => {
                 assert_eq!(call.target, target);
                 assert_eq!(call.fn_name, fn_name);
                 assert_eq!(call.args.len(), 1);
-            },
+            }
             _ => panic!("Expected Call transaction"),
         }
     }
@@ -3241,21 +3241,24 @@ mod call_tests {
     fn submit_call_requires_owner() {
         let env = new_env();
         let accounts = TestAccounts::generate(&env);
-        
+
         // Deploy contract
-        let contract_id = env.register(MultiSigWallet{}, MultiSigWallet{});
+        let contract_id = env.register(MultiSigWallet, ());
         let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
-        
+
         // Initialize with owners
         let owners = vec![&env, accounts.user1.clone(), accounts.user2.clone()];
         let _ = client.initialize(&owners, &1);
-        
+
         // Try to submit as non-owner
         let target = accounts.deployer.clone();
         let fn_name = symbol_short!("test");
-        let args = vec![&env];
-        
-        let result = client.submit_call(&accounts.user3, &target, &fn_name, &args);
-        assert_eq!(result, Err(Ok(ForgeError::Unauthorized)));
+        let args: Vec<Val> = vec![&env];
+
+        let err = client
+            .try_submit_call(&accounts.user3, &target, &fn_name, &args)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
     }
 }
