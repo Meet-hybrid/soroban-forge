@@ -336,7 +336,11 @@ impl SubscriptionPayments {
     ///
     /// Requires the subscriber. Idempotent: authorizing a provider that is
     /// already authorized succeeds.
-    pub fn authorize_provider(env: Env, subscriber: Address, provider: Address) -> Result<(), ForgeError> {
+    pub fn authorize_provider(
+        env: Env,
+        subscriber: Address,
+        provider: Address,
+    ) -> Result<(), ForgeError> {
         subscriber.require_auth();
 
         env.storage()
@@ -350,7 +354,11 @@ impl SubscriptionPayments {
     ///
     /// Requires the subscriber. Idempotent: revoking a provider that is not
     /// authorized succeeds and leaves the opt-in absent.
-    pub fn revoke_provider(env: Env, subscriber: Address, provider: Address) -> Result<(), ForgeError> {
+    pub fn revoke_provider(
+        env: Env,
+        subscriber: Address,
+        provider: Address,
+    ) -> Result<(), ForgeError> {
         subscriber.require_auth();
 
         env.storage()
@@ -366,9 +374,10 @@ impl SubscriptionPayments {
     }
 
     fn is_provider_authorized_impl(env: &Env, subscriber: &Address, provider: &Address) -> bool {
-        env.storage()
-            .instance()
-            .has(&DataKey::ProviderOptIn(subscriber.clone(), provider.clone()))
+        env.storage().instance().has(&DataKey::ProviderOptIn(
+            subscriber.clone(),
+            provider.clone(),
+        ))
     }
 
     /// Subscribe `subscriber` to `provider`'s service on the provider's
@@ -690,8 +699,16 @@ impl SubscriptionPayments {
         env.storage()
             .instance()
             .set(&DataKey::Subscription(subscription_id), &subscription);
-        Self::append_index(env, &DataKey::SubscriberSubscriptions(subscriber), subscription_id);
-        Self::append_index(env, &DataKey::ProviderSubscriptions(provider), subscription_id);
+        Self::append_index(
+            env,
+            &DataKey::SubscriberSubscriptions(subscriber),
+            subscription_id,
+        );
+        Self::append_index(
+            env,
+            &DataKey::ProviderSubscriptions(provider),
+            subscription_id,
+        );
         Ok(subscription_id)
     }
 
@@ -757,17 +774,6 @@ mod events {
     use super::*;
 
     #[contractevent]
-    pub struct Subscribed {
-        #[topic]
-        pub subscription_id: u64,
-        pub subscriber: Address,
-        pub provider: Address,
-        pub token: Address,
-        pub amount: i128,
-        pub period: u64,
-    }
-
-    #[contractevent]
     pub struct Charged {
         #[topic]
         pub subscription_id: u64,
@@ -781,18 +787,6 @@ mod events {
         #[topic]
         pub subscription_id: u64,
         pub subscriber: Address,
-    }
-
-    pub fn subscribed(env: &Env, subscription: &Subscription) {
-        Subscribed {
-            subscription_id: subscription.subscription_id,
-            subscriber: subscription.subscriber.clone(),
-            provider: subscription.provider.clone(),
-            token: subscription.token.clone(),
-            amount: subscription.amount,
-            period: subscription.period,
-        }
-        .publish(env);
     }
 
     pub fn charged(env: &Env, subscription: &Subscription) {
@@ -918,15 +912,31 @@ mod tests {
         assert_eq!(sub.status, SubscriptionStatus::Active);
         assert_eq!(sub.last_charged, client.env.ledger().timestamp());
         // Both creation paths feed the same indexes.
-        assert_eq!(client.subscriptions_for_subscriber(&accounts.user1, &0, &10).len(), 2);
-        assert_eq!(client.subscriptions_for_provider(&accounts.validator, &0, &10).len(), 2);
+        assert_eq!(
+            client
+                .subscriptions_for_subscriber(&accounts.user1, &0, &10)
+                .len(),
+            2
+        );
+        assert_eq!(
+            client
+                .subscriptions_for_provider(&accounts.validator, &0, &10)
+                .len(),
+            2
+        );
     }
 
     #[test]
     fn subscribe_on_behalf_of_requires_opt_in() {
         let (_env, token, _tc, _contract_id, client, accounts, _id) = setup!();
         let err = client
-            .try_subscribe_on_behalf_of(&accounts.validator, &accounts.user1, &token, &AMOUNT, &PERIOD)
+            .try_subscribe_on_behalf_of(
+                &accounts.validator,
+                &accounts.user1,
+                &token,
+                &AMOUNT,
+                &PERIOD,
+            )
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::Unauthorized);
@@ -935,7 +945,13 @@ mod tests {
         client.authorize_provider(&accounts.user1, &accounts.validator);
         client.revoke_provider(&accounts.user1, &accounts.validator);
         let err = client
-            .try_subscribe_on_behalf_of(&accounts.validator, &accounts.user1, &token, &AMOUNT, &PERIOD)
+            .try_subscribe_on_behalf_of(
+                &accounts.validator,
+                &accounts.user1,
+                &token,
+                &AMOUNT,
+                &PERIOD,
+            )
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::Unauthorized);
@@ -947,13 +963,25 @@ mod tests {
         client.authorize_provider(&accounts.user1, &accounts.validator);
 
         let err = client
-            .try_subscribe_on_behalf_of(&accounts.validator, &accounts.user1, &token, &0_i128, &PERIOD)
+            .try_subscribe_on_behalf_of(
+                &accounts.validator,
+                &accounts.user1,
+                &token,
+                &0_i128,
+                &PERIOD,
+            )
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
 
         let err = client
-            .try_subscribe_on_behalf_of(&accounts.validator, &accounts.user1, &token, &AMOUNT, &0_u64)
+            .try_subscribe_on_behalf_of(
+                &accounts.validator,
+                &accounts.user1,
+                &token,
+                &AMOUNT,
+                &0_u64,
+            )
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);

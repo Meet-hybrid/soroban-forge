@@ -1319,7 +1319,11 @@ impl MultiSigWallet {
     /// Creates only a pending governance [`TxKind::SetThreshold`] tx. The
     /// threshold is validated against the current owner set at submission and
     /// re-validated against the resulting state at execution.
-    pub fn set_threshold(env: Env, submitter: Address, new_threshold: u32) -> Result<u64, ForgeError> {
+    pub fn set_threshold(
+        env: Env,
+        submitter: Address,
+        new_threshold: u32,
+    ) -> Result<u64, ForgeError> {
         if !Self::is_initialized(&env) {
             return Err(ForgeError::NotInitialized);
         }
@@ -1539,7 +1543,11 @@ impl MultiSigWallet {
     ///
     /// A wallet that is not yet initialized reads as `0`.
     fn owner_count(env: &Env) -> u32 {
-        match env.storage().instance().get::<_, Vec<Address>>(&DataKey::Owners) {
+        match env
+            .storage()
+            .instance()
+            .get::<_, Vec<Address>>(&DataKey::Owners)
+        {
             Some(owners) => owners.len(),
             None => 0,
         }
@@ -1618,7 +1626,9 @@ impl MultiSigWallet {
         if new_threshold == 0 || new_threshold > owners {
             return Err(ForgeError::InvalidInput);
         }
-        env.storage().instance().set(&DataKey::Threshold, &new_threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::Threshold, &new_threshold);
         Ok(())
     }
 
@@ -1628,7 +1638,11 @@ impl MultiSigWallet {
     /// can no longer be bound by. Only `Pending` txs are touched, and only
     /// when they actually carry the removed owner's confirmation.
     fn clear_confirmations_of(env: &Env, removed_owner: &Address) {
-        let count: u64 = env.storage().instance().get::<_, u64>(&DataKey::Count).unwrap_or(0);
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get::<_, u64>(&DataKey::Count)
+            .unwrap_or(0);
         for id in 1..=count {
             let key = DataKey::Tx(id);
             let Some(mut wallet_tx) = env.storage().instance().get::<_, WalletTx>(&key) else {
@@ -3459,10 +3473,7 @@ mod tests {
         // untouched.
         let tx = client.add_owner(&accounts.user1, &newbie);
         assert_eq!(client.get_tx_count(), 1);
-        assert_eq!(
-            client.get_tx(&tx).kind,
-            TxKind::AddOwner(newbie.clone())
-        );
+        assert_eq!(client.get_tx(&tx).kind, TxKind::AddOwner(newbie.clone()));
         assert!(!client.is_owner(&newbie));
         assert_eq!(client.get_owners().len(), 3);
 
@@ -3551,10 +3562,7 @@ mod tests {
         let contract_id = env.register(MultiSigWallet, ());
         let solo = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
         let accounts_solo = TestAccounts::generate(&env);
-        let solo_owners = soroban_sdk::vec![
-            &env,
-            accounts_solo.user1.clone()
-        ];
+        let solo_owners = soroban_sdk::vec![&env, accounts_solo.user1.clone()];
         solo.initialize(&solo_owners, &1_u32);
 
         let err = solo
@@ -3632,10 +3640,16 @@ mod tests {
     fn set_threshold_validates_against_current_owners() {
         let (_env, client, accounts) = setup!();
 
-        let err = client.try_set_threshold(&accounts.user1, &0_u32).unwrap_err().unwrap();
+        let err = client
+            .try_set_threshold(&accounts.user1, &0_u32)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
 
-        let err = client.try_set_threshold(&accounts.user1, &4_u32).unwrap_err().unwrap();
+        let err = client
+            .try_set_threshold(&accounts.user1, &4_u32)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
         assert_eq!(client.get_threshold(), 2_u32);
     }
@@ -3714,8 +3728,14 @@ mod tests {
     fn governance_tx_ids_share_the_submission_counter() {
         let (env, client, accounts) = setup!();
 
-        assert_eq!(client.submit(&accounts.user1, &target(&env), &payload(&env)), 1);
-        assert_eq!(client.add_owner(&accounts.user2, &Address::generate(&env)), 2);
+        assert_eq!(
+            client.submit(&accounts.user1, &target(&env), &payload(&env)),
+            1
+        );
+        assert_eq!(
+            client.add_owner(&accounts.user2, &Address::generate(&env)),
+            2
+        );
         assert_eq!(client.set_threshold(&accounts.user3, &3_u32), 3);
         assert_eq!(client.remove_owner(&accounts.user1, &accounts.user2), 4);
         assert_eq!(client.get_tx_count(), 4);
@@ -3730,13 +3750,22 @@ mod tests {
         let accounts = TestAccounts::generate(&env);
         let newbie = Address::generate(&env);
 
-        let err = client.try_add_owner(&accounts.user1, &newbie).unwrap_err().unwrap();
+        let err = client
+            .try_add_owner(&accounts.user1, &newbie)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ForgeError::NotInitialized);
 
-        let err = client.try_remove_owner(&accounts.user1, &accounts.user2).unwrap_err().unwrap();
+        let err = client
+            .try_remove_owner(&accounts.user1, &accounts.user2)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ForgeError::NotInitialized);
 
-        let err = client.try_set_threshold(&accounts.user1, &1_u32).unwrap_err().unwrap();
+        let err = client
+            .try_set_threshold(&accounts.user1, &1_u32)
+            .unwrap_err()
+            .unwrap();
         assert_eq!(err, ForgeError::NotInitialized);
     }
 }
