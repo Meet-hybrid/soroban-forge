@@ -215,5 +215,10 @@ fn distribute_rejects_payer_signature_without_token_authorization() {
     // The unmatched nested auth is not a root abort: the SAC rejects the
     // pull and the contract buckets the token error.
     let res = client.try_distribute(&collection, &token, &payer, &seller, &AMOUNT);
-    assert!(matches!(res, Err(Ok(soroban_forge_shared_utils::ForgeError::TokenTransferFailed))));
+    assert!(matches!(
+        res,
+        Err(Ok(
+            soroban_forge_shared_utils::ForgeError::TokenTransferFailed
+        ))
+    ));
 }

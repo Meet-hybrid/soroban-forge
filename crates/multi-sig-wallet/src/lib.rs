@@ -1318,7 +1318,7 @@ impl MultiSigWallet {
         env.storage()
             .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
-        bump_entry(&env, &DataKey::Tx(tx_id));
+        bump_entry(env, &DataKey::Tx(tx_id));
         Ok(tx_id)
     }
 

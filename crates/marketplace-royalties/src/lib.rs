@@ -842,10 +842,7 @@ mod tests {
         assert_eq!(net, 1_000);
         assert_eq!(tc.balance(payer), 1_000, "no transfer at zero bps");
         assert_eq!(tc.balance(recipient), 0);
-        assert_eq!(
-            client.get_settlement_summary(collection).royalties_paid,
-            0
-        );
+        assert_eq!(client.get_settlement_summary(collection).royalties_paid, 0);
     }
 
     #[test]

@@ -58,7 +58,14 @@ fn verify_wasm(wasm_path: &str, expected: Option<&str>, package: Option<&str>) -
 
     let expected_hash = expected.map(expect_valid_sha256).transpose()?;
     let status = compare(&input_hash, &rebuilt_hash, expected_hash.as_deref());
-    print_row(&package, "Input SHA256", &input_hash, "Rebuilt SHA256", &rebuilt_hash, status);
+    print_row(
+        &package,
+        "Input SHA256",
+        &input_hash,
+        "Rebuilt SHA256",
+        &rebuilt_hash,
+        status,
+    );
     finish(status, &package)
 }
 
@@ -117,7 +124,10 @@ fn verify_manifest(manifest_path: &str) -> Result<()> {
 
     build::ensure_wasm_target_installed()?;
     let mut cmd = Command::new("cargo");
-    cmd.arg("build").arg("--release").arg("--target").arg(WASM_TARGET);
+    cmd.arg("build")
+        .arg("--release")
+        .arg("--target")
+        .arg(WASM_TARGET);
     for package in CONTRACT_PACKAGES {
         cmd.arg("--package").arg(package);
     }
@@ -313,10 +323,7 @@ fn print_header(expected_label: &str, actual_label: &str) {
         "{:<32} {:<66} {:<66} Status",
         "Contract", expected_label, actual_label
     );
-    println!(
-        "{:-<32} {:-<66} {:-<66} {:-<6}",
-        "", "", "", ""
-    );
+    println!("{:-<32} {:-<66} {:-<66} {:-<6}", "", "", "", "");
 }
 
 fn print_row(
@@ -356,7 +363,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock must be after unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("soroban-forge-verify-{}-{nonce}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "soroban-forge-verify-{}-{nonce}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -365,7 +375,10 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
@@ -451,7 +464,9 @@ mod tests {
     fn missing_manifest_is_actionable() {
         let path = temp_dir().join("does-not-exist.json");
         let err = parse_manifest(&path).unwrap_err();
-        assert!(err.to_string().contains("failed to read provenance manifest"));
+        assert!(err
+            .to_string()
+            .contains("failed to read provenance manifest"));
     }
 
     #[test]
@@ -487,6 +502,9 @@ mod tests {
     #[test]
     fn unknown_package_for_expected_is_rejected_before_building() {
         let err = verify_expected(&"a".repeat(64), Some("not-a-contract")).unwrap_err();
-        assert!(err.to_string().contains("not a known Soroban Forge contract package"));
+        assert!(err
+            .to_string()
+            .contains("not a known Soroban Forge contract package"));
     }
 }
+
