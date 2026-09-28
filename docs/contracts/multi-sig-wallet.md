@@ -78,3 +78,15 @@ A permissionless public keeper entrypoint `touch_tx_ttl(tx_id)` allows
 anyone to bump a transaction's persistent TTL without modifying its state;
 an unknown `tx_id` returns `ForgeError::NotFound`. A separate
 `touch_ttl(token)` keeper extends the persistent balance entries' TTL.
+
+
+## Events
+
+The wallet emits contract events across its entire state-changing surface:
+
+- `TxSubmitted` — topic `tx_id: u64`, payload `submitter: Address`, `payload_len: u32`. Emitted when an opaque transaction or call is submitted.
+- `TxConfirmed` — topic `tx_id: u64`, payload `signer: Address`, `confirmations_count: u32`. Emitted when an owner approves a transaction.
+- `TxRejected` — topic `tx_id: u64`, payload `signer: Address`, `rejections_count: u32`. Emitted when an owner formally rejects a transaction.
+- `TxExecuted` — topic `tx_id: u64`, payload `confirmations_count: u32`, `threshold: u32`. Emitted upon transaction execution.
+- `Deposited` — topic `token: Address`, payload `from: Address`, `amount: i128`, `balance: i128`. Emitted when tokens are deposited into wallet custody.
+- `WithdrawalSubmitted` — topic `tx_id: u64`, payload `token: Address`, `to: Address`, `amount: i128`, `confirmations_count: u32`. Emitted when a typed token withdrawal is submitted and passes limit admission.
