@@ -13,6 +13,8 @@
 //! ```text
 //! submit --(confirm × n)--> threshold met --execute--> Executed
 //! submit --(reject × n)--> rejection threshold met --> Rejected (terminal)
+//! submit_call --(confirm × n)--> threshold met --execute--> Executed (+ typed call invoked)
+//! submit_call --(reject × n)--> rejection threshold met --> Rejected (terminal)
 //! submit_withdrawal --(confirm × n)--> threshold met --execute--> Executed (+ tokens moved)
 //! submit_withdrawal --(reject × n)--> rejection threshold met --> Rejected (terminal)
 //! set_withdrawal_limit --(confirm × n)--> threshold met --execute--> Executed (limit applied)
@@ -27,11 +29,14 @@
 //!   re-initialisation).
 //! - `submit` requires an owner and records a `target` contract address
 //!   and an opaque `payload` for cross-contract invocation.
+//! - `submit_call` requires an owner and records a typed cross-contract
+//!   call with `target`, `function`, and `arguments`.
 //! - `confirm` requires an owner that has not confirmed already.
 //! - `reject` requires an owner that has not already signalled on the tx.
 //! - `execute` may be called by anyone; it only succeeds once the threshold is
 //!   met. For opaque-payload txs it performs a real cross-contract
-//!   invocation to the recorded `target`. For typed withdrawal txs it moves
+//!   invocation to the recorded `target`. For typed call txs it invokes
+//!   the specified function with arguments. For typed withdrawal txs it moves
 //!   real tokens.
 //! - A target revert surfaces as [`ForgeError::ContractInvocationFailed`]
 //!   and leaves the transaction un-executed (status stays `Pending`).
@@ -114,10 +119,12 @@
 //! at execution time, not submission time — the balance can change between
 //! the two, so a submitted withdrawal is an intent, not a reservation.
 //!
-//! Two transaction kinds coexist by design:
+//! Three transaction kinds coexist by design:
 //! - **Opaque-payload txs** (`submit`) keep the `payload` `Bytes` untouched
 //!   for arbitrary transaction bodies; dispatching those bytes is out of
 //!   scope here.
+//! - **Typed call txs** (`submit_call`) carry a structured function call
+//!   with target address, function name, and arguments as `Vec<Val>`.
 //! - **Typed withdrawal txs** (`submit_withdrawal`) carry an empty `payload`
 //!   and a [`TxKind::Withdrawal`] record instead. Encoding withdrawals into
 //!   the opaque payload was rejected because the contract would need a
@@ -297,6 +304,26 @@ pub trait SorobanForgeMultiSigWallet {
         submitter: Address,
         target: Address,
         tx: Bytes,
+    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+
+    /// Submit a typed cross-contract call as a pending transaction.
+    /// Returns the stable transaction id.
+    ///
+    /// Records a typed [`TxKind::Call`] transaction that invokes
+    /// `target.fn_name(args)` when executed. The call collects owner
+    /// confirmations and executes only past the threshold, like any
+    /// other transaction.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotInitialized`] — the wallet has no owner set.
+    /// * [`ForgeError::Unauthorized`] — `submitter` is not an owner.
+    fn submit_call(
+        env: Env,
+        submitter: Address,
+        target: Address,
+        fn_name: Symbol,
+        args: Vec<Val>,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
     /// Record `signer`'s approval of `tx_id`.
@@ -618,8 +645,9 @@ pub enum TxStatus {
 /// The kinds encode the custody split documented in the module docs:
 /// opaque-payload transactions dispatch (out of scope here) through their
 /// `payload` bytes, withdrawal transactions move real tokens through the
-/// typed record below, and limit-change transactions retune the per-token
-/// rolling withdrawal cap.
+/// typed record below, limit-change transactions retune the per-token
+/// rolling withdrawal cap, and call transactions dispatch typed
+/// cross-contract invocations.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TxKind {
@@ -635,6 +663,21 @@ pub enum TxKind {
     RemoveOwner(Address),
     /// Threshold-gated change to the approval threshold.
     SetThreshold(u32),
+    /// Typed cross-contract call.
+    Call(Call),
+}
+
+/// A typed cross-contract call record containing the target address,
+/// function name, and arguments.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Call {
+    /// Target contract address to invoke.
+    pub target: Address,
+    /// Function name to call on the target.
+    pub fn_name: Symbol,
+    /// Arguments to pass to the function.
+    pub args: Vec<Val>,
 }
 
 /// A typed token withdrawal record (see [`TxKind::Withdrawal`] and the
@@ -819,6 +862,44 @@ impl MultiSigWallet {
         Ok(tx_id)
     }
 
+    /// Submit a typed cross-contract call as a pending transaction.
+    pub fn submit_call(
+        env: Env,
+        submitter: Address,
+        target: Address,
+        fn_name: Symbol,
+        args: Vec<Val>,
+    ) -> Result<u64, ForgeError> {
+        if !Self::is_initialized(&env) {
+            return Err(ForgeError::NotInitialized);
+        }
+        if !Self::is_owner_impl(&env, &submitter) {
+            return Err(ForgeError::Unauthorized);
+        }
+        submitter.require_auth();
+
+        let tx_id = Self::next_id(&env)?;
+        let wallet_tx = WalletTx {
+            tx_id,
+            submitter,
+            target: target.clone(),
+            payload: Bytes::new(&env),
+            confirmations: Vec::new(&env),
+            rejections: Vec::new(&env),
+            status: TxStatus::Pending,
+            kind: TxKind::Call(Call {
+                target,
+                fn_name,
+                args,
+            }),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::Tx(tx_id), &wallet_tx);
+        events::submitted(&env, &wallet_tx);
+        Ok(tx_id)
+    }
+
     /// Record an owner's approval of a pending transaction.
     ///
     /// An owner may confirm only once, and only while the transaction is
@@ -978,6 +1059,18 @@ impl MultiSigWallet {
                     target,
                     &Symbol::new(&env, "execute"),
                     args,
+                );
+                if let Err(_) | Ok(Err(_)) = result {
+                    return Err(ForgeError::ContractInvocationFailed);
+                }
+            }
+            TxKind::Call(call) => {
+                // Typed cross-contract call: invoke the specified function
+                // with the provided arguments. Invoke first, write Executed only on success.
+                let result = env.try_invoke_contract::<(), ForgeError>(
+                    &call.target,
+                    &call.fn_name,
+                    call.args.clone(),
                 );
                 if let Err(_) | Ok(Err(_)) = result {
                     return Err(ForgeError::ContractInvocationFailed);
@@ -3829,5 +3922,77 @@ mod tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::NotInitialized);
+    }
+}
+
+// Tests for the new submit_call functionality
+#[cfg(test)]
+mod call_tests {
+    use super::*;
+    use soroban_forge_test_utils::{new_env, TestAccounts};
+    use soroban_sdk::{symbol_short, vec, Val};
+
+    #[test]
+    fn submit_call_basic() {
+        let env = new_env();
+        let accounts = TestAccounts::generate(&env);
+
+        // Deploy contract
+        let contract_id = env.register(MultiSigWallet, ());
+        let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+
+        // Initialize with simple 1-of-2 setup for testing
+        let owners = vec![&env, accounts.user1.clone(), accounts.user2.clone()];
+        client.initialize(&owners, &1);
+
+        // Submit a call transaction
+        let target = accounts.deployer.clone(); // Dummy target
+        let fn_name = symbol_short!("test");
+        let args: Vec<Val> = vec![&env, Val::from_u32(42).into()];
+
+        let tx_id = client.submit_call(&accounts.user1, &target, &fn_name, &args);
+        assert_eq!(tx_id, 1);
+
+        // Verify transaction was stored correctly
+        let tx = client.get_tx(&tx_id);
+        assert_eq!(tx.tx_id, tx_id);
+        assert_eq!(tx.submitter, accounts.user1);
+        assert_eq!(tx.target, target);
+        assert_eq!(tx.status, TxStatus::Pending);
+
+        // Verify it's a Call transaction
+        match tx.kind {
+            TxKind::Call(call) => {
+                assert_eq!(call.target, target);
+                assert_eq!(call.fn_name, fn_name);
+                assert_eq!(call.args.len(), 1);
+            }
+            _ => panic!("Expected Call transaction"),
+        }
+    }
+
+    #[test]
+    fn submit_call_requires_owner() {
+        let env = new_env();
+        let accounts = TestAccounts::generate(&env);
+
+        // Deploy contract
+        let contract_id = env.register(MultiSigWallet, ());
+        let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+
+        // Initialize with owners
+        let owners = vec![&env, accounts.user1.clone(), accounts.user2.clone()];
+        client.initialize(&owners, &1);
+
+        // Try to submit as non-owner
+        let target = accounts.deployer.clone();
+        let fn_name = symbol_short!("test");
+        let args: Vec<Val> = vec![&env];
+
+        let err = client
+            .try_submit_call(&accounts.user3, &target, &fn_name, &args)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
     }
 }
