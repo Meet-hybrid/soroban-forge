@@ -637,6 +637,12 @@ pub enum TxKind {
     Withdrawal(Withdrawal),
     /// Threshold-gated change to a token's rolling withdrawal limit.
     LimitChange(LimitChange),
+    /// Threshold-gated addition of a new owner.
+    AddOwner(Address),
+    /// Threshold-gated removal of an existing owner.
+    RemoveOwner(Address),
+    /// Threshold-gated change to the approval threshold.
+    SetThreshold(u32),
     /// Typed cross-contract call.
     Call(Call),
 }
@@ -652,12 +658,6 @@ pub struct Call {
     pub fn_name: Symbol,
     /// Arguments to pass to the function.
     pub args: Vec<Val>,
-    /// Threshold-gated addition of a new owner.
-    AddOwner(Address),
-    /// Threshold-gated removal of an existing owner.
-    RemoveOwner(Address),
-    /// Threshold-gated change to the approval threshold.
-    SetThreshold(u32),
 }
 
 /// A typed token withdrawal record (see [`TxKind::Withdrawal`] and the
