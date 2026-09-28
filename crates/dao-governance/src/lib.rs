@@ -500,7 +500,7 @@ impl DaoGovernance {
         voter.require_auth();
 
         let vote_key = DataKey::Vote(proposal_id, voter.clone());
-        if env.storage().instance().has(&vote_key) {
+        if env.storage().persistent().has(&vote_key) {
             return Err(ForgeError::InvalidInput);
         }
 
@@ -516,7 +516,8 @@ impl DaoGovernance {
                 .ok_or(ForgeError::ArithmeticOverflow)?;
         }
         let key = DataKey::Proposal(proposal_id);
-        env.storage().instance().set(&vote_key, &true);
+        env.storage().persistent().set(&vote_key, &true);
+        bump_entry(&env, &vote_key);
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
         events::vote_cast(&env, proposal_id, &voter, support);
@@ -770,7 +771,7 @@ impl DaoGovernance {
         Self::get_proposal_impl(&env, proposal_id)?;
 
         let vote_key = DataKey::Vote(proposal_id, voter);
-        Ok(env.storage().instance().has(&vote_key))
+        Ok(env.storage().persistent().has(&vote_key))
     }
 
     /// Load the bond configuration, or `NotInitialized` if the contract was
