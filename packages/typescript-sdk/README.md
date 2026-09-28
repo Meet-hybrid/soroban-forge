@@ -1,15 +1,18 @@
-# @soroban-forge/escrow-client
+# @soroban-forge/escrow-client (Soroban Forge TypeScript SDK)
 
-Generated TypeScript client for the **Soroban Forge escrow contract**, live on
-Stellar testnet:
+Multi-contract TypeScript SDK workspace for **Soroban Forge** smart contracts on Stellar.
 
-> `CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB`
+Provides dedicated, fully-typed client wrappers and network configurations for all contracts in the repository:
+- **escrow** (deployed on Stellar testnet: `CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB`)
+- **subscription-payments**
+- **multi-sig-wallet**
+- **marketplace-royalties**
+- **dao-governance**
+- **vesting**
 
-The client is generated from the deployed contract's ABI by the Stellar CLI, so
-every method is fully typed and carries the doc comments from the contract
-source.
+The SDK features a clean boundary between raw generated Stellar contract bindings (`src/generated/`), typed client modules with network configs (`src/contracts/`), and fixture-driven drift tests (`src/tests/` & `src/fixtures/`).
 
-## Install
+## Installation
 
 ```bash
 npm install
@@ -23,127 +26,121 @@ Compile the TypeScript source to `dist/`:
 npm run build
 ```
 
-The compiled output is what consumers import.  The `dist/` directory is
-published; the `src/` source is authoritative.
+The compiled output in `dist/` is what consumers import. `npm run build` compiles all client wrappers and generated bindings in a single unified pass.
 
 ## Usage
 
+### 1. Subpath Imports (Recommended)
+
+Each contract is accessible via dedicated subpath exports:
+
 ```ts
-import { Client, networks } from "@soroban-forge/escrow-client";
+import { Client as EscrowClient, networks as escrowNetworks } from "@soroban-forge/escrow-client/escrow";
+import { Client as MultiSigClient, networks as multiSigNetworks } from "@soroban-forge/escrow-client/multi-sig-wallet";
+import { Client as SubscriptionClient, networks as subscriptionNetworks } from "@soroban-forge/escrow-client/subscription-payments";
+import { Client as RoyaltiesClient, networks as royaltiesNetworks } from "@soroban-forge/escrow-client/marketplace-royalties";
+import { Client as GovernanceClient, networks as governanceNetworks } from "@soroban-forge/escrow-client/dao-governance";
+import { Client as VestingClient, networks as vestingNetworks } from "@soroban-forge/escrow-client/vesting";
+
+// Instantiate escrow client:
+const escrowClient = new EscrowClient({
+  ...escrowNetworks.testnet,
+  rpcUrl: "https://soroban-testnet.stellar.org",
+});
+
+// Instantiate multi-sig wallet client:
+const multiSigClient = new MultiSigClient({
+  ...multiSigNetworks.testnet,
+  rpcUrl: "https://soroban-testnet.stellar.org",
+});
+```
+
+### 2. Top-Level Namespace Imports
+
+Import all contract modules through top-level namespaces:
+
+```ts
+import { escrow, multiSigWallet, subscriptionPayments } from "@soroban-forge/escrow-client";
+
+const client = new escrow.Client({
+  ...escrow.networks.testnet,
+  rpcUrl: "https://soroban-testnet.stellar.org",
+});
+```
+
+### 3. Backward-Compatible Root Imports (Escrow)
+
+Existing escrow consumers (such as `packages/nextjs-example`) can import directly from the package root:
+
+```ts
+import { Client, networks, type EscrowData } from "@soroban-forge/escrow-client";
 
 const client = new Client({
   ...networks.testnet,
-  rpcUrl: "https://soroban-testnet.stellar.org", // or your own RPC
+  rpcUrl: "https://soroban-testnet.stellar.org",
 });
-
-// Every contract method is available, typed, with `try*` variants:
-const id = await client.create_escrow({
-  buyer: "C…",
-  seller: "C…",
-  arbiter: "C…",
-  token: "C…",
-  amount: 500n,
-  timeout: 86_400n,
-});
-
-await client.deposit({ escrow_id: id.result });
-await client.release({ escrow_id: id.result });
-await client.dispute({ escrow_id: id.result, claimant: seller });
-await client.resolve({ escrow_id: id.result, in_favor_of_seller: true });
-await client.get_status({ escrow_id: id.result });
-await client.touch_ttl({ escrow_id: id.result }); // permissionless keeper
 ```
 
-The `networks` export carries the embedded `contractId` and network passphrase;
-pass your own `rpcUrl`.  Signers/wallets are supplied per call via
-`MethodOptions` (`sign`, `simulate`, etc.) — see the
-[stellar-sdk contract client docs](https://stellar.github.io/js-stellar-sdk/).
+## Network Configuration and Placeholder Contract IDs
 
-## Offline tests
+The `networks.testnet` configuration object exposes:
+- `networkPassphrase`: `"Test SDF Network ; September 2015"`
+- `contractId`:
+  - For **escrow**: the deployed testnet contract ID (`CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB`).
+  - For undeployed contracts: valid, deterministic placeholder IDs that can be overridden via environment variables:
+    - `SUBSCRIPTION_PAYMENTS_CONTRACT_ID`
+    - `MULTI_SIG_WALLET_CONTRACT_ID`
+    - `MARKETPLACE_ROYALTIES_CONTRACT_ID`
+    - `DAO_GOVERNANCE_CONTRACT_ID`
+    - `VESTING_CONTRACT_ID`
 
-The test suite runs completely offline.  It does **not** require:
+## Shared Error Registry (`ForgeError`)
 
-- network access
-- private keys
-- funded accounts
-- testnet credentials
+Shared contract error codes (1–13) defined across all contracts in `crates/shared-utils/src/errors.rs` are exported centrally:
+
+```ts
+import { FORGE_ERRORS, forgeErrorName, ForgeError } from "@soroban-forge/escrow-client";
+
+console.log(FORGE_ERRORS[1]); // "Unauthorized"
+console.log(forgeErrorName(4)); // "InsufficientFunds"
+```
+
+## Offline Test Suite & Drift Detection
+
+The test suite runs completely offline without network access or testnet credentials:
 
 ```bash
-cd packages/typescript-sdk
-npm ci
 npm test
 ```
 
-The test script compiles TypeScript first (`tsconfig.test.json` → `dist-test/`)
-and then runs the compiled JavaScript with Node's built-in test runner.
+The test runner executes:
+1. **Escrow Client Suite** (`src/tests/escrow-client.test.ts`): All 25 original test cases covering construction, methods, fromJSON, arg encoding, events, and compile-time types.
+2. **Fixture-Driven Drift Tests** (`src/tests/drift.test.ts`): Validates contract client specs (function names, parameter names and types, and event definitions) across all contracts against checked-in JSON fixtures in `src/fixtures/`.
+3. **Centralized Error Suite** (`src/tests/forge-errors.test.ts`): Verifies error codes 1–13, `FORGE_ERRORS`, `forgeErrorName`, and runtime `ForgeError`.
 
-## Type-check
+## Client & Fixture Regeneration
 
-Run the TypeScript compiler in check-only mode (no output emitted):
+To deterministically regenerate client bindings and fixtures:
 
 ```bash
-npm run typecheck
+# From workspace root:
+bash scripts/generate-clients.sh
+
+# Or from packages/typescript-sdk:
+npm run regen
 ```
 
-## Client regeneration
-
-The client (`src/index.ts`) is **generated** from the deployed contract's ABI
-and must not be edited by hand.  Manual edits will be overwritten the next time
-the contract interface changes.
-
-To regenerate after a contract interface change, run:
+To regenerate only the JSON expectation fixtures from current bindings:
 
 ```bash
-stellar contract bindings typescript \
-  --contract-id CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB \
-  --network testnet \
-  --output-dir packages/typescript-sdk --overwrite
+npm run regen:fixtures
 ```
 
-This requires the [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli)
-and a live connection to Stellar testnet.  After regeneration:
+Checked-in fixtures are stored under `src/fixtures/<contract>.fixture.json`. If a contract's public ABI or events change, running `npm test` will catch the drift unless the fixtures are deliberately regenerated.
 
-1. Rebuild: `npm run build`
-2. Run the offline tests: `npm test` — any ABI-breaking change will cause a
-   test failure that makes the drift visible before merging.
-
-The generation command, the deployed contract ID, and the testnet passphrase are
-the authoritative source of truth.  If the contract is redeployed at a new
-address, update the `--contract-id` flag above and the `networks.testnet`
-configuration in the regenerated `src/index.ts`.
-
-## Optional testnet verification
-
-A separate, **opt-in** script performs one live read-only call (`get_status`)
-against the deployed testnet contract to confirm end-to-end connectivity.
-
-This is **not** part of `npm test`.  Run it only when you have network access
-and a valid escrow ID:
+## Optional Testnet Verification
 
 ```bash
-# 1. Build (if not already done)
-npm run build
-
-# 2. Run the verification (ESCROW_ID must be a u64 that exists on-chain)
+# Verify testnet read call against live deployed escrow:
 ESCROW_ID=1 npm run verify:testnet
-
-# Optional: use a custom RPC endpoint
-RPC_URL=https://soroban-testnet.stellar.org ESCROW_ID=1 npm run verify:testnet
 ```
-
-The `verify:testnet` command builds the distribution automatically before running.
-
-Requirements:
-
-- `ESCROW_ID` — a valid escrow ID that exists on the deployed testnet contract
-- `RPC_URL` — optional; defaults to `https://soroban-testnet.stellar.org`
-- No private keys or funded accounts are needed (`get_status` is read-only)
-
-The script exits with code `0` on success and non-zero on failure, making it
-suitable as a post-deployment smoke check in a manual release workflow.
-
-## Provenance
-
-This package replaces the v0.1.0 console-log placeholder SDK.  The contract
-itself, its testnet receipt rounds, and the conservation property are
-documented in the [repository README](https://github.com/Meet-hybrid/soroban-forge).

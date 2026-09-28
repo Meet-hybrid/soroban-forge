@@ -1,0 +1,178 @@
+{
+  "contract": "subscription-payments",
+  "functions": [
+    {
+      "name": "pause",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "cancel",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "charge",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "resume",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "subscribe",
+      "inputs": [
+        {
+          "name": "subscriber",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "provider",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "amount",
+          "type": "scSpecTypeI128"
+        },
+        {
+          "name": "period",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "revoke_provider",
+      "inputs": [
+        {
+          "name": "subscriber",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "provider",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "get_subscription",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "authorize_provider",
+      "inputs": [
+        {
+          "name": "subscriber",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "provider",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "get_subscription_count",
+      "inputs": []
+    },
+    {
+      "name": "is_provider_authorized",
+      "inputs": [
+        {
+          "name": "subscriber",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "provider",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "subscribe_on_behalf_of",
+      "inputs": [
+        {
+          "name": "provider",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "subscriber",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "amount",
+          "type": "scSpecTypeI128"
+        },
+        {
+          "name": "period",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "subscriptions_for_provider",
+      "inputs": [
+        {
+          "name": "provider",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "offset",
+          "type": "scSpecTypeU32"
+        },
+        {
+          "name": "limit",
+          "type": "scSpecTypeU32"
+        }
+      ]
+    },
+    {
+      "name": "subscriptions_for_subscriber",
+      "inputs": [
+        {
+          "name": "subscriber",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "offset",
+          "type": "scSpecTypeU32"
+        },
+        {
+          "name": "limit",
+          "type": "scSpecTypeU32"
+        }
+      ]
+    }
+  ],
+  "events": []
+}

@@ -1,14 +1,45 @@
 {
-  "version": "0.2.0",
   "name": "@soroban-forge/escrow-client",
-  "description": "Generated TypeScript client for the Soroban Forge escrow contract (deployed on Stellar testnet: CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB)",
+  "version": "0.2.0",
+  "description": "Multi-contract TypeScript SDK workspace for Soroban Forge contracts (escrow, subscription-payments, multi-sig-wallet, marketplace-royalties, dao-governance, vesting)",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/Meet-hybrid/soroban-forge"
   },
   "type": "module",
-  "exports": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./escrow": {
+      "types": "./dist/contracts/escrow/index.d.ts",
+      "default": "./dist/contracts/escrow/index.js"
+    },
+    "./subscription-payments": {
+      "types": "./dist/contracts/subscription-payments/index.d.ts",
+      "default": "./dist/contracts/subscription-payments/index.js"
+    },
+    "./multi-sig-wallet": {
+      "types": "./dist/contracts/multi-sig-wallet/index.d.ts",
+      "default": "./dist/contracts/multi-sig-wallet/index.js"
+    },
+    "./marketplace-royalties": {
+      "types": "./dist/contracts/marketplace-royalties/index.d.ts",
+      "default": "./dist/contracts/marketplace-royalties/index.js"
+    },
+    "./dao-governance": {
+      "types": "./dist/contracts/dao-governance/index.d.ts",
+      "default": "./dist/contracts/dao-governance/index.js"
+    },
+    "./vesting": {
+      "types": "./dist/contracts/vesting/index.d.ts",
+      "default": "./dist/contracts/vesting/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "typings": "dist/index.d.ts",
   "files": [
     "dist"
@@ -16,7 +47,9 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && tsc --project tsconfig.test.json && node --test dist-test/tests/escrow-client.test.js",
+    "test": "tsc && tsc --project tsconfig.test.json && node --test \"dist-test/tests/**/*.test.js\"",
+    "regen:fixtures": "tsc --project tsconfig.scripts.json && node dist-scripts/regen-fixtures.js",
+    "regen": "bash scripts/regen.sh",
     "verify:testnet": "npm run build && tsc --project tsconfig.scripts.json && node dist-scripts/verify-testnet.js"
   },
   "dependencies": {

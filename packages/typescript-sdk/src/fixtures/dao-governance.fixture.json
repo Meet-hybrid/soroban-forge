@@ -1,0 +1,132 @@
+{
+  "contract": "dao-governance",
+  "functions": [
+    {
+      "name": "vote",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "scSpecTypeU64"
+        },
+        {
+          "name": "voter",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "support",
+          "type": "scSpecTypeBool"
+        }
+      ]
+    },
+    {
+      "name": "execute",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "propose",
+      "inputs": [
+        {
+          "name": "proposer",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "target",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "action",
+          "type": "scSpecTypeBytes"
+        },
+        {
+          "name": "duration",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "has_voted",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "scSpecTypeU64"
+        },
+        {
+          "name": "voter",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "get_proposal",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "get_proposals",
+      "inputs": [
+        {
+          "name": "offset",
+          "type": "scSpecTypeU32"
+        },
+        {
+          "name": "limit",
+          "type": "scSpecTypeU32"
+        }
+      ]
+    },
+    {
+      "name": "configure_bond",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "amount",
+          "type": "scSpecTypeI128"
+        },
+        {
+          "name": "treasury",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "cancel_proposal",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "scSpecTypeU64"
+        },
+        {
+          "name": "proposer",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "get_bond_config",
+      "inputs": []
+    },
+    {
+      "name": "get_proposal_count",
+      "inputs": []
+    }
+  ],
+  "events": [
+    "Proposed",
+    "VoteCast",
+    "Finalised",
+    "BondPosted",
+    "BondReleased"
+  ]
+}

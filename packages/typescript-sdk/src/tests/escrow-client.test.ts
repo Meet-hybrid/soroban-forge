@@ -1,16 +1,15 @@
 /**
- * Offline tests for the generated @soroban-forge/escrow-client.
+ * Offline tests for the @soroban-forge/escrow-client.
  *
  * These tests run entirely without network access, private keys, funded
- * accounts, or testnet credentials.  They verify:
+ * accounts, or testnet credentials. They verify:
  *
  *   1. Client construction and configuration surface
  *   2. All 11 generated escrow methods are present
  *   3. Argument encoding via ContractSpec.funcArgsToScVals()
  *   4. The ForgeError runtime object (codes and messages)
  *   5. ABI shape — function names, parameter names, and parameter types —
- *      so that contract regeneration that changes the public API causes
- *      a clear test failure
+ *      backed by the checked-in JSON fixture (src/fixtures/escrow.fixture.json)
  *   6. Compile-time usability of type-only exports (EscrowStatus, EscrowData)
  *      is verified by the TypeScript compiler during `npm run typecheck` /
  *      compilation, not at runtime.
@@ -21,9 +20,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { StrKey } from "@stellar/stellar-sdk";
 
-// --- imports from the generated client ----------------------------------------
+// --- imports from the built client ----------------------------------------
 import {
   Client,
   networks,
@@ -36,8 +37,41 @@ import {
 import type { EscrowStatus, EscrowData } from "../../dist/index.js";
 
 // ---------------------------------------------------------------------------
-// Test fixtures
+// Test fixtures & checked-in ABI fixture loading
 // ---------------------------------------------------------------------------
+
+function loadEscrowFixture(): {
+  contract: string;
+  functions: Array<{
+    name: string;
+    inputs: Array<{ name: string; type: string }>;
+  }>;
+  events: Array<string>;
+} {
+  const possiblePaths = [
+    new URL("../fixtures/escrow.fixture.json", import.meta.url),
+    new URL("../../src/fixtures/escrow.fixture.json", import.meta.url),
+  ];
+  for (const p of possiblePaths) {
+    const filePath = fileURLToPath(p);
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    }
+  }
+  throw new Error("escrow.fixture.json not found");
+}
+
+const escrowFixture = loadEscrowFixture();
+
+const EXPECTED_METHODS = escrowFixture.functions.map((f) => f.name);
+const EXPECTED_ESCROW_EVENTS = escrowFixture.events;
+const EXPECTED_ABI_SHAPE: Record<string, Array<[string, string]>> =
+  Object.fromEntries(
+    escrowFixture.functions.map((f) => [
+      f.name,
+      f.inputs.map((inp) => [inp.name, inp.type] as [string, string]),
+    ]),
+  );
 
 /** A deterministic, valid Stellar contract address used as a "buyer" fixture. */
 const FIXTURE_BUYER =
@@ -106,20 +140,6 @@ test("EXPECTED_CONTRACT_ID is a valid Stellar contract address", () => {
 // 2. Method surface — all 11 escrow methods must be present
 // ---------------------------------------------------------------------------
 
-const EXPECTED_METHODS = [
-  "cancel",
-  "refund",
-  "deposit",
-  "dispute",
-  "release",
-  "resolve",
-  "touch_ttl",
-  "get_escrow",
-  "get_status",
-  "create_escrow",
-  "escrows_for_participant",
-] as const;
-
 test("Client exposes all 11 escrow method functions", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   for (const method of EXPECTED_METHODS) {
@@ -144,9 +164,6 @@ test("fromJSON exposes deserialization helpers for all 11 methods", () => {
 
 // ---------------------------------------------------------------------------
 // 3. ABI shape — function names, parameter names and types (drift detection)
-//
-// If the contract is regenerated with a different ABI (renamed parameters,
-// reordered arguments, changed types) these tests will fail clearly.
 // ---------------------------------------------------------------------------
 
 test("ContractSpec is accessible via client.spec", () => {
@@ -168,41 +185,6 @@ test("ABI exposes exactly the 11 expected function names", () => {
     "ABI function list must match; a mismatch indicates the generated client has changed",
   );
 });
-
-/**
- * Expected ABI shape keyed by function name.
- * Each entry lists [paramName, specTypeName] pairs in argument order.
- */
-const EXPECTED_ABI_SHAPE: Record<string, Array<[string, string]>> = {
-  cancel: [["escrow_id", "scSpecTypeU64"]],
-  refund: [["escrow_id", "scSpecTypeU64"]],
-  deposit: [["escrow_id", "scSpecTypeU64"]],
-  dispute: [
-    ["escrow_id", "scSpecTypeU64"],
-    ["claimant", "scSpecTypeAddress"],
-  ],
-  release: [["escrow_id", "scSpecTypeU64"]],
-  resolve: [
-    ["escrow_id", "scSpecTypeU64"],
-    ["in_favor_of_seller", "scSpecTypeBool"],
-  ],
-  touch_ttl: [["escrow_id", "scSpecTypeU64"]],
-  get_escrow: [["escrow_id", "scSpecTypeU64"]],
-  get_status: [["escrow_id", "scSpecTypeU64"]],
-  escrows_for_participant: [
-    ["participant", "scSpecTypeAddress"],
-    ["cursor", "scSpecTypeU32"],
-    ["limit", "scSpecTypeU32"],
-  ],
-  create_escrow: [
-    ["buyer", "scSpecTypeAddress"],
-    ["seller", "scSpecTypeAddress"],
-    ["arbiter", "scSpecTypeAddress"],
-    ["token", "scSpecTypeAddress"],
-    ["amount", "scSpecTypeI128"],
-    ["timeout", "scSpecTypeU64"],
-  ],
-};
 
 test("ABI parameter names and types match expected shape", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
@@ -235,10 +217,6 @@ test("ABI parameter names and types match expected shape", () => {
 
 // ---------------------------------------------------------------------------
 // 4. Argument encoding tests — ContractSpec.funcArgsToScVals()
-//
-// These verify that arguments are encoded into the correct Soroban XDR
-// value types.  A regenerated client with a changed parameter type will
-// produce a different ScVal switch and fail here.
 // ---------------------------------------------------------------------------
 
 test("cancel: escrow_id encodes as scvU64", () => {
@@ -359,9 +337,6 @@ test("create_escrow: encodes 6 args with correct types and values", () => {
 
 // ---------------------------------------------------------------------------
 // 5. ForgeError surface
-//
-// ForgeError is a plain runtime object (not an enum or class) whose numeric
-// keys map to {message: string} descriptors.
 // ---------------------------------------------------------------------------
 
 test("ForgeError is exported as a runtime object", () => {
@@ -412,21 +387,7 @@ test("ForgeError messages match the documented error surface", () => {
 
 // ---------------------------------------------------------------------------
 // 6. Event types
-//
-// The generated spec includes contract event XDR entries.  The spec object
-// exposes them through spec.events(); verify the escrow lifecycle events are
-// present so that regeneration which removes or renames events is detectable.
 // ---------------------------------------------------------------------------
-
-const EXPECTED_ESCROW_EVENTS = [
-  "EscrowCreated",
-  "Deposited",
-  "Released",
-  "Refunded",
-  "Disputed",
-  "Resolved",
-  "Cancelled",
-] as const;
 
 test("ContractSpec includes all documented escrow event types", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
@@ -442,16 +403,8 @@ test("ContractSpec includes all documented escrow event types", () => {
 
 // ---------------------------------------------------------------------------
 // 7. Type-level compile-time checks
-//
-// EscrowStatus and EscrowData are TypeScript type-only exports.  They have
-// no runtime presence and must not be tested with assert.ok(SomeType).
-//
-// The checks below are valid TypeScript that the compiler enforces at build
-// time.  If these types change their structure, the compile step will fail.
 // ---------------------------------------------------------------------------
 
-// Compile-time check: EscrowStatus is a tagged-union type.
-// Assigning a well-formed value here will fail to compile if the type changes.
 const _statusPending: EscrowStatus = { tag: "Pending", values: undefined };
 const _statusFunded: EscrowStatus = { tag: "Funded", values: undefined };
 const _statusCompleted: EscrowStatus = { tag: "Completed", values: undefined };
@@ -459,7 +412,6 @@ const _statusRefunded: EscrowStatus = { tag: "Refunded", values: undefined };
 const _statusDisputed: EscrowStatus = { tag: "Disputed", values: undefined };
 const _statusCancelled: EscrowStatus = { tag: "Cancelled", values: undefined };
 
-// Compile-time check: EscrowData has the documented shape.
 const _escrowDataShape: EscrowData = {
   amount: 500n,
   arbiter: FIXTURE_ARBITER,
@@ -472,7 +424,6 @@ const _escrowDataShape: EscrowData = {
   token: FIXTURE_TOKEN,
 };
 
-// Suppress "unused variable" warnings from TypeScript strict mode.
 void _statusPending;
 void _statusFunded;
 void _statusCompleted;
@@ -482,9 +433,6 @@ void _statusCancelled;
 void _escrowDataShape;
 
 test("EscrowStatus type has all 6 documented tags (compile-time verified)", () => {
-  // Runtime presence of the STATUS TAGS is verified through the spec events
-  // and ABI; here we simply confirm this test file compiled, meaning TypeScript
-  // accepted all the assignments above.
   assert.ok(true, "compile-time type assertions for EscrowStatus passed");
 });
 

@@ -1,0 +1,58 @@
+{
+  "contract": "vesting",
+  "functions": [
+    {
+      "name": "claim",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "claimable",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "get_status",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "create_schedule",
+      "inputs": [
+        {
+          "name": "beneficiary",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "total_amount",
+          "type": "scSpecTypeI128"
+        },
+        {
+          "name": "cliff",
+          "type": "scSpecTypeU64"
+        },
+        {
+          "name": "duration",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    }
+  ],
+  "events": []
+}

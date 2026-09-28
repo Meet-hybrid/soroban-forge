@@ -1,0 +1,300 @@
+{
+  "contract": "multi-sig-wallet",
+  "functions": [
+    {
+      "name": "get_tx",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "reject",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "scSpecTypeU64"
+        },
+        {
+          "name": "signer",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "submit",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "target",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "tx",
+          "type": "scSpecTypeBytes"
+        }
+      ]
+    },
+    {
+      "name": "balance",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "confirm",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "scSpecTypeU64"
+        },
+        {
+          "name": "signer",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "deposit",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "from",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "amount",
+          "type": "scSpecTypeI128"
+        }
+      ]
+    },
+    {
+      "name": "execute",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "is_owner",
+      "inputs": [
+        {
+          "name": "address",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "add_owner",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "new_owner",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "touch_ttl",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "get_owners",
+      "inputs": []
+    },
+    {
+      "name": "initialize",
+      "inputs": [
+        {
+          "name": "owners",
+          "type": "scSpecTypeVec"
+        },
+        {
+          "name": "threshold",
+          "type": "scSpecTypeU32"
+        }
+      ]
+    },
+    {
+      "name": "get_tx_count",
+      "inputs": []
+    },
+    {
+      "name": "remove_owner",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "existing_owner",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "get_threshold",
+      "inputs": []
+    },
+    {
+      "name": "set_threshold",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "new_threshold",
+          "type": "scSpecTypeU32"
+        }
+      ]
+    },
+    {
+      "name": "get_rejections",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "get_transactions",
+      "inputs": [
+        {
+          "name": "offset",
+          "type": "scSpecTypeU32"
+        },
+        {
+          "name": "limit",
+          "type": "scSpecTypeU32"
+        }
+      ]
+    },
+    {
+      "name": "get_window_usage",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "get_confirmations",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "submit_withdrawal",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "destination",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "amount",
+          "type": "scSpecTypeI128"
+        }
+      ]
+    },
+    {
+      "name": "get_withdrawal_limit",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "set_withdrawal_limit",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "amount",
+          "type": "scSpecTypeI128"
+        },
+        {
+          "name": "window_seconds",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "remove_withdrawal_limit",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "get_transactions_by_status",
+      "inputs": [
+        {
+          "name": "status",
+          "type": "scSpecTypeUdt"
+        },
+        {
+          "name": "offset",
+          "type": "scSpecTypeU32"
+        },
+        {
+          "name": "limit",
+          "type": "scSpecTypeU32"
+        }
+      ]
+    }
+  ],
+  "events": [
+    "TxExecuted",
+    "TxConfirmed",
+    "TxSubmitted"
+  ]
+}

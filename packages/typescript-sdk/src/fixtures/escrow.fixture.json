@@ -1,0 +1,149 @@
+{
+  "contract": "escrow",
+  "functions": [
+    {
+      "name": "cancel",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "refund",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "deposit",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "dispute",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "scSpecTypeU64"
+        },
+        {
+          "name": "claimant",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "release",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "resolve",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "scSpecTypeU64"
+        },
+        {
+          "name": "in_favor_of_seller",
+          "type": "scSpecTypeBool"
+        }
+      ]
+    },
+    {
+      "name": "touch_ttl",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "get_escrow",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "get_status",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "create_escrow",
+      "inputs": [
+        {
+          "name": "buyer",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "seller",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "arbiter",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "amount",
+          "type": "scSpecTypeI128"
+        },
+        {
+          "name": "timeout",
+          "type": "scSpecTypeU64"
+        }
+      ]
+    },
+    {
+      "name": "escrows_for_participant",
+      "inputs": [
+        {
+          "name": "participant",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "cursor",
+          "type": "scSpecTypeU32"
+        },
+        {
+          "name": "limit",
+          "type": "scSpecTypeU32"
+        }
+      ]
+    }
+  ],
+  "events": [
+    "Disputed",
+    "Refunded",
+    "Released",
+    "Resolved",
+    "Cancelled",
+    "Deposited",
+    "EscrowCreated"
+  ]
+}

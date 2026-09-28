@@ -243,38 +243,44 @@ make release
 | `make clean`   | Clean build artifacts   |
 | `make release` | Full pre-release checks |
 
-## TypeScript Clients
+## TypeScript SDK Workspace
 
-All six contracts ship generated TypeScript bindings under `packages/*-client`
-(`@soroban-forge/escrow-client` lives in `packages/typescript-sdk`, the five
-newer contracts each have their own package directory). The bindings are
-produced **offline** from each contract's WASM — no deployed contract id is
-needed — using the pinned Stellar CLI's `contract bindings typescript --wasm`.
+The repository provides a unified multi-contract TypeScript SDK in `packages/typescript-sdk` (`@soroban-forge/escrow-client`), providing typed client wrappers and network configuration for all six contracts:
+- `escrow` (`@soroban-forge/escrow-client/escrow`)
+- `subscription-payments` (`@soroban-forge/escrow-client/subscription-payments`)
+- `multi-sig-wallet` (`@soroban-forge/escrow-client/multi-sig-wallet`)
+- `marketplace-royalties` (`@soroban-forge/escrow-client/marketplace-royalties`)
+- `dao-governance` (`@soroban-forge/escrow-client/dao-governance`)
+- `vesting` (`@soroban-forge/escrow-client/vesting`)
 
-Regenerate everything with a single command:
+Machine-generated contract bindings are cleanly isolated in `packages/typescript-sdk/src/generated/`, paired with typed client wrapper modules in `packages/typescript-sdk/src/contracts/`, and protected by fixture-based drift tests in `packages/typescript-sdk/src/tests/drift.test.ts`.
+
+### Building and Testing
 
 ```bash
+cd packages/typescript-sdk
+npm install
+npm test        # Runs 55 offline unit and fixture-based drift tests
+npm run build   # Compiles all contract clients into dist/
+```
+
+### Deterministic Client & Fixture Regeneration
+
+Regenerate client bindings and ABI expectation fixtures reproducibly:
+
+```bash
+# From workspace root:
 bash scripts/generate-clients.sh
+
+# Or from packages/typescript-sdk:
+npm run regen
 ```
 
 The script:
-
-1. Builds all six contract crates for `wasm32v1-none` (`--locked --release`).
-2. For each contract, wipes its package directory and runs
-   `stellar contract bindings typescript --wasm <wasm> --output-dir <pkg> --overwrite`.
-3. Leaves the generated output ready to commit; consumers do not need the
-   Soroban toolchain to install or build the packages.
-
-Build a client package (or the Next.js demo that depends on the escrow client):
-
-```bash
-cd packages/typescript-sdk && npm install && npm run build
-cd packages/nextjs-example && npm install && npm run build
-```
-
-The mapping of contract → package directory lives in
-`scripts/generate-clients.sh`; keep it in sync with `scripts/provenance.sh`
-(the crate list is duplicated deliberately so the build stays explicit).
+1. Builds contract WASMs for `wasm32v1-none` (`--locked --release`).
+2. Emits raw TypeScript bindings into `packages/typescript-sdk/src/generated/`.
+3. Deterministically parses contract specifications to update checked-in JSON fixtures in `packages/typescript-sdk/src/fixtures/`.
+4. Rebuilds the distribution and verifies client output without manual steps.
 
 ## Contract Testing Notes
 

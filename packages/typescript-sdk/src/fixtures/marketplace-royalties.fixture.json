@@ -1,0 +1,83 @@
+{
+  "contract": "marketplace-royalties",
+  "functions": [
+    {
+      "name": "distribute",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "seller",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "amount",
+          "type": "scSpecTypeI128"
+        }
+      ]
+    },
+    {
+      "name": "get_royalty",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    },
+    {
+      "name": "set_royalty",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "recipient",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "bps",
+          "type": "scSpecTypeU32"
+        }
+      ]
+    },
+    {
+      "name": "settle_sale",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "token",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "payer",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "seller",
+          "type": "scSpecTypeAddress"
+        },
+        {
+          "name": "amount",
+          "type": "scSpecTypeI128"
+        }
+      ]
+    },
+    {
+      "name": "get_settlement_summary",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "scSpecTypeAddress"
+        }
+      ]
+    }
+  ],
+  "events": []
+}
