@@ -142,7 +142,7 @@ proptest! {
         let res = w.client().try_charge(&id);
         prop_assert!(res.is_err(), "charge on a cancelled subscription must return an error");
         let err = res.unwrap_err().unwrap();
-        prop_assert_eq!(err, ForgeError::InvalidInput, "cancelled subscription must fail with InvalidInput");
+        prop_assert_eq!(err, ForgeError::InvalidInput.into(), "cancelled subscription must fail with InvalidInput");
 
         let sub_after_failed_charge = w.client().get_subscription(&id);
         prop_assert_eq!(sub_after_failed_charge.status, SubscriptionStatus::Cancelled);
@@ -185,7 +185,7 @@ proptest! {
             if sub.status == SubscriptionStatus::PastDue {
                 let before = sub;
                 let catchup = w.client().try_charge_catchup(&id, &1);
-                prop_assert_eq!(catchup.unwrap().unwrap_err(), ForgeError::InvalidInput);
+                prop_assert_eq!(catchup.unwrap().unwrap_err(), ForgeError::InvalidInput.into());
                 prop_assert_eq!(w.client().get_subscription(&id), before);
             }
         }
@@ -211,7 +211,7 @@ proptest! {
 
         if max_periods > MAX_CATCHUP_PERIODS {
             let result = w.client().try_charge_catchup(&id, &max_periods);
-            prop_assert_eq!(result.unwrap().unwrap_err(), ForgeError::InvalidInput);
+            prop_assert_eq!(result.unwrap().unwrap_err(), ForgeError::InvalidInput.into());
             prop_assert_eq!(w.client().get_subscription(&id), before);
             prop_assert_eq!(token_client.balance(&w.subscriber), mint_amount);
             prop_assert_eq!(token_client.balance(&w.provider), 0);
