@@ -5,3 +5,4 @@ pub mod invoke;
 pub mod lint;
 pub mod new;
 pub mod test;
+pub mod verify;

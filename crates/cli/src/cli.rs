@@ -49,6 +49,22 @@ pub struct NewArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct VerifyArgs {
+    /// Path to a local WASM artifact to verify against a deterministic rebuild.
+    #[arg(long)]
+    pub wasm: Option<String>,
+    /// Expected SHA-256 of the rebuilt artifact (hex, lowercase).
+    #[arg(long)]
+    pub expected: Option<String>,
+    /// Provenance manifest to validate; defaults to `provenance-manifest.json`.
+    #[arg(long, default_value = "provenance-manifest.json")]
+    pub manifest: String,
+    /// Crate to rebuild; inferred from the WASM file name when omitted.
+    #[arg(short, long)]
+    pub package: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct InvokeArgs {
     /// Contract address or alias
     #[arg(long)]
