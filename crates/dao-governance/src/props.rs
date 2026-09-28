@@ -157,6 +157,13 @@ fn vote_sequence() -> impl Strategy<Value = std::vec::Vec<(usize, bool)>> {
     prop::collection::vec(vote_action(), 0..=16)
 }
 
+fn delegation_graph() -> impl Strategy<Value = (std::vec::Vec<usize>, std::vec::Vec<bool>)> {
+    (
+        prop::collection::vec(0usize..=6, 6),
+        prop::collection::vec(any::<bool>(), 6),
+    )
+}
+
 // -----------------------------------------------------------------------
 // P1 — Vote tally invariant
 // -----------------------------------------------------------------------
@@ -237,6 +244,68 @@ proptest! {
             voted.len() as i128,
             "total votes must equal distinct successful voters"
         );
+    }
+
+    /// Resolve random acyclic delegation chains independently and compare the
+    /// resulting voting power with the contract's stored tallies.
+    #[test]
+    fn p4_delegation_vote_power_matches_mirror_model(
+        (choices, supports) in delegation_graph(),
+    ) {
+        const N: usize = 6;
+        let world = setup_world();
+        let client = world.client();
+        let members = [
+            world.accounts.user1.clone(),
+            world.accounts.user2.clone(),
+            world.accounts.user3.clone(),
+            world.voters[0].clone(),
+            world.voters[1].clone(),
+            world.voters[2].clone(),
+        ];
+        let mut delegate_to = [None; N];
+        for i in 0..N - 1 {
+            let options = N - i;
+            let choice = choices[i] % options;
+            if choice < options - 1 {
+                let target = i + 1 + choice;
+                delegate_to[i] = Some(target);
+                client.delegate(&members[i], &members[target]);
+            }
+        }
+
+        let proposal_id = world.propose();
+        let mut expected_for = 0_i128;
+        let mut expected_against = 0_i128;
+        for root in 0..N {
+            let mut root_of = root;
+            while let Some(next) = delegate_to[root_of] {
+                root_of = next;
+            }
+            if root_of != root {
+                continue;
+            }
+            let mut weight = 0_i128;
+            for member in 0..N {
+                let mut resolved = member;
+                while let Some(next) = delegate_to[resolved] {
+                    resolved = next;
+                }
+                if resolved == root {
+                    weight += 1;
+                }
+            }
+            if supports[root] {
+                expected_for += weight;
+            } else {
+                expected_against += weight;
+            }
+            client.vote(&proposal_id, &members[root], &supports[root]);
+        }
+
+        let proposal = client.get_proposal(&proposal_id);
+        prop_assert_eq!(proposal.for_votes, expected_for);
+        prop_assert_eq!(proposal.against_votes, expected_against);
     }
 }
 

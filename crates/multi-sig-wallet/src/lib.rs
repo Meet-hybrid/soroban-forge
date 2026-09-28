@@ -277,6 +277,9 @@ use soroban_sdk::{
     Env, IntoVal, Symbol, Val, Vec,
 };
 
+/// Maximum number of ordered operations in one stored batch transaction.
+pub const MAX_BATCH_OPS: u32 = 10;
+
 /// Ledger-time constants for TTL bumps.
 ///
 /// One ledger closes roughly every 5 seconds, so 17,280 ledgers ≈ 1 day.
@@ -333,6 +336,13 @@ pub trait SorobanForgeMultiSigWallet {
         target: Address,
         fn_name: Symbol,
         args: Vec<Val>,
+    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+
+    /// Submit a bounded ordered batch as one threshold-approved transaction.
+    fn submit_batch(
+        env: Env,
+        submitter: Address,
+        operations: Vec<BatchOp>,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
     /// Record `signer`'s approval of `tx_id`.
@@ -690,6 +700,17 @@ pub enum TxKind {
     SetThreshold(u32),
     /// Typed cross-contract call.
     Call(Call),
+    /// Atomic ordered batch. Appended to preserve the existing XDR variants.
+    Batch(Vec<BatchOp>),
+}
+
+/// Operation allowed inside a batch. Owner-set changes and nested batches are deliberately excluded.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BatchOp {
+    Withdrawal(Withdrawal),
+    LimitChange(LimitChange),
+    Call(Call),
 }
 
 /// A typed cross-contract call record containing the target address,
@@ -971,6 +992,76 @@ impl MultiSigWallet {
         Ok(tx_id)
     }
 
+    /// Submit one bounded batch and reserve its aggregate withdrawal usage.
+    pub fn submit_batch(
+        env: Env,
+        submitter: Address,
+        operations: Vec<BatchOp>,
+    ) -> Result<u64, ForgeError> {
+        if !Self::is_initialized(&env) {
+            return Err(ForgeError::NotInitialized);
+        }
+        if !Self::is_owner_impl(&env, &submitter) {
+            return Err(ForgeError::Unauthorized);
+        }
+        let count = operations.len();
+        if count == 0 || count > MAX_BATCH_OPS {
+            return Err(ForgeError::InvalidInput);
+        }
+        submitter.require_auth();
+        let mut simulated_limits: Vec<(Address, Option<WithdrawalLimit>)> = Vec::new(&env);
+        for operation in operations.iter() {
+            match operation {
+                BatchOp::Withdrawal(withdrawal) => {
+                    if withdrawal.amount <= 0 {
+                        return Err(ForgeError::InvalidInput);
+                    }
+                    // Repeated admissions are checked against the same
+                    // rolling window, so the limit applies to the aggregate.
+                    let mut limit = Self::withdrawal_limit_impl(&env, &withdrawal.token);
+                    for (token, replacement) in simulated_limits.iter() {
+                        if token == withdrawal.token {
+                            limit = replacement.clone();
+                        }
+                    }
+                    Self::admit_withdrawal_with_limit(
+                        &env,
+                        &withdrawal.token,
+                        withdrawal.amount,
+                        limit,
+                    )?;
+                }
+                BatchOp::LimitChange(LimitChange::Set(limit)) => {
+                    if limit.amount <= 0 || limit.window_seconds == 0 {
+                        return Err(ForgeError::InvalidInput);
+                    }
+                    simulated_limits.push_back((limit.token.clone(), Some(limit)));
+                }
+                BatchOp::LimitChange(LimitChange::Remove(token)) => {
+                    simulated_limits.push_back((token, None));
+                }
+                BatchOp::Call(_) => {}
+            }
+        }
+        let tx_id = Self::next_id(&env)?;
+        let wallet_tx = WalletTx {
+            tx_id,
+            submitter,
+            target: env.current_contract_address(),
+            payload: Bytes::new(&env),
+            confirmations: Vec::new(&env),
+            rejections: Vec::new(&env),
+            status: TxStatus::Pending,
+            kind: TxKind::Batch(operations),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Tx(tx_id), &wallet_tx);
+        bump_entry(&env, &DataKey::Tx(tx_id));
+        events::submitted(&env, &wallet_tx);
+        Ok(tx_id)
+    }
+
     /// Record an owner's approval of a pending transaction.
     ///
     /// An owner may confirm only once, and only while the transaction is
@@ -1145,6 +1236,37 @@ impl MultiSigWallet {
                 );
                 if let Err(_) | Ok(Err(_)) = result {
                     return Err(ForgeError::ContractInvocationFailed);
+                }
+            }
+            TxKind::Batch(operations) => {
+                for (index, operation) in operations.iter().enumerate() {
+                    match operation {
+                        BatchOp::Withdrawal(withdrawal) => {
+                            let balance = Self::balance_impl(&env, &withdrawal.token);
+                            if balance < withdrawal.amount {
+                                return Err(ForgeError::InsufficientFunds);
+                            }
+                            transfer_from_contract(
+                                &env,
+                                &withdrawal.token,
+                                &withdrawal.destination,
+                                withdrawal.amount,
+                            )?;
+                            Self::sub_balance(&env, &withdrawal.token, withdrawal.amount)?;
+                        }
+                        BatchOp::LimitChange(change) => Self::apply_limit_change(&env, &change),
+                        BatchOp::Call(call) => {
+                            let result = env.try_invoke_contract::<(), ForgeError>(
+                                &call.target,
+                                &call.fn_name,
+                                call.args.clone(),
+                            );
+                            if let Err(_) | Ok(Err(_)) = result {
+                                return Err(ForgeError::ContractInvocationFailed);
+                            }
+                        }
+                    }
+                    events::batch_step_executed(&env, tx_id, index as u32);
                 }
             }
         }
@@ -1656,7 +1778,23 @@ impl MultiSigWallet {
     /// checked and nothing is recorded: `submit_withdrawal` behaves exactly
     /// as it did before limits existed.
     fn admit_withdrawal(env: &Env, token: &Address, amount: i128) -> Result<(), ForgeError> {
-        let Some(limit) = Self::withdrawal_limit_impl(env, token) else {
+        Self::admit_withdrawal_with_limit(
+            env,
+            token,
+            amount,
+            Self::withdrawal_limit_impl(env, token),
+        )
+    }
+
+    /// Admit against a simulated policy so a batch can change a limit and
+    /// then use it in the same ordered transaction.
+    fn admit_withdrawal_with_limit(
+        env: &Env,
+        token: &Address,
+        amount: i128,
+        limit: Option<WithdrawalLimit>,
+    ) -> Result<(), ForgeError> {
+        let Some(limit) = limit else {
             return Ok(());
         };
         let now = env.ledger().timestamp();
@@ -2041,6 +2179,13 @@ mod events {
         pub threshold: u32,
     }
 
+    #[contractevent]
+    pub struct BatchStepExecuted {
+        #[topic]
+        pub tx_id: u64,
+        pub step_index: u32,
+    }
+
     pub fn submitted(env: &Env, tx: &WalletTx) {
         TxSubmitted {
             tx_id: tx.tx_id,
@@ -2066,6 +2211,10 @@ mod events {
             threshold: env.storage().instance().get(&DataKey::Threshold).unwrap(),
         }
         .publish(env);
+    }
+
+    pub fn batch_step_executed(env: &Env, tx_id: u64, step_index: u32) {
+        BatchStepExecuted { tx_id, step_index }.publish(env);
     }
 }
 
@@ -4247,7 +4396,64 @@ mod tests {
 mod call_tests {
     use super::*;
     use soroban_forge_test_utils::{new_env, TestAccounts};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{symbol_short, vec, Val};
+
+    const DEPOSIT: i128 = 10_000;
+
+    #[contract]
+    struct OrderedTarget;
+
+    #[contracttype]
+    enum OrderedTargetKey {
+        Value,
+    }
+
+    #[contractimpl]
+    impl OrderedTarget {
+        pub fn record(env: Env, value: u32) {
+            let current: u32 = env
+                .storage()
+                .instance()
+                .get(&OrderedTargetKey::Value)
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&OrderedTargetKey::Value, &(current * 10 + value));
+        }
+
+        pub fn value(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&OrderedTargetKey::Value)
+                .unwrap_or(0)
+        }
+    }
+
+    macro_rules! custody {
+        () => {{
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register(MultiSigWallet, ());
+            let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+            let accounts = TestAccounts::generate(&env);
+            let owners = vec![
+                &env,
+                accounts.user1.clone(),
+                accounts.user2.clone(),
+                accounts.user3.clone(),
+            ];
+            client.initialize(&owners, &2_u32);
+            let admin = Address::generate(&env);
+            let sac = env.register_stellar_asset_contract_v2(admin);
+            let token = sac.address();
+            let token_admin = StellarAssetClient::new(&env, &token);
+            let token_client = TokenClient::new(&env, &token);
+            token_admin.mint(&accounts.user1, &DEPOSIT);
+            (env, client, accounts, token, token_client)
+        }};
+    }
 
     #[test]
     fn submit_call_basic() {
@@ -4311,5 +4517,135 @@ mod call_tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::Unauthorized);
+    }
+
+    #[test]
+    fn batch_rejects_size_over_bound_and_aggregate_withdrawal_limit() {
+        let (env, client, accounts, token, _token_client) = custody!();
+        let mut oversized = Vec::new(&env);
+        for _ in 0..=MAX_BATCH_OPS {
+            oversized.push_back(BatchOp::Call(Call {
+                target: accounts.user3.clone(),
+                fn_name: Symbol::new(&env, "execute"),
+                args: Vec::new(&env),
+            }));
+        }
+        assert_eq!(
+            client
+                .try_submit_batch(&accounts.user1, &oversized)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        let limit_tx = client.set_withdrawal_limit(&accounts.user1, &token, &100, &1_000);
+        client.confirm(&limit_tx, &accounts.user1);
+        client.confirm(&limit_tx, &accounts.user2);
+        client.execute(&limit_tx);
+        client.deposit(&token, &accounts.user1, &DEPOSIT);
+        let operations = soroban_sdk::vec![
+            &env,
+            BatchOp::Withdrawal(Withdrawal {
+                token: token.clone(),
+                destination: accounts.user2.clone(),
+                amount: 60,
+            }),
+            BatchOp::Withdrawal(Withdrawal {
+                token: token.clone(),
+                destination: accounts.user3.clone(),
+                amount: 60,
+            }),
+        ];
+        assert_eq!(
+            client
+                .try_submit_batch(&accounts.user1, &operations)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::WithdrawalLimitExceeded
+        );
+    }
+
+    #[test]
+    fn batch_limit_change_applies_to_later_withdrawals_during_submission() {
+        let (env, client, accounts, token, _token_client) = custody!();
+        let operations = soroban_sdk::vec![
+            &env,
+            BatchOp::LimitChange(LimitChange::Set(WithdrawalLimit {
+                token: token.clone(),
+                amount: 100,
+                window_seconds: 1_000,
+            })),
+            BatchOp::Withdrawal(Withdrawal {
+                token,
+                destination: accounts.user2.clone(),
+                amount: 101,
+            }),
+        ];
+        assert_eq!(
+            client
+                .try_submit_batch(&accounts.user1, &operations)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::WithdrawalLimitExceeded
+        );
+        assert_eq!(client.get_tx_count(), 0);
+    }
+
+    #[test]
+    fn batch_late_call_failure_rolls_back_earlier_withdrawal() {
+        let (env, client, accounts, token, token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &DEPOSIT);
+        let target = env.register(crate::tests::BlockingTarget, ());
+        let operations = soroban_sdk::vec![
+            &env,
+            BatchOp::Withdrawal(Withdrawal {
+                token: token.clone(),
+                destination: accounts.user2.clone(),
+                amount: 500,
+            }),
+            BatchOp::Call(Call {
+                target,
+                fn_name: Symbol::new(&env, "execute"),
+                args: Vec::new(&env),
+            }),
+        ];
+        let tx_id = client.submit_batch(&accounts.user1, &operations);
+        client.confirm(&tx_id, &accounts.user1);
+        client.confirm(&tx_id, &accounts.user2);
+        assert_eq!(
+            client.try_execute(&tx_id).unwrap_err().unwrap(),
+            ForgeError::ContractInvocationFailed
+        );
+        assert_eq!(client.balance(&token), DEPOSIT);
+        assert_eq!(token_client.balance(&accounts.user2), 0);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+    }
+
+    #[test]
+    fn batch_executes_calls_in_order_and_records_one_transaction() {
+        let (env, client, accounts, _token, _token_client) = custody!();
+        let target = env.register(OrderedTarget, ());
+        let operations = soroban_sdk::vec![
+            &env,
+            BatchOp::Call(Call {
+                target: target.clone(),
+                fn_name: Symbol::new(&env, "record"),
+                args: soroban_sdk::vec![&env, Val::from_u32(1).into()],
+            }),
+            BatchOp::Call(Call {
+                target: target.clone(),
+                fn_name: Symbol::new(&env, "record"),
+                args: soroban_sdk::vec![&env, Val::from_u32(2).into()],
+            }),
+        ];
+        let before = client.get_tx_count();
+        let tx_id = client.submit_batch(&accounts.user1, &operations);
+        assert_eq!(client.get_tx_count(), before + 1);
+        assert!(matches!(client.get_tx(&tx_id).kind, TxKind::Batch(_)));
+        client.confirm(&tx_id, &accounts.user1);
+        client.confirm(&tx_id, &accounts.user2);
+        client.execute(&tx_id);
+        assert_eq!(OrderedTargetClient::new(&env, &target).value(), 12);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
     }
 }

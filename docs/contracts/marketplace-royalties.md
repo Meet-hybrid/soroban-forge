@@ -121,3 +121,11 @@ The contract emits typed on-chain lifecycle events for indexers and off-chain mo
 - `RoyaltyConfigured` (topic: `collection: Address`) — emitted when a royalty configuration is registered or updated via `set_royalty`. Contains `recipient` and `bps`.
 - `SaleSettled` (topic: `collection: Address`) — emitted on sale settlement via `settle_sale` or `settle_sales`. Contains `token`, `payer`, `seller`, `royalty_recipient`, `gross_amount`, `seller_net`, and `royalty_share`.
 
+## Per-Sale Split Override
+
+`settle_sale_with_split` accepts an optional `SplitOverride { recipient, bps }`.
+When present, it applies to this sale only and does not change the collection's
+stored configuration. Rates from 0 through 10,000 basis points are valid;
+larger rates fail before any transfer. The existing split helper, summary
+accounting, and `SaleSettled` event are shared with `settle_sale`. Passing
+`None` preserves existing configured behavior.

@@ -125,6 +125,17 @@ pub trait SorobanForgeMarketplaceRoyalties {
         amount: i128,
     ) -> Result<Settlement, soroban_forge_shared_utils::ForgeError>;
 
+    /// Settle one sale using an optional per-sale override without changing the stored collection policy.
+    fn settle_sale_with_split(
+        env: Env,
+        collection: Address,
+        token: Address,
+        payer: Address,
+        seller: Address,
+        amount: i128,
+        split_override: Option<SplitOverride>,
+    ) -> Result<Settlement, soroban_forge_shared_utils::ForgeError>;
+
     /// Settle up to [`MAX_SETTLE_SALES`] sales of `collection` in a single
     /// invocation against one payer authorization.
     ///
@@ -209,6 +220,14 @@ pub struct Settlement {
     pub royalty_share: i128,
     /// Amount transferred to the seller.
     pub seller_net: i128,
+}
+
+/// Per-sale royalty recipient and basis-point rate. Rates above 10,000 are invalid.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SplitOverride {
+    pub recipient: Address,
+    pub bps: u32,
 }
 
 /// Cumulative settlement totals for one collection.
@@ -382,54 +401,28 @@ impl MarketplaceRoyalties {
         seller: Address,
         amount: i128,
     ) -> Result<Settlement, ForgeError> {
-        let royalty: Royalty = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Royalty(collection.clone()))
-            .ok_or(ForgeError::NotFound)?;
-        if amount <= 0 {
-            return Err(ForgeError::InvalidInput);
-        }
-        collection.require_auth();
-        payer.require_auth();
+        settle_sale_impl(&env, collection, token, payer, seller, amount, None)
+    }
 
-        // Every fallible computation runs before the first transfer, so an
-        // arithmetic failure can never strand funds mid-settlement.
-        let (royalty_share, seller_net) = split(amount, effective_bps(&royalty))?;
-        let summary = next_summary(&env, &collection, 1, amount, royalty_share)?;
-
-        // Transfer-before-state (escrow pattern): the seller is paid first
-        // and the royalty recipient last, so the protected party is only
-        // ever paid when everything before it already succeeded.
-        if seller_net > 0 {
-            transfer(&env, &token, &payer, &seller, seller_net)?;
-        }
-        if royalty_share > 0 {
-            transfer(&env, &token, &payer, &royalty.recipient, royalty_share)?;
-        }
-
-        // Both transfers succeeded; only now commit settlement state.
-        let summary_key = DataKey::Summary(collection.clone());
-        let royalty_key = DataKey::Royalty(collection.clone());
-        env.storage().persistent().set(&summary_key, &summary);
-        bump_entry(&env, &royalty_key);
-        bump_entry(&env, &summary_key);
-        events::sale_settled(
+    /// Per-sale split counterpart to `settle_sale`; it leaves global royalty configuration untouched.
+    pub fn settle_sale_with_split(
+        env: Env,
+        collection: Address,
+        token: Address,
+        payer: Address,
+        seller: Address,
+        amount: i128,
+        split_override: Option<SplitOverride>,
+    ) -> Result<Settlement, ForgeError> {
+        settle_sale_impl(
             &env,
-            &collection,
-            &token,
-            &payer,
-            &seller,
-            &royalty.recipient,
+            collection,
+            token,
+            payer,
+            seller,
             amount,
-            seller_net,
-            royalty_share,
-        );
-
-        Ok(Settlement {
-            royalty_share,
-            seller_net,
-        })
+            split_override,
+        )
     }
 
     /// Settle a batch of sales of `collection` atomically in `token`.
@@ -573,6 +566,67 @@ impl MarketplaceRoyalties {
 
 /// The rate actually applied to sales under `royalty`: zero once the
 /// configuration is disabled, so disabled collections settle in full.
+fn settle_sale_impl(
+    env: &Env,
+    collection: Address,
+    token: Address,
+    payer: Address,
+    seller: Address,
+    amount: i128,
+    split_override: Option<SplitOverride>,
+) -> Result<Settlement, ForgeError> {
+    let royalty: Royalty = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Royalty(collection.clone()))
+        .ok_or(ForgeError::NotFound)?;
+    if amount <= 0 {
+        return Err(ForgeError::InvalidInput);
+    }
+    if split_override
+        .as_ref()
+        .is_some_and(|split| split.bps > 10_000)
+    {
+        return Err(ForgeError::InvalidInput);
+    }
+    collection.require_auth();
+    payer.require_auth();
+
+    let (recipient, bps) = match split_override {
+        Some(override_) => (override_.recipient, override_.bps),
+        None => (royalty.recipient.clone(), effective_bps(&royalty)),
+    };
+    let (royalty_share, seller_net) = split(amount, bps)?;
+    let summary = next_summary(env, &collection, 1, amount, royalty_share)?;
+    if seller_net > 0 {
+        transfer(env, &token, &payer, &seller, seller_net)?;
+    }
+    if royalty_share > 0 {
+        transfer(env, &token, &payer, &recipient, royalty_share)?;
+    }
+
+    let summary_key = DataKey::Summary(collection.clone());
+    let royalty_key = DataKey::Royalty(collection.clone());
+    env.storage().persistent().set(&summary_key, &summary);
+    bump_entry(env, &royalty_key);
+    bump_entry(env, &summary_key);
+    events::sale_settled(
+        env,
+        &collection,
+        &token,
+        &payer,
+        &seller,
+        &recipient,
+        amount,
+        seller_net,
+        royalty_share,
+    );
+    Ok(Settlement {
+        royalty_share,
+        seller_net,
+    })
+}
+
 fn effective_bps(royalty: &Royalty) -> u32 {
     match royalty.status {
         RoyaltyStatus::Active => royalty.bps,
@@ -1778,5 +1832,64 @@ mod tests {
 
         let events = env.events().all();
         assert!(!events.events().is_empty());
+    }
+
+    #[test]
+    fn settle_sale_override_uses_per_call_split_and_preserves_summary() {
+        let (_env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let override_ = SplitOverride {
+            recipient: accounts.validator.clone(),
+            bps: 1_000,
+        };
+        let settlement = client.settle_sale_with_split(
+            &accounts.arbiter,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+            &Some(override_),
+        );
+        assert_eq!(settlement.seller_net, 900);
+        assert_eq!(settlement.royalty_share, 100);
+        assert_eq!(tc.balance(&accounts.user3), 900);
+        assert_eq!(tc.balance(&accounts.validator), 100);
+        assert_eq!(
+            client.get_royalty(&accounts.arbiter).recipient,
+            accounts.user2
+        );
+        assert_eq!(
+            client
+                .get_settlement_summary(&accounts.arbiter)
+                .royalties_paid,
+            100
+        );
+    }
+
+    #[test]
+    fn settle_sale_override_rejects_rate_over_conservation_cap() {
+        let (_env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let err = client
+            .try_settle_sale_with_split(
+                &accounts.arbiter,
+                &token,
+                &accounts.user1,
+                &accounts.user3,
+                &1_000_i128,
+                &Some(SplitOverride {
+                    recipient: accounts.validator.clone(),
+                    bps: 10_001,
+                }),
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(tc.balance(&accounts.user1), 1_000);
+        assert_eq!(
+            client
+                .try_get_settlement_summary(&accounts.arbiter)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
     }
 }

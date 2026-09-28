@@ -117,3 +117,15 @@ A permissionless public keeper entrypoint `touch_tx_ttl(tx_id)` allows
 anyone to bump a transaction's persistent TTL without modifying its state;
 an unknown `tx_id` returns `ForgeError::NotFound`. A separate
 `touch_ttl(token)` keeper extends the persistent balance entries' TTL.
+
+## Atomic Batch Transactions
+
+`submit_batch` stores one pending `WalletTx` with 1–10 ordered `BatchOp`s:
+typed withdrawals, typed calls, or withdrawal-limit changes. The existing
+owner and threshold rules apply. Nested batches and owner or threshold
+mutations are excluded. The batch variant is appended to `TxKind` to preserve
+the existing XDR variant order. Submission checks and reserves withdrawal
+limits across the aggregate. Execution runs steps in order; success emits a
+`BatchStepExecuted` event for each step plus the usual lifecycle events. A
+failure returns an error and Soroban frame rollback removes earlier effects
+and events. Transaction views render all operations in the single record.

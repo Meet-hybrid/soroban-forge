@@ -43,7 +43,7 @@
 //! nested sub-invocations appear in any tree (unlike the DAO's bond pull).
 
 use crate::{
-    LimitChange, MultiSigWallet, SorobanForgeMultiSigWalletClient, TxKind, TxStatus,
+    BatchOp, Call, LimitChange, MultiSigWallet, SorobanForgeMultiSigWalletClient, TxKind, TxStatus,
     WithdrawalLimit,
 };
 use soroban_forge_test_utils::{MockTarget, TestAccounts};
@@ -1071,4 +1071,22 @@ fn blank_envelope_aborts_remove_withdrawal_limit_without_writing_tx() {
     assert_auth_abort!(client.try_remove_withdrawal_limit(&accounts.user1, &token));
     assert_eq!(client.get_tx_count(), count_before);
     assert_eq!(client.get_withdrawal_limit(&token), active_limit);
+}
+
+#[test]
+fn batch_submission_requires_owner_authorization() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let operations = soroban_sdk::vec![
+        &env,
+        BatchOp::Call(Call {
+            target: accounts.deployer.clone(),
+            fn_name: Symbol::new(&env, "execute"),
+            args: soroban_sdk::Vec::new(&env),
+        }),
+    ];
+    let count_before = client.get_tx_count();
+    env.set_auths(&[]);
+    assert_auth_abort!(client.try_submit_batch(&accounts.user1, &operations));
+    assert_eq!(client.get_tx_count(), count_before);
 }

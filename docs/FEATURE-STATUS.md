@@ -91,6 +91,7 @@ treasury at a terminal transition.
 | `get_withdrawal_limit` / `get_window_usage` | ✅ Implemented | Read-only; `None`/`0` when no limit is configured |
 | `add_owner` / `remove_owner` / `set_threshold` | ✅ Implemented | Owner-set and threshold governance via the same typed-tx machinery: `TxKind::AddOwner` / `RemoveOwner` / `SetThreshold` must cross the **current** threshold before `execute` applies them; submission and execution both re-validate the resulting state; removed-owner confirmations are scrubbed from still-pending txs; `remove_owner` guards the final owner and `set_threshold` requires `1 <= t <= owners.len()` |
 | `get_owners` / `is_owner` / `get_confirmations` / `get_rejections` / `get_tx_count` / `get_transactions` / `get_transactions_by_status` | ✅ Implemented | Read-only views |
+| `submit_batch` / `TxKind::Batch` | ✅ Implemented | One threshold-approved record, 1–10 ordered withdrawal/call/limit-change operations, aggregate limit reservation, rollback on failure, per-step success events |
 
 ## DAO Governance (`crates/dao-governance`)
 
@@ -99,14 +100,15 @@ treasury at a terminal transition.
 | `configure_bond` | ✅ Implemented | One-time permissionless config (token, amount, treasury); first caller wins; `propose` is rejected with `NotInitialized` while unconfigured |
 | `propose` | ✅ Implemented | Stores the target contract, opaque action payload, and voting deadline; **real token transfer** proposer → contract for the bond, before any state write |
 | `vote` | ✅ Implemented | One-vote-per-voter enforced |
+| `delegate` / `undelegate` / `get_delegate` | ✅ Implemented | Authorized delegation for future proposals; self-delegation/cycles rejected; proposal-creation snapshots determine weighted vote power |
 | `execute` | ✅ Implemented | Permissionless majority finalisation, then `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Succeeded`; on terminal transitions the bond is **refunded** to the proposer (`Executed`) or **forfeited** to the treasury (`Defeated`) in the same frame |
 | `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; **real token transfer** refund of the bond |
 | `get_proposal` / `get_proposal_count` / `get_proposals` / `has_voted` | ✅ Implemented | Read-only views; pagination with bounds clamping |
 | `get_bond_config` | ✅ Implemented | Read-only; `NotInitialized` when no bond is configured |
 | `touch_ttl` | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a proposal; `NotFound` for unknown ids |
-| Events | ✅ Implemented | `Proposed`, `VoteCast`, `Finalised`, `BondPosted`, `BondReleased` (`proposal_id` as topic) |
+| Events | ✅ Implemented | `Proposed`, `VoteCast`, `VotePowerCast`, `Delegated`, `Undelegated`, `Finalised`, `BondPosted`, `BondReleased` |
 | Storage | ✅ Persistent + TTL | `DataKey::Proposal` records in persistent storage with 30-day TTL maintenance; count, bond config, custody total, and vote markers in instance storage |
-| Tests | ✅ 74 | Bond custody lifecycle (post/refund/forfeit/conservation), arithmetic boundary tests, rollback-on-failure ordering, cross-contract dispatch + retry, introspection/pagination views, plus a **negative-auth suite** (`authz.rs`): wrong-signer and args-replay rejection, the nested token authorization frame for the bond pull, `env.auths()` authorization-tree assertions |
+| Tests | ✅ | Bond custody lifecycle, delegation snapshots/cycles, arithmetic boundaries, rollback ordering, cross-contract dispatch + retry, views, and negative authorization coverage |
 | Weighted voting | ❌ Not implemented | Follow-up |
 
 ## Subscription Payments (`crates/subscription-payments`)
@@ -117,6 +119,7 @@ treasury at a terminal transition.
 | `subscribe_on_behalf_of` | ✅ Implemented | Provider-initiated; requires a **subscriber opt-in** (`ProviderOptIn`) checked before provider auth; shares the same id counter and record shape as `subscribe` |
 | `authorize_provider` / `revoke_provider` / `is_provider_authorized` | ✅ Implemented | Explicit per-relationship opt-in; subscriber-authorized; idempotent; read-only view has no auth |
 | `charge` | ✅ Implemented | Provider-authorized; bills when a full period has elapsed via a **real SEP-41 transfer** subscriber → provider; on failure increments `failed_attempts` → `PastDue`, and `Cancelled` after `MAX_RETRIES` (3) |
+| `set_renewal_policy` / `renew` / `get_renewal_policy` | ✅ Implemented | Subscriber-consented policy; permissionless single-period renewal within a seven-day window; zero maximum means unlimited; separate policy record preserves `Subscription` XDR shape |
 | `pause` / `resume` | ✅ Implemented | Subscriber-authorized; `resume` advances the next due date by the elapsed paused duration |
 | `cancel` | ✅ Implemented | Subscriber-authorized from `Active` / `Paused` / `PastDue`; rejects already-`Cancelled` |
 | `get_subscription` / `get_subscription_count` / `subscriptions_for_subscriber` / `subscriptions_for_provider` | ✅ Implemented | Read-only views; paged by `offset`/`limit` with `limit == 0` → `InvalidInput`; empty index yields an empty page, not an error |
@@ -129,6 +132,7 @@ treasury at a terminal transition.
 | `set_royalty` | ✅ Implemented | Basis-point caps validated |
 | `distribute` | ✅ Implemented | **Real SEP-41 royalty payout**: `distribute(collection, token, payer, seller, amount)` transfers `amount * bps / 10_000` from the payer to the configured recipient and returns the seller's net; a `Disabled`/zero-bps config transfers nothing; standalone settlement for sales handled outside `settle_sale`, the seller's net is not transferred here |
 | `settle_sale` | ✅ Implemented | **Real token transfers** payer → seller, then payer → royalty recipient; transfer-before-state, totals committed last |
+| `settle_sale_with_split` | ✅ Implemented | Optional validated per-sale recipient/rate override; additive API; shares split math, summary, and event path with `settle_sale` |
 | `settle_sales` | ✅ Implemented | **Atomic batch settlement**: up to 20 sales per call against one collection + one payer authorization; every validation (cap, amounts, aggregate split math) before the first transfer, per-sale seller-then-recipient order, aggregate summary committed exactly once; any failure rolls the whole batch back |
 | `get_royalty` | ✅ Implemented | Read-only |
 | `get_settlement_summary` | ✅ Implemented | Read-only; cumulative sales, volume, and royalties per collection |

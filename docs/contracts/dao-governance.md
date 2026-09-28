@@ -245,6 +245,18 @@ address to separate the DAO's records from the token's.
 
 Proposal records (`DataKey::Proposal(u64)`) are stored in persistent storage. `DataKey::Count`, `DataKey::Bond`, `DataKey::BondHeld`, and `DataKey::Vote` entries remain in instance storage.
 
+## Vote Delegation
+
+`delegate(to)` and `undelegate()` require the delegator's authorization and
+apply to proposals created after the change. Self-delegation and cycles are
+rejected. Proposal creation resolves active delegation chains and stores an
+immutable per-proposal snapshot, so later changes cannot change that
+proposal's voting power. When a delegate votes, the vote consumes its own
+mark and all unspent marks in that snapshot. `VoteCast` remains unchanged;
+the additive `VotePowerCast` event reports the counted weight. The delegation
+graph is bounded to `MAX_DELEGATION_MEMBERS = 100`, and snapshots use the
+proposal's persistent TTL horizon.
+
 `propose`, `vote`, `execute`, and `cancel_proposal` extend proposal persistent storage TTL on every write to a 30-day horizon (`30 * DAY_IN_LEDGERS = 518,400` ledgers).
 
 A permissionless public keeper entrypoint `touch_ttl(proposal_id)` allows anyone to bump a proposal's persistent TTL without modifying its state. If the proposal ID does not exist, `touch_ttl` returns `ForgeError::NotFound`.

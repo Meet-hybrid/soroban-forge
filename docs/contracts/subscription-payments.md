@@ -66,6 +66,8 @@ of `0` fails with `ForgeError::InvalidInput`.
 - `Count` — monotonic subscription id counter.
 - `SubscriberSubscriptions(address)` — subscriber id index.
 - `ProviderSubscriptions(address)` — provider id index.
+- `RenewalPolicy(id)` — separate instance-storage record; the `Subscription`
+  wire shape remains unchanged.
 
 ## Payment Semantics
 
@@ -81,4 +83,26 @@ The contract emits typed on-chain lifecycle events for indexers and off-chain mo
 - `Subscribed` (topic: `subscription_id: u64`) — emitted when a subscription is created via `subscribe`. Contains `subscriber`, `provider`, `token`, `amount`, and `period`.
 - `Charged` (topic: `subscription_id: u64`) — emitted on successful billing via `charge` (one event) or `charge_catchup` (one event per settled period). Contains `amount`, `last_charged`, and `next_charge_at`.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
+- `RenewalPolicyChanged` reports subscriber policy changes; `max_renewals = 0`
+  means unlimited.
+- `Renewed` reports successful permissionless renewals and the completed
+  renewal count; the ordinary `Charged` event is also emitted.
 
+## Automatic Renewal
+
+The subscriber enables or disables policy with `set_renewal_policy`.
+`renew(subscription_id)` settles one elapsed period while the subscription
+is active, policy is enabled, and the call lands between the due timestamp
+and seven days after it (inclusive). A configured maximum is enforced; zero
+means unlimited. A failed transfer returns `TokenTransferFailed` and leaves
+the subscription and renewal counter unchanged. `get_renewal_policy` reports
+the next due timestamp, current eligibility, and allowance expiry ledger.
+Enabling policy approves this contract as a SEP-41 spender; finite renewal
+counts are enforced independently by each subscription policy. Disabling a
+policy closes that subscription's renewal gate, and the shared allowance is
+revoked when no other active policy for the same subscriber and token remains.
+The token's temporary allowance lives through its
+maximum TTL, so the subscriber must re-enable policy after that ledger window
+to continue automatic renewals. Policy uses a parallel key so the serialized
+`Subscription` record does not change. Manual charges and renewals advance the
+same `last_charged` value, preventing double settlement.

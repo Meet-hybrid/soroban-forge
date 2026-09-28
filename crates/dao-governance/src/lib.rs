@@ -107,12 +107,30 @@ extern crate std;
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Bytes,
-    Env, IntoVal, Symbol, Val,
+    Env, IntoVal, Symbol, Val, Vec,
 };
+
+/// Bound the active delegation graph and per-proposal snapshot work.
+pub const MAX_DELEGATION_MEMBERS: u32 = 100;
 
 /// Public interface for the Soroban Forge DAO governance contract.
 #[contractclient(name = "SorobanForgeDaoGovernanceClient")]
 pub trait SorobanForgeDaoGovernance {
+    /// Delegate the caller's vote to `to` for proposals created from now on.
+    fn delegate(
+        env: Env,
+        delegator: Address,
+        to: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Remove the caller's vote delegation for future proposals.
+    fn undelegate(
+        env: Env,
+        delegator: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the current delegate for `of`, if any.
+    fn get_delegate(env: Env, of: Address) -> Option<Address>;
     /// Configure the proposal bond for the first and only time.
     ///
     /// Records the SEP-41 `token` every `propose` must post, the `amount` of
@@ -365,6 +383,12 @@ enum DataKey {
     /// or forfeit; must always equal this contract's balance of the
     /// configured token while proposals are live.
     BondHeld,
+    /// Current delegate relation for an address.
+    Delegate(Address),
+    /// Addresses that have ever set a delegation, bounded by MAX_DELEGATION_MEMBERS.
+    DelegationMembers,
+    /// Immutable resolved delegate for one member when a proposal was created.
+    DelegationSnapshot(u64, Address),
 }
 
 /// The deployable DAO governance contract.
@@ -373,6 +397,65 @@ pub struct DaoGovernance;
 
 #[contractimpl]
 impl DaoGovernance {
+    /// Change the caller's delegation for proposals created in the future.
+    pub fn delegate(env: Env, delegator: Address, to: Address) -> Result<(), ForgeError> {
+        delegator.require_auth();
+        if delegator == to {
+            return Err(ForgeError::InvalidInput);
+        }
+        let key = DataKey::Delegate(delegator.clone());
+        let mut members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DelegationMembers)
+            .unwrap_or(Vec::new(&env));
+        if !members.contains(&delegator) && members.len() >= MAX_DELEGATION_MEMBERS {
+            return Err(ForgeError::InvalidInput);
+        }
+        let mut cursor = to.clone();
+        for _ in 0..=MAX_DELEGATION_MEMBERS {
+            if cursor == delegator {
+                return Err(ForgeError::InvalidInput);
+            }
+            let Some(next) = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&DataKey::Delegate(cursor))
+            else {
+                break;
+            };
+            cursor = next;
+        }
+        if !members.contains(&delegator) {
+            members.push_back(delegator.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::DelegationMembers, &members);
+        }
+        env.storage().instance().set(&key, &to);
+        events::delegated(&env, &delegator, &to);
+        Ok(())
+    }
+
+    /// Remove the caller's delegation for proposals created in the future.
+    pub fn undelegate(env: Env, delegator: Address) -> Result<(), ForgeError> {
+        delegator.require_auth();
+        let key = DataKey::Delegate(delegator.clone());
+        let to: Address = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(ForgeError::InvalidInput)?;
+        env.storage().instance().remove(&key);
+        events::undelegated(&env, &delegator, &to);
+        Ok(())
+    }
+
+    /// Read the current delegate relation.
+    pub fn get_delegate(env: Env, of: Address) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Delegate(of))
+    }
+
     /// Configure the proposal bond for the first and only time.
     ///
     /// Permissionless one-shot (see [`SorobanForgeDaoGovernance::configure_bond`]):
@@ -456,6 +539,7 @@ impl DaoGovernance {
         // balance or the token misbehaves, the invocation reverts here with
         // storage untouched and the counter unmoved.
         transfer_to_contract(&env, &bond.token, &proposer, bond.amount)?;
+        Self::snapshot_delegations(&env, proposal_id)?;
 
         let proposal = Proposal {
             proposal_id,
@@ -503,23 +587,68 @@ impl DaoGovernance {
         if env.storage().instance().has(&vote_key) {
             return Err(ForgeError::InvalidInput);
         }
-
+        let voter_snapshot = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::DelegationSnapshot(proposal_id, voter.clone()));
+        if voter_snapshot
+            .as_ref()
+            .is_some_and(|delegate| delegate != &voter)
+        {
+            return Err(ForgeError::InvalidInput);
+        }
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DelegationMembers)
+            .unwrap_or(Vec::new(&env));
+        let mut voters = Vec::new(&env);
+        voters.push_back(voter.clone());
+        for member in members.iter() {
+            if member == voter {
+                continue;
+            }
+            let snapshot = env
+                .storage()
+                .persistent()
+                .get::<_, Address>(&DataKey::DelegationSnapshot(proposal_id, member.clone()));
+            if snapshot.is_some() {
+                bump_entry(
+                    &env,
+                    &DataKey::DelegationSnapshot(proposal_id, member.clone()),
+                );
+            }
+            if snapshot.as_ref() == Some(&voter)
+                && !env
+                    .storage()
+                    .instance()
+                    .has(&DataKey::Vote(proposal_id, member.clone()))
+            {
+                voters.push_back(member);
+            }
+        }
+        let weight = i128::from(voters.len());
         if support {
             proposal.for_votes = proposal
                 .for_votes
-                .checked_add(1)
+                .checked_add(weight)
                 .ok_or(ForgeError::ArithmeticOverflow)?;
         } else {
             proposal.against_votes = proposal
                 .against_votes
-                .checked_add(1)
+                .checked_add(weight)
                 .ok_or(ForgeError::ArithmeticOverflow)?;
         }
         let key = DataKey::Proposal(proposal_id);
-        env.storage().instance().set(&vote_key, &true);
+        for member in voters.iter() {
+            env.storage()
+                .instance()
+                .set(&DataKey::Vote(proposal_id, member), &true);
+        }
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
         events::vote_cast(&env, proposal_id, &voter, support);
+        events::vote_power_cast(&env, proposal_id, &voter, weight);
         Ok(())
     }
 
@@ -799,6 +928,38 @@ impl DaoGovernance {
             .ok_or(ForgeError::NotFound)
     }
 
+    /// Freeze resolved delegation destinations for this proposal at creation time.
+    fn snapshot_delegations(env: &Env, proposal_id: u64) -> Result<(), ForgeError> {
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DelegationMembers)
+            .unwrap_or(Vec::new(env));
+        for member in members.iter() {
+            let Some(mut cursor) = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&DataKey::Delegate(member.clone()))
+            else {
+                continue;
+            };
+            for _ in 0..MAX_DELEGATION_MEMBERS {
+                let Some(next) = env
+                    .storage()
+                    .instance()
+                    .get::<_, Address>(&DataKey::Delegate(cursor.clone()))
+                else {
+                    break;
+                };
+                cursor = next;
+            }
+            let key = DataKey::DelegationSnapshot(proposal_id, member);
+            env.storage().persistent().set(&key, &cursor);
+            bump_entry(env, &key);
+        }
+        Ok(())
+    }
+
     /// Permissionless keeper: bump the proposal entry's TTL without changing
     /// any state. The existence check is deliberate — touching a missing
     /// id must fail loudly with `ForgeError::NotFound`.
@@ -808,6 +969,17 @@ impl DaoGovernance {
             return Err(ForgeError::NotFound);
         }
         bump_entry(&env, &key);
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DelegationMembers)
+            .unwrap_or(Vec::new(&env));
+        for member in members.iter() {
+            let snapshot_key = DataKey::DelegationSnapshot(proposal_id, member);
+            if env.storage().persistent().has(&snapshot_key) {
+                bump_entry(&env, &snapshot_key);
+            }
+        }
         Ok(())
     }
 }
@@ -882,6 +1054,28 @@ mod events {
     }
 
     #[contractevent]
+    pub struct VotePowerCast {
+        #[topic]
+        pub proposal_id: u64,
+        pub voter: Address,
+        pub weight: i128,
+    }
+
+    #[contractevent]
+    pub struct Delegated {
+        #[topic]
+        pub delegator: Address,
+        pub delegate: Address,
+    }
+
+    #[contractevent]
+    pub struct Undelegated {
+        #[topic]
+        pub delegator: Address,
+        pub previous_delegate: Address,
+    }
+
+    #[contractevent]
     pub struct Finalised {
         #[topic]
         pub proposal_id: u64,
@@ -924,6 +1118,31 @@ mod events {
             proposal_id,
             voter: voter.clone(),
             support,
+        }
+        .publish(env);
+    }
+
+    pub fn vote_power_cast(env: &Env, proposal_id: u64, voter: &Address, weight: i128) {
+        VotePowerCast {
+            proposal_id,
+            voter: voter.clone(),
+            weight,
+        }
+        .publish(env);
+    }
+
+    pub fn delegated(env: &Env, delegator: &Address, delegate: &Address) {
+        Delegated {
+            delegator: delegator.clone(),
+            delegate: delegate.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn undelegated(env: &Env, delegator: &Address, previous_delegate: &Address) {
+        Undelegated {
+            delegator: delegator.clone(),
+            previous_delegate: previous_delegate.clone(),
         }
         .publish(env);
     }
@@ -1660,7 +1879,7 @@ mod tests {
         client.vote(&proposal_id, &accounts.user2, &true);
         let all = env.events().all();
         let events = all.events();
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         let event = &events[0];
         let xdr::ContractEventBody::V0(body) = &event.body;
         assert_eq!(
@@ -1668,6 +1887,12 @@ mod tests {
             &ScVal::Symbol("vote_cast".try_into().unwrap())
         );
         assert_eq!(body.topics.get(1).unwrap(), &ScVal::U64(proposal_id));
+        let event = &events[1];
+        let xdr::ContractEventBody::V0(body) = &event.body;
+        assert_eq!(
+            body.topics.first().unwrap(),
+            &ScVal::Symbol("vote_power_cast".try_into().unwrap())
+        );
 
         // 3. Negative assertion: failed duplicate vote emits no events
         let err = client
@@ -2253,6 +2478,46 @@ mod tests {
         let (_env, _token, _tc, _contract_id, client, _accounts, _target_id) = fresh_bond!();
         let err = client.try_touch_ttl(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn proposal_uses_creation_time_delegation_snapshot() {
+        let (env, client, accounts, _first_proposal, target_id) = setup!();
+        client.delegate(&accounts.user2, &accounts.user1);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        client.undelegate(&accounts.user2);
+
+        client.vote(&proposal_id, &accounts.user1, &true);
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.for_votes, 2);
+        assert!(client.has_voted(&proposal_id, &accounts.user2));
+        assert_eq!(
+            client
+                .try_vote(&proposal_id, &accounts.user2, &false)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+    }
+
+    #[test]
+    fn delegation_rejects_self_and_cycles() {
+        let (_env, client, accounts, _proposal_id, _target_id) = setup!();
+        client.delegate(&accounts.user1, &accounts.user2);
+        assert_eq!(
+            client
+                .try_delegate(&accounts.user2, &accounts.user1)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(
+            client
+                .try_delegate(&accounts.user3, &accounts.user3)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
     }
 }
 

@@ -566,3 +566,15 @@ fn blank_envelope_aborts_vote_and_preserves_tally() {
     assert_eq!(proposal.for_votes, 0);
     assert_eq!(proposal.against_votes, 0);
 }
+
+#[test]
+fn delegation_requires_the_delegator_signature() {
+    let (env, _token, _token_client, _contract_id, client, accounts, _target_id) = setup!();
+    env.set_auths(&[]);
+    assert!(matches!(
+        client.try_delegate(&accounts.user1, &accounts.user2),
+        Err(Err(InvokeError::Abort))
+    ));
+    env.mock_all_auths();
+    assert_eq!(client.get_delegate(&accounts.user1), None);
+}
