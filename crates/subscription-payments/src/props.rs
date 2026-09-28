@@ -139,7 +139,7 @@ proptest! {
         let res = w.client().try_charge(&id);
         prop_assert!(res.is_err(), "charge on a cancelled subscription must return an error");
         let err = res.unwrap_err().unwrap();
-        prop_assert_eq!(err, ForgeError::InvalidInput, "cancelled subscription must fail with InvalidInput");
+        prop_assert_eq!(err, ForgeError::InvalidInput.into(), "cancelled subscription must fail with InvalidInput");
 
         let sub_after_failed_charge = w.client().get_subscription(&id);
         prop_assert_eq!(sub_after_failed_charge.status, SubscriptionStatus::Cancelled);
