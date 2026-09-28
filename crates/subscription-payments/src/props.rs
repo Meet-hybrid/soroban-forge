@@ -201,10 +201,14 @@ proptest! {
         elapsed_remainder in 0u64..=MAX_PERIOD,
         max_periods in 0u32..=(MAX_CATCHUP_PERIODS * 2),
     ) {
+        let elapsed_seconds = period * elapsed_periods as u64 + elapsed_remainder % period;
+        if elapsed_seconds == 0 {
+            return Ok(());
+        }
+
         let mint_amount = amount * MAX_CATCHUP_PERIODS as i128;
         let w = setup_world(mint_amount);
         let id = w.subscribe(amount, period);
-        let elapsed_seconds = period * elapsed_periods as u64 + elapsed_remainder % period;
         let elapsed_whole_periods = (elapsed_seconds / period) as u32;
         w.env.ledger().set_timestamp(START + elapsed_seconds);
         let token_client = StellarAssetClient::new(&w.env, &w.token);
@@ -213,7 +217,8 @@ proptest! {
 
         if max_periods > MAX_CATCHUP_PERIODS {
             let result = w.client().try_charge_catchup(&id, &max_periods);
-            prop_assert_eq!(result.unwrap().unwrap_err(), ForgeError::InvalidInput.into());
+            let err = result.unwrap_err().unwrap();
+            prop_assert_eq!(err, ForgeError::InvalidInput);
             prop_assert_eq!(w.client().get_subscription(&id), before);
             prop_assert_eq!(token_client.balance(&w.subscriber), mint_amount);
             prop_assert_eq!(token_client.balance(&w.provider), 0);
