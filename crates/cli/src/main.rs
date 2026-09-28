@@ -15,9 +15,7 @@ mod cli;
 mod commands;
 
 use clap::{Parser, Subcommand};
-use cli::{
-    BuildArgs, DeployArgs, EventsArgs, InvokeArgs, LintArgs, NewArgs, TestArgs, VerifyArgs,
-};
+use cli::{BuildArgs, DeployArgs, EventsArgs, InvokeArgs, LintArgs, NewArgs, TestArgs, VerifyArgs};
 
 #[derive(Parser, Debug)]
 #[command(

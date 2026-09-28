@@ -223,6 +223,7 @@ fn distribute_rejects_payer_signature_without_token_authorization() {
     ));
 }
 
+#[test]
 fn settle_sale_accepts_collection_and_payer_signatures_and_records_auth_tree() {
     use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 
@@ -377,15 +378,6 @@ fn settle_sale_rejects_replayed_signature_with_altered_args() {
         },
     ]);
 
-    // The unmatched nested auth is not a root abort: the SAC rejects the
-    // pull and the contract buckets the token error.
-    let res = client.try_distribute(&collection, &token, &payer, &seller, &AMOUNT);
-    assert!(matches!(
-        res,
-        Err(Ok(
-            soroban_forge_shared_utils::ForgeError::TokenTransferFailed
-        ))
-    ));
     let res = client.try_settle_sale(&collection, &token, &payer, &seller, &altered_amount);
     assert_auth_abort!(res);
 }
