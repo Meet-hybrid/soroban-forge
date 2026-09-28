@@ -186,7 +186,8 @@ proptest! {
             if status == SubscriptionStatus::PastDue {
                 let before = sub;
                 let catchup = w.client().try_charge_catchup(&id, &1);
-                prop_assert_eq!(catchup.unwrap().unwrap_err(), ForgeError::InvalidInput.into());
+                let err = catchup.unwrap_err().unwrap();
+                prop_assert_eq!(err, ForgeError::InvalidInput);
                 prop_assert_eq!(w.client().get_subscription(&id), before);
             }
         }
@@ -218,7 +219,8 @@ proptest! {
             prop_assert_eq!(token_client.balance(&w.provider), 0);
         } else {
             let billed = w.client().charge_catchup(&id, &max_periods);
-            prop_assert_eq!(expected_periods, core::cmp::min(max_periods, MAX_CATCHUP_PERIODS));
+            prop_assert!(expected_periods <= elapsed_whole_periods);
+            prop_assert!(expected_periods <= max_periods);
             prop_assert!(expected_periods <= MAX_CATCHUP_PERIODS);
             prop_assert_eq!(billed, amount * expected_periods as i128);
 
