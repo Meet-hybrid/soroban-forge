@@ -19,10 +19,8 @@ cargo run -p soroban-forge-cli -- new my-token
 cargo run -p soroban-forge-cli -- new my-token --path ./custom/path/my-token
 ```
 
-
-### Rust and Toolchain
-
-The project requires **stable Rust** and the `wasm32v1-none` target for Soroban contracts.
+The generated crate is a standalone project that compiles with `cargo check`
+without depending on the workspace layout or a stale shared-utils version pin.
 
 ```bash
 # Install or update Rust
@@ -244,6 +242,39 @@ make release
 | `make doc`     | Generate docs           |
 | `make clean`   | Clean build artifacts   |
 | `make release` | Full pre-release checks |
+
+## TypeScript Clients
+
+All six contracts ship generated TypeScript bindings under `packages/*-client`
+(`@soroban-forge/escrow-client` lives in `packages/typescript-sdk`, the five
+newer contracts each have their own package directory). The bindings are
+produced **offline** from each contract's WASM — no deployed contract id is
+needed — using the pinned Stellar CLI's `contract bindings typescript --wasm`.
+
+Regenerate everything with a single command:
+
+```bash
+bash scripts/generate-clients.sh
+```
+
+The script:
+
+1. Builds all six contract crates for `wasm32v1-none` (`--locked --release`).
+2. For each contract, wipes its package directory and runs
+   `stellar contract bindings typescript --wasm <wasm> --output-dir <pkg> --overwrite`.
+3. Leaves the generated output ready to commit; consumers do not need the
+   Soroban toolchain to install or build the packages.
+
+Build a client package (or the Next.js demo that depends on the escrow client):
+
+```bash
+cd packages/typescript-sdk && npm install && npm run build
+cd packages/nextjs-example && npm install && npm run build
+```
+
+The mapping of contract → package directory lives in
+`scripts/generate-clients.sh`; keep it in sync with `scripts/provenance.sh`
+(the crate list is duplicated deliberately so the build stays explicit).
 
 ## Contract Testing Notes
 
