@@ -527,8 +527,8 @@ fn reject_returns_unauthorized_for_non_owner() {
 
     let err = client
         .try_reject(&tx_id, &accounts.deployer)
-        .unwrap()
-        .unwrap_err();
+        .unwrap_err()
+        .unwrap();
     assert_eq!(err, soroban_forge_shared_utils::ForgeError::Unauthorized);
     let tx = client.get_tx(&tx_id);
     assert_eq!(tx.rejections.len(), 0);
