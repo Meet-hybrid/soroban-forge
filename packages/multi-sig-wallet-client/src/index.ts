@@ -113,6 +113,14 @@ target: string;
  * Stable identifier assigned at submission time.
  */
 tx_id: u64;
+  /**
+ * Short human-readable description of the transaction (max 128 chars).
+ */
+memo: Option<string>;
+  /**
+ * Optional extended metadata blob for the transaction (max 512 chars).
+ */
+metadata: Option<string>;
 }
 
 
@@ -414,7 +422,7 @@ export interface Client {
    * Requires the submitter to be an owner. Returns the stable `tx_id` that
    * confirmations reference.
    */
-  submit: ({submitter, target, tx}: {submitter: string, target: string, tx: Buffer}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+  submit: ({submitter, target, tx, memo, metadata}: {submitter: string, target: string, tx: Buffer, memo: Option<string>, metadata: Option<string>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
 
   /**
    * Construct and simulate a balance transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -620,7 +628,7 @@ export interface Client {
    * Construct and simulate a submit_withdrawal transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Submit a token withdrawal as a pending tx (see the trait docs).
    */
-  submit_withdrawal: ({submitter, token, destination, amount}: {submitter: string, token: string, destination: string, amount: i128}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+  submit_withdrawal: ({submitter, token, destination, amount, memo, metadata}: {submitter: string, token: string, destination: string, amount: i128, memo: Option<string>, metadata: Option<string>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
 
   /**
    * Construct and simulate a get_withdrawal_limit transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.

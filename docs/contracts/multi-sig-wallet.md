@@ -4,7 +4,7 @@ Multi-owner wallet with configurable approval threshold and transaction queue.
 
 - **Source:** `crates/multi-sig-wallet`
 - **Client:** `SorobanForgeMultiSigWalletClient` (generated)
-- **Related:** [Contract index](./index.md), [Feature Status Matrix](../FEATURE-STATUS.md), [Known Limitations](../KNOWN-LIMITATIONS.md), [DAO Governance](./dao-governance.md)
+- -**Related:** [Contract index](./index.md), [Feature Status Matrix](../FEATURE-STATUS.md), [Known Limitations](../KNOWN-LIMITATIONS.md), [DAO Governance](./dao-governance.md)
 
 ## Interface
 
@@ -26,10 +26,25 @@ The wallet is configured **once** via `initialize(owners, threshold)`
 the threshold is reached; `execute` then performs a real cross-contract
 invocation to the recorded target (an opaque `TxKind::Data` tx) or moves
 real tokens (a typed `TxKind::Withdrawal` tx). A target revert surfaces as
-`ForgeError::ContractInvocationFailed` and leaves the tx `Pending` and
-retryable. `reject` records a formal objection; any rejection blocks
+ForgeError::ContractInvocationFailed` and leaves the tx `Pending` and retryable. `reject` records a formal objection; any rejection blocks
 execution, and reaching the rejection threshold makes the tx `Rejected`
 (terminal).
+
+## Transaction metadata
+
+Transactions carry optional metadata for treasury context (accounting
+references, human-readable descriptions, off-chain documentation links):
+
+- `memo: String` - optional short human-readable description, max 128 chars.
+- `metadata: String` - optional extended information blob, max 512 chars.
+
+Both fields are stored on the transaction record at submission time and
+preserved through the transaction lifecycle (`Pending` -> `Executed` /
+`Rejected`). They are returned by `get_tx` and the queue views. Submission
+rejects over-length values with `ForgeError::InvalidInput`. Metadata is not
+encrypted and no on-chain document storage is performed; use external
+IPFS/URLs for large payloads. The `submit` event includes a metadata hash
+for verification.
 
 ## Transaction query views
 
@@ -104,12 +119,12 @@ recorded balance.
 - `Executed` — Threshold met and the transaction completed
 - `Rejected` — Rejection threshold met; terminal
 
-## Storage & TTL Maintenance
+## Storage & TWL Maintenance
 
 Transaction records (`DataKey::Tx(u64)`) are stored in **persistent
 storage**: `submit`, `confirm`, `reject`, `execute`, `submit_withdrawal`,
 and the limit-change paths write through `.persistent()` and bump the
-entry's TTL to a 30-day horizon on every write. `get_tx` reads from
+entry's TWL to a 30-day horizon on every write. `get_tx` reads from
 persistent storage. Owners, threshold, per-token balances, and withdrawal
 limits remain in instance storage.
 
