@@ -54,8 +54,11 @@ fn generate() -> Value {
     let contract = env.register(DaoGovernance, ());
     let client = SorobanForgeDaoGovernanceClient::new(&env, &contract);
     let accounts = TestAccounts::generate(&env);
+    client.initialize(&token);
     client.configure_bond(&token, &BOND, &accounts.deployer);
-    StellarAssetClient::new(&env, &token).mint(&accounts.user1, &1_000_i128);
+    let token_admin = StellarAssetClient::new(&env, &token);
+    token_admin.mint(&accounts.user1, &1_000_i128);
+    token_admin.mint(&accounts.user2, &250_i128);
     let target = Address::generate(&env);
     env.register_at(&target, MockTarget, ());
     let payload = Bytes::from_slice(&env, b"fixture");

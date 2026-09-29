@@ -98,18 +98,18 @@ treasury at a terminal transition.
 
 | Entrypoint | Status | Notes |
 |---|---|---|
+| `initialize` | ✅ Implemented | One-time permissionless configuration of the SEP-41 governance token used to weight votes |
 | `configure_bond` | ✅ Implemented | One-time permissionless config (token, amount, treasury); first caller wins; `propose` is rejected with `NotInitialized` while unconfigured |
 | `propose` | ✅ Implemented | Stores the target contract, opaque action payload, and voting deadline; **real token transfer** proposer → contract for the bond, before any state write |
-| `vote` | ✅ Implemented | One-vote-per-voter enforced |
+| `vote` | ✅ Implemented | One-vote-per-voter; adds the voter's current governance-token balance to the selected tally; zero-balance votes rejected |
 | `execute` | ✅ Implemented | Permissionless majority finalisation, then `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Succeeded`; on terminal transitions the bond is **refunded** to the proposer (`Executed`) or **forfeited** to the treasury (`Defeated`) in the same frame |
 | `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; **real token transfer** refund of the bond |
 | `get_proposal` / `get_proposal_count` / `get_proposals` / `has_voted` | ✅ Implemented | Read-only views; pagination with bounds clamping |
 | `get_bond_config` | ✅ Implemented | Read-only; `NotInitialized` when no bond is configured |
 | `touch_ttl` | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a proposal; `NotFound` for unknown ids |
-| Events | ✅ Implemented | `Proposed`, `VoteCast`, `Finalised`, `BondPosted`, `BondReleased` (`proposal_id` as topic) |
-| Storage | ✅ Persistent + TTL | `DataKey::Proposal` records in persistent storage with 30-day TTL maintenance; count, bond config, custody total, and vote markers in instance storage |
-| Tests | ✅ 74 | Bond custody lifecycle (post/refund/forfeit/conservation), arithmetic boundary tests, rollback-on-failure ordering, cross-contract dispatch + retry, introspection/pagination views, plus a **negative-auth suite** (`authz.rs`): wrong-signer and args-replay rejection, the nested token authorization frame for the bond pull, `env.auths()` authorization-tree assertions |
-| Weighted voting | ❌ Not implemented | Follow-up |
+| Events | ✅ Implemented | `Proposed`, `VoteCast` (includes weight), `Finalised`, `BondPosted`, `BondReleased` (`proposal_id` as topic) |
+| Storage | ✅ Persistent + TTL | `DataKey::Proposal` records in persistent storage with 30-day TTL maintenance; count, bond config, governance-token config, custody total, and vote markers in instance storage |
+| Tests | ✅ 79 | Bond custody lifecycle (post/refund/forfeit/conservation), weighted voting and arithmetic boundary tests, rollback-on-failure ordering, cross-contract dispatch + retry, introspection/pagination views, plus a **negative-auth suite** (`authz.rs`): wrong-signer and args-replay rejection, the nested token authorization frame for the bond pull, `env.auths()` authorization-tree assertions |
 
 ## Subscription Payments (`crates/subscription-payments`)
 

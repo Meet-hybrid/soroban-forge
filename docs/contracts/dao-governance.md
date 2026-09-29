@@ -10,6 +10,7 @@ permissionless execution of approved opaque actions.
 ## Interface
 
 ```rust
+fn initialize(governance_token) -> Result<(), ForgeError>
 fn configure_bond(token, amount, treasury) -> Result<(), ForgeError>
 fn get_bond_config() -> Result<BondConfig, ForgeError>
 fn propose(proposer, target, action, duration) -> Result<u64, ForgeError>
@@ -23,9 +24,13 @@ fn has_voted(proposal_id, voter) -> Result<bool, ForgeError>
 fn touch_ttl(proposal_id) -> Result<(), ForgeError>
 ```
 
-`action` is forwarded as a single `Bytes` argument to the target contract's
-`execute` entrypoint. Voting remains one vote per voter with a strict
-majority. After the deadline, the first `execute` call finalises the vote; a
+`initialize(governance_token)` must configure a SEP-41 token once before
+voting; a second call returns `ForgeError::AlreadyInitialized`. `action` is
+forwarded as a single `Bytes` argument to the target contract's `execute`
+entrypoint. Each voter may vote once, and the current governance-token
+balance at vote time is added to the selected tally. A zero-balance vote is
+rejected with `ForgeError::InvalidInput`. Finalisation still requires a
+strict weighted majority. After the deadline, the first `execute` call finalises the vote; a
 succeeded proposal is then dispatched by a subsequent permissionless
 `execute` call. Only a successful target invocation changes `Succeeded` to
 `Executed`. A target revert returns
@@ -62,7 +67,10 @@ propose (voting_ends = now + duration)
 Transition rules enforced by the contract:
 
 - `vote` requires the proposal to be `Active` and the deadline not yet
-  reached (`ForgeError::DeadlineReached` otherwise). One vote per voter.
+  reached (`ForgeError::DeadlineReached` otherwise). It requires the voter to
+  authorize, reads their SEP-41 balance, and adds that weight; one vote per
+  voter regardless of balance. Voting before `initialize` returns
+  `ForgeError::NotInitialized`.
 - `execute` before the deadline is `ForgeError::InvalidInput`.
 - On `Active` past deadline, `execute` finalises: `for_votes > against_votes`
   → `Succeeded` (bond stays in custody); otherwise → `Defeated` (bond
@@ -80,6 +88,13 @@ Transition rules enforced by the contract:
 
 Every proposal is backed by a bond in a SEP-41 token: paid when the
 proposal is created, settled when it reaches a terminal state.
+
+The governance token configured by `initialize` may be the same token as the
+proposal bond token or a different token; bond amounts never contribute to
+vote weight. Its configuration is stored in instance storage under the
+additive `DataKey::GovernanceToken` key. Existing deployments must call
+`initialize` once before accepting votes. This addition does not change the
+`propose` signature or the serialized `Proposal` shape.
 
 **Configuration.** `configure_bond(token, amount, treasury)` is a one-time,
 permissionless write — first caller wins, later calls return
@@ -171,9 +186,11 @@ indistinguishable from a typed revert and both are surfaced as
 A full lifecycle, from deployment to on-chain effect:
 
 1. **Deploy + configure.** Register `DaoGovernance`, then call
+   `initialize(&governance_token)` and
    `configure_bond(&bond_token, &100, &treasury)` once in the deploy
-   transaction. After this the configuration is immutable; there is no admin
-   role. `propose` is rejected until this completes.
+   transaction. Both configurations are immutable; there is no admin role.
+   `propose` is rejected until the bond is configured, and `vote` is rejected
+   until the governance token is configured.
 
 2. **Create a proposal.** A member calls
    `propose(&proposer, &target, &action_payload, &duration)`. The contract
@@ -183,9 +200,10 @@ A full lifecycle, from deployment to on-chain effect:
    `BondPosted`. The proposer's signature covers the nested bond pull.
 
 3. **Vote.** Each member calls `vote(&proposal_id, &voter, &support)` once.
-   The contract tallies `for_votes`/`against_votes`, emits `VoteCast`, and
-   rejects a second vote for the same voter, votes after the deadline, and
-   votes on non-`Active` proposals.
+   The contract reads the voter's current governance-token balance and adds
+   it to `for_votes` or `against_votes`, emits `VoteCast` with that weight,
+   and rejects zero-balance voters, duplicate votes, votes after the deadline,
+   and votes on non-`Active` proposals.
 
 4. **Finalise.** After `voting_ends`, anyone (not just voters — the
    proposal creator or an observer) calls `execute(&proposal_id)`. A strict
@@ -223,7 +241,7 @@ monitoring, each keyed by the standard `proposal_id` topic:
   - Data: `data: Proposal` (the full initial record)
 - **`VoteCast`** — emitted by `vote` for each accepted vote.
   - Topics: `proposal_id: u64`
-  - Data: `voter: Address`, `support: bool`
+  - Data: `voter: Address`, `support: bool`, `weight: i128`
 - **`Finalised`** — emitted by `execute` on every state transition
   (`Active` → `Succeeded`, `Active` → `Defeated`, `Succeeded` → `Executed`).
   - Topics: `proposal_id: u64`
