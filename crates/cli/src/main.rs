@@ -15,7 +15,7 @@ mod cli;
 mod commands;
 
 use clap::{Parser, Subcommand};
-use cli::{BuildArgs, DeployArgs, EventsArgs, InvokeArgs, LintArgs, NewArgs, TestArgs, VerifyArgs};
+use cli::{BuildArgs, DeployArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs, TestArgs, VerifyArgs};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -39,6 +39,7 @@ pub enum Commands {
     Verify(VerifyArgs),
     Invoke(InvokeArgs),
     Events(EventsArgs),
+    Inspect(InspectArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -54,6 +55,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Verify(args) => commands::verify::run(args)?,
         Commands::Invoke(args) => commands::invoke::run(args)?,
         Commands::Events(args) => commands::events::run(args)?,
+        Commands::Inspect(args) => commands::inspect::run(args)?,
     }
 
     Ok(())
@@ -139,5 +141,28 @@ mod tests {
         assert!(help.contains("--wasm"));
         assert!(help.contains("--expected"));
         assert!(help.contains("--manifest"));
+    }
+
+    #[test]
+    fn inspect_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "inspect",
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            "--keys",
+            "Admin,Balance",
+            "--json",
+        ])
+        .unwrap();
+
+        let Commands::Inspect(args) = cli.command else {
+            panic!("expected inspect command");
+        };
+        assert_eq!(
+            args.contract_address,
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"
+        );
+        assert_eq!(args.keys.as_deref(), Some("Admin,Balance"));
+        assert!(args.json);
     }
 }

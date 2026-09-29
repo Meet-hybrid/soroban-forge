@@ -98,3 +98,21 @@ pub struct EventsArgs {
     #[arg(long, default_value = "testnet")]
     pub network: String,
 }
+
+#[derive(Args, Debug, Clone)]
+pub struct InspectArgs {
+    /// Contract address or alias
+    pub contract: String,
+    /// Specific DataKey entries to inspect (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub keys: Vec<String>,
+    /// Output as JSON for programmatic use
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+    /// Network to use
+    #[arg(long, default_value = "testnet")]
+    pub network: String,
+    /// Source account
+    #[arg(short, long)]
+    pub source: Option<String>,
+}
