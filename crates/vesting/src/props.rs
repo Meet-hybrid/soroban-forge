@@ -49,7 +49,7 @@ use proptest::prelude::*;
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{Address, Env, Vec};
+use soroban_sdk::{Address, Env};
 
 const START: u64 = 1_000_000;
 const MAX_AMOUNT: i128 = 1_000_000_000_000;
@@ -116,7 +116,7 @@ impl World {
 
     /// Create a tranche schedule, funding custody with the table total first
     /// (same mint-then-create shape as the linear fixture helpers).
-    fn create_tranche(&self, tranches: &Vec<Tranche>, total_amount: i128) -> u64 {
+    fn create_tranche(&self, tranches: &soroban_sdk::Vec<Tranche>, total_amount: i128) -> u64 {
         self.mint_to_contract(total_amount);
         self.vesting_client()
             .create_tranche_schedule(&self.beneficiary, &self.token, tranches)
@@ -149,8 +149,8 @@ fn arb_schedule_params() -> impl Strategy<Value = (i128, u64, u64)> {
 /// Strategies produce plain tuples because proptest strategies run outside
 /// any `Env`; host objects like `soroban_sdk::Vec` must be allocated in the
 /// case's own environment, which only exists once the test body starts.
-fn to_tranche_vec(env: &Env, table: &[(u64, i128)]) -> Vec<Tranche> {
-    let mut tranches = Vec::new(env);
+fn to_tranche_vec(env: &Env, table: &[(u64, i128)]) -> soroban_sdk::Vec<Tranche> {
+    let mut tranches = soroban_sdk::Vec::new(env);
     for (unlock_at, amount) in table {
         tranches.push_back(Tranche {
             unlock_at: *unlock_at,
@@ -699,8 +699,7 @@ proptest! {
         let probe_result = w.vesting_client().try_claim(&probe_id);
         prop_assert!(
             matches!(probe_result, Err(Ok(ForgeError::TokenTransferFailed))),
-            "over-custody claim must fail with TokenTransferFailed, got {:?}",
-            probe_result
+            "over-custody claim must fail with TokenTransferFailed"
         );
         prop_assert_eq!(w.pool_total(), pool_before_probe, "failed transfer must not move the pool");
         let probe_after = w.vesting_client().get_tranche_schedule(&probe_id);
@@ -821,7 +820,7 @@ proptest! {
 
         // Point 2: strictly between two offsets — the exact step sum of every
         // tranche unlocked so far (only meaningful when a gap exists).
-        let reachable: std::vec::Vec<u64> = table
+        let reachable: Vec<u64> = table
             .iter()
             .filter(|(unlock_at, _)| *unlock_at != u64::MAX)
             .map(|(unlock_at, _)| *unlock_at)
