@@ -63,7 +63,7 @@ struct MetricQuota {
     included_units: u64,        // covered by the base `amount`
     overage_price: i128,        // per started bucket
     bucket_units: u64,          // units per bucket, must be > 0
-    max_overage_units: Option<u64>, // cap on billable overage units
+    max_overage_units: Option<u64>, … // cap on billable overage units
 }
 ```
 
@@ -86,12 +86,12 @@ with the `min` skipped for an uncapped quota.
   rejects a metric the subscription does not declare, so usage the subscriber
   has not been asked to pay for can never be billed.
 - `record_usage` accumulates **raw units** for the open period only, so each
-  period's amount is a pure function of that period's units: charging `N`
+  period's amount is a pure function of that period's units: charging `N
   periods bills exactly `N` times the per-period derivation, and no rounding can
   compound across periods. A bucket is billed once started (rounded up), and the
   price is per bucket, never per unit.
-- Meters are dropped atomically with the charge that closes the period, in the
-  same frame that advances `last_charged`. A failed transfer returns before that
+- Meters are dropped atomically with the charge that closes the period, in
+  the same frame that advances `last_charged`. A failed transfer returns before that
   point, so every meter survives and the arrears retry re-derives an identical
   amount.
 - `charge_catchup` settles the open period **last**: usage can only be metered
@@ -102,7 +102,7 @@ with the `min` skipped for an uncapped quota.
   attempt that failed.
 - Caps are enforced by clamping at settlement, never by rejecting, so a usage
   spike cannot wedge a subscription; the subscriber's worst case per period is
-  `base + Σ caps`. A `u64` unit-counter overflow surfaces as
+  `base + Σ caps`. A u64 unit-counter overflow surfaces as
   `ArithmeticOverflow` rather than wrapping into a silent underbill.
 
 ## Subscription States
@@ -138,9 +138,34 @@ pull mode remains direct subscriber-to-provider settlement. The subscription
 record gains an optional `prepaid_balance` field; ABI clients must be regenerated
 for this record shape change.
 
+## Prorated refunds
+
+When a subscription is cancelled mid-period, the subscriber receives a prorata
+refund for the unused portion of the current period. The refund is calculated
+from the most recent charge time and the configured period length:
+
+```text
+remaining = now - last_charged
+refund  = floor(amount * remaining / period)
+```
+
+- The refund is transferred from the contract to the subscriber in the same
+  frame as the cancellation. If the transfer fails, the cancellation rolls
+  back and the subscription remains `Active`.
+- The refund is capped at the contract's available custody balance for the
+  subscription, so a cancellation can never over-draw the contract.
+- A cancellation at or after the end of the current period yields a zero
+  prorata refund; the subscriber still receives any remaining prepaid balance.
+- The conservation invariant for a cancellation is
+  `collected == earned + refunded`, where `earned` is the prorated amount of the
+  current period already consumed and `refunded` is the amount transferred back.
+- The `ProratedRefund` is emitted with the calculated amount and the
+  corresponding `BalanceRefunded` is emitted with the actual transferred amount
+  and the resulting balance.
+
 ## Secondary Indices
 
-Each subscription is indexed in two secondary lists, written on the `subscribe`
+Each subscription is indexed in two secondary lists, written on the `subscribd
 success path:
 
 - `SubscriberSubscriptions(subscriber)` — creation-order subscription ids for
@@ -195,4 +220,5 @@ The contract emits typed on-chain lifecycle events for indexers and off-chain mo
 - `Deposited` (topic: `subscription_id: u64`) — successful prepaid deposit; contains `amount` and `balance_after`.
 - `BalanceDebited` (topic: `subscription_id: u64`) — successful prepaid period settlement; contains the exact `amount` and `balance_after`.
 - `BalanceRefunded` (topic: `subscription_id: u64`) — successful subscriber withdrawal or cancellation refund; contains `amount` and `balance_after`.
+- `ProratedRefund` (topic: `subscription_id: u64`) — emitted on cancellation with the calculated prorata refund amount and the corresponding `remaining` time in seconds.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.

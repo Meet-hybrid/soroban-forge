@@ -51,6 +51,10 @@ failed_attempts: u32;
  */
 last_charged: u64;
   /**
+ * Amount refunded to the subscriber on cancellation (0 if none).
+ */
+  refunded: i128;
+  /**
  * Ledger timestamp when paused, if currently paused.
  */
 paused_at: Option<u64>;
@@ -275,7 +279,7 @@ export interface Client {
    * Requires the subscriber. Valid when `Active`, `Paused`, or `PastDue`. Cancelling
    * an already-cancelled subscription is rejected.
    */
-  cancel: ({subscription_id}: {subscription_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  cancel: ({subscription_id, refund}: {subscription_id: u64, refund: boolean}, options?: MethodOptions) => Promise<AssembledTransaction<Result<i128>>>
 
   /**
    * Construct and simulate a charge transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -444,7 +448,7 @@ export class Client extends ContractClient {
   }
   public readonly fromJSON = {
     pause: this.txFromJSON<Result<void>>,
-        cancel: this.txFromJSON<Result<void>>,
+        cancel: this.txFromJSON<Result<i128>>,
         charge: this.txFromJSON<Result<i128>>,
         resume: this.txFromJSON<Result<void>>,
         subscribe: this.txFromJSON<Result<u64>>,

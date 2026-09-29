@@ -1524,6 +1524,16 @@ mod events {
         pub balance_after: i128,
     }
 
+    /// Prorated refund of unused subscription time on cancellation.
+    #[contractevent]
+    pub struct Refunded {
+        #[topic]
+        pub subscription_id: u64,
+        pub subscriber: Address,
+        pub amount: i128,
+        pub unused_seconds: u64,
+    }
+
     pub fn deposited(env: &Env, subscription_id: u64, amount: i128, balance_after: i128) {
         Deposited {
             subscription_id,
@@ -1547,6 +1557,22 @@ mod events {
             subscription_id,
             amount,
             balance_after,
+        }
+        .publish(env);
+    }
+
+    pub fn refunded(
+        env: &Env,
+        subscription_id: u64,
+        subscriber: &Address,
+        amount: i128,
+        unused_seconds: u64,
+    ) {
+        Refunded {
+            subscription_id,
+            subscriber: subscriber.clone(),
+            amount,
+            unused_seconds,
         }
         .publish(env);
     }

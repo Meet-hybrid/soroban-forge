@@ -3,7 +3,7 @@
 //! Authorization model:
 //! - `subscribe` requires the subscriber.
 //! - `charge` requires the provider.
-//! - `cancel` requires the subscriber.
+//! - `cancel` requires the subscriber and returns a prorated refund.
 //! - `authorize_provider` / `revoke_provider` require the subscriber.
 //! - `subscribe_on_behalf_of` requires the provider + a subscriber opt-in.
 //! - `pause` and `resume` require the subscriber.
@@ -210,7 +210,8 @@ fn cancel_accepts_subscriber_signature() {
         },
     }]);
 
-    client.try_cancel(&id).expect("outer ok").unwrap();
+    let refund = client.try_cancel(&id).expect("outer ok").unwrap();
+    assert_eq!(refund, 0);
     let sub = client.get_subscription(&id);
     assert_eq!(sub.status, SubscriptionStatus::Cancelled);
 }
@@ -239,6 +240,96 @@ fn cancel_rejects_provider_signature() {
 
     let sub = client.get_subscription(&id);
     assert_eq!(sub.status, SubscriptionStatus::Active);
+}
+
+#[test]
+fn cancel_refunds_unused_time_to_subscriber() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    // Advance to the first charge boundary and charge.
+    env.ledger().set_timestamp(START + PERIOD);
+    client.charge(&id);
+
+    // Cancel halfway through the new period.
+    env.ledger().set_timestamp(START + PERIOD + PERIOD / 2);
+
+    env.mock_auths(&[MockAuth {
+        address: subscriber,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let refund = client.try_cancel(&id).expect("outer ok").unwrap();
+    assert_eq!(refund, AMOUNT / 2);
+
+    let token_client = StellarAssetClient::new(&env, &token);
+    assert_eq!(token_client.balance(subscriber), 10_000 - AMOUNT + AMOUNT / 2);
+    assert_eq!(token_client.balance(provider), AMOUNT / 2);
+}
+
+#[test]
+fn cancel_at_end_of_period_refunds_nothing() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    env.ledger().set_timestamp(START + PERIOD);
+    client.charge(&id);
+
+    // Cancel exactly at the end of the charged period.
+    env.ledger().set_timestamp(START + PERIOD * 2);
+
+    env.mock_auths(&[MockAuth {
+        address: subscriber,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let refund = client.try_cancel(&id).expect("outer ok").unwrap();
+    assert_eq!(refund, 0);
+}
+
+#[test]
+fn cancel_conserves_collected_earned_and_refunded() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    env.ledger().set_timestamp(START + PERIOD);
+    client.charge(&id);
+
+    env.ledger().set_timestamp(START + PERIOD + PERIOD / 4);
+
+    env.mock_auths(&[MockAuth {
+        address: subscriber,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let refund = client.try_cancel(&id).expect("outer ok").unwrap();
+    let earned = AMOUNT - refund;
+    assert_eq!(earned + refund, AMOUNT);
+
+    let token_client = StellarAssetClient::new(&env, &token);
+    assert_eq!(token_client.balance(provider), earned);
+    assert_eq!(token_client.balance(subscriber), 10_000 - earned);
 }
 
 #[test]
