@@ -50,8 +50,9 @@ pub enum ForgeError {
     /// argument.
     WithdrawalLimitExceeded = 13,
     /// A subscription is in the `PastDue` lapsed state and the requested
-    /// operation cannot proceed until the overdue period is caught up by a
-    /// successful charge. Kept distinct from [`ForgeError::InvalidInput`] so
-    /// integrators can build dunning flows on a meaningful lapsed state.
+    /// operation cannot be performed until a catch-up charge restores it to
+    /// `Active`. Kept distinct from [`ForgeError::DeadlineReached`] so a caller
+    /// can tell a lapsed billing state from an argument that was merely
+    /// too early.
     SubscriptionPastDue = 14,
 }

@@ -16,7 +16,7 @@ machine.
 its splits the same way via `settle_sale`; vesting settles its claims via
 `claim`; subscriptions bill each due period with a real subscriber →
 provider transfer in pull mode or prepaid contract-balance debit, with retry
-and refund behavior, and expose a reachable `PastDue` lapsed state with catch-up charging; DAO governance now
+and refund behavior; DAO governance now
 dispatches approved opaque actions on-chain and settles a SEP-41 proposal
 bond — pulled at `propose`, refunded to the proposer or forfeited to the
 treasury at a terminal transition.
@@ -118,7 +118,7 @@ treasury at a terminal transition.
 | `subscribe` | ✅ Implemented | Validates `amount > 0` / `period > 0` before auth; subscriber-authorized; record + sequential id + both subscriber/provider indexes written atomically |
 | `subscribe_on_behalf_of` | ✅ Implemented | Provider-initiated; requires a **subscriber opt-in** (`ProviderOptIn`) checked before provider auth; shares the same id counter and record shape as `subscribe` |
 | `authorize_provider` / `revoke_provider` / `is_provider_authorized` | ✅ Implemented | Explicit per-relationship opt-in; subscriber-authorized; idempotent; read-only view has no auth |
-| `charge` | ✅ Implemented | Provider-authorized; pull mode transfers subscriber → provider; prepaid mode transfers an exact period amount from contract custody → provider; a subscription whose due time has elapsed is observable as `PastDue` (time-derived, no call required) and a successful catch-up charge bills the overdue period with identical amount math, restores `Active`, and advances the due timestamp exactly one period; insufficient prepaid balance follows retry → `PastDue`, auto-cancelling after 3 failures with exact remainder refund |
+| `charge` | ✅ Implemented | Provider-authorized; pull mode transfers subscriber → provider; prepaid mode transfers an exact period amount from contract custody → provider; a subscription whose due time has elapsed is observable as `PastDue` (time-derived), and a successful catch-up charge bills exactly one overdue period, restores `Active`, and advances the due timestamp one period; insufficient prepaid balance follows retry → `PastDue`, auto-cancelling after 3 failures with exact remainder refund |
 | `deposit` / `withdraw_balance` | ✅ Implemented | Subscriber-authorized prepaid opt-in and top-up pulls exact funds before state writes; surplus withdrawal transfers contract → subscriber before balance update; failed transfers leave state unchanged |
 | `pause` / `resume` | ✅ Implemented | Subscriber-authorized; `resume` advances the next due date by the elapsed paused duration |
 | `set_quotas` | ✅ Implemented | Subscriber-authorized (prices the overage the subscriber is billed); `Active` only and rejected once the open period has usage, so metered units cannot be repriced mid-period; validates ≤ `MAX_QUOTAS` (16) unique metrics, `bucket_units > 0`, `overage_price >= 0`; an empty list returns to flat pricing |
@@ -126,9 +126,10 @@ treasury at a terminal transition.
 | `quote_period` / `get_usage` | ✅ Implemented | Read-only views with no auth; `quote_period` is the same derivation `charge`/`charge_catchup` settle, so a quote and the charge cannot disagree; `get_usage` returns a zeroed record stamped with the current window for an unused metric |
 | Metered overage pricing | ✅ Implemented | `base + Σ ceil(min(max(0, units - included), cap) / bucket) * price`, rounded up per bucket, derived per period from raw units so multi-period totals cannot drift; cap enforced by clamping (never rejecting) at settlement; an unrepresentable bill → `ArithmeticOverflow` before any transfer |
 | Prepaid balance | ✅ Implemented | Per-subscription optional balance (`None` is unchanged pull mode; `Some(0)` remains prepaid); one-period charge only, catch-up rejected; `Deposited`, `BalanceDebited`, `BalanceRefunded`; conservation property tested against independent lifecycle mirror |
-| `cancel` | ✅ Implemented | Subscriber-authorized from `Active` / `Paused` / `PastDue`; refunds exact remaining prepaid balance before `Cancelled`; rejects already-`Cancelled`; `PastDue` is recoverable only through a successful charge and never silently reverts to `Active` by the passage of time alone |
+| `cancel` | ✅ Implemented | Subscriber-authorized from `Active` / `Paused` / `PastDue`; refunds exact remaining prepaid balance before `Cancelled`; rejects already-`Cancelled` |
 | `get_subscription` / `get_subscription_count` / `subscriptions_for_subscriber` / `subscriptions_for_provider` | ✅ Implemented | Read-only views; paged by `offset`/`limit` with `limit == 0` → `InvalidInput`; empty index yields an empty page, not an error |
 | Plan management | ❌ Not implemented | Follow-up |
+| `PastDue` lifecycle | ✅ Implemented | Time-derived lapsed state (`Active → PastDue → Active`); `PastDueEntered` event per transition; recoverable only through a successful catch-up charge (never reverts by time alone); `cancel` from `PastDue` and `pause`/`resume` interactions defined and tested; one-period-per-call invariant preserved with overflow-safe `checked_add` due math |
 
 ## Marketplace Royalties (`crates/marketplace-royalties`)
 
