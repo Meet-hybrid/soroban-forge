@@ -1401,10 +1401,6 @@ impl SubscriptionPayments {
             paused_at: None,
             failed_attempts: 0,
             quotas,
-            // Flat by default: a subscription is metered only when the
-            // subscriber declares quotas (today via `set_quotas`, and later
-            // copied from the plan it joins).
-            quotas: Vec::new(env),
             prepaid_balance: None,
         };
         env.storage()
@@ -1825,6 +1821,7 @@ mod authz;
 mod metering;
 #[cfg(test)]
 mod plan;
+#[cfg(test)]
 mod prepaid;
 #[cfg(test)]
 mod props;
