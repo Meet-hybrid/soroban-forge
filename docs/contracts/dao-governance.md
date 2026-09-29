@@ -14,6 +14,8 @@ fn configure_bond(token, amount, treasury) -> Result<(), ForgeError>
 fn get_bond_config() -> Result<BondConfig, ForgeError>
 fn propose(proposer, target, action, duration) -> Result<u64, ForgeError>
 fn vote(proposal_id, voter, support) -> Result<(), ForgeError>
+fn queue(proposal_id) -> Result<(), ForgeError>
+fn get_eta(proposal_id) -> Result<u64, ForgeError>
 fn execute(proposal_id) -> Result<(), ForgeError>
 fn cancel_proposal(proposal_id, proposer) -> Result<(), ForgeError>
 fn get_proposal(proposal_id) -> Result<Proposal, ForgeError>
@@ -25,12 +27,12 @@ fn touch_ttl(proposal_id) -> Result<(), ForgeError>
 
 `action` is forwarded as a single `Bytes` argument to the target contract's
 `execute` entrypoint. Voting remains one vote per voter with a strict
-majority. After the deadline, the first `execute` call finalises the vote; a
-succeeded proposal is then dispatched by a subsequent permissionless
-`execute` call. Only a successful target invocation changes `Succeeded` to
-`Executed`. A target revert returns
+majority. After the deadline, the first `execute` call finalises the vote;
+a succeeded proposal is then queued via `queue(proposal_id)` to establish
+`eta = now + delay`, and only after that timestamp has elapsed can a
+permissionless `execute` dispatch the target action. A target revert returns
 `ForgeError::ContractInvocationFailed` and leaves the proposal retryable in
-`Succeeded`.
+`Queued`.
 
 The DAO call itself is permissionless after voting has ended. A target's own
 `require_auth` is not implicitly satisfied by the DAO's cross-contract call;
@@ -45,18 +47,19 @@ Proposals progress through the following states, driven entirely by
 | State | Meaning | Entered from | Exits to |
 |---|---|---|---|
 | `Active` | Voting in progress | `propose` | `Succeeded`, `Defeated`, `Cancelled` |
-| `Succeeded` | Strict `for` majority after the deadline; ready for dispatch | `execute` (finalisation) | `Executed` |
+| `Succeeded` | Strict `for` majority after the deadline; queued execution is pending | `execute` (finalisation) | `Queued` |
+| `Queued` | Timelock active; `execute` is blocked until `eta` | `queue` | `Executed`, `Cancelled` |
 | `Defeated` | No strict majority after the deadline (including ties and zero votes) | `execute` (finalisation) | — (terminal) |
 | `Executed` | Target dispatch succeeded | `execute` (dispatch) | — (terminal) |
 | `Cancelled` | Withdrawn by the original proposer | `cancel_proposal` | — (terminal) |
-| `Queued` | Reserved for an optional timelock; **not reachable** through the public interface | — | — |
 
 ```text
 propose (voting_ends = now + duration)
   --> Active --vote × n--> deadline passes
   --> execute: for > against ? Succeeded : Defeated
-  --> execute (on Succeeded): target.execute(action) --> Executed (terminal)
-  --> cancel (proposer only): Cancelled (terminal)
+  --> queue (on Succeeded): Queued (eta = now + delay)
+  --> execute (on Queued after eta): target.execute(action) --> Executed (terminal)
+  --> cancel (proposer only, while Active or Queued): Cancelled (terminal)
 ```
 
 Transition rules enforced by the contract:
@@ -67,14 +70,19 @@ Transition rules enforced by the contract:
 - On `Active` past deadline, `execute` finalises: `for_votes > against_votes`
   → `Succeeded` (bond stays in custody); otherwise → `Defeated` (bond
   forfeited to the treasury). Ties and zero-vote proposals are `Defeated`.
-- A `Succeeded` proposal is dispatched by a **second, separate** `execute`
-  call; dispatch is described in [Execute dispatch](#execute-dispatch).
-- `Defeated`, `Executed`, `Cancelled`, and still-`Active` proposals reject
-  `execute` with `ForgeError::InvalidInput`.
+- A `Succeeded` proposal is moved to `Queued` by `queue(proposal_id)`, which
+  stores `eta = now + delay` and uses the same proposal record to enforce the
+  delay before dispatch. `get_eta(proposal_id)` exposes the queued deadline.
+- `Queued` proposals reject `execute` before `eta` with
+  `ForgeError::DeadlineReached` and only dispatch once the timestamp has
+  elapsed.
+- `Defeated`, `Executed`, `Cancelled`, `Succeeded`, and still-`Active` proposals
+  reject `execute` with `ForgeError::InvalidInput`.
 - `cancel_proposal` requires the original proposer
-  (`ForgeError::Unauthorized` otherwise) and an `Active` proposal; it works
-  even after the deadline and after quorum is met, as long as the proposal
-  has not been executed or cancelled.
+  (`ForgeError::Unauthorized` otherwise) and an `Active` or `Queued`
+  proposal (`ForgeError::InvalidInput` otherwise); it refunds the bond to
+  the proposer and marks the proposal `Cancelled`. Once cancelled, further
+  voting, queueing, and execution are rejected.
 
 ## Proposal bonds
 
@@ -103,9 +111,11 @@ released once:
 | Transition | Trigger | Bond |
 |---|---|---|
 | `Active → Succeeded` | majority after the deadline | stays in custody (`Posted`) |
-| `Succeeded → Executed` | successful target dispatch | refunded to the proposer (`Refunded`) |
-| `Active → Defeated` | no majority after the deadline | forfeited to the configured treasury (`Forfeited`) |
+| `Succeeded → Queued` | `queue(proposal_id)` | stays in custody (`Posted`) |
+| `Queued → Executed` | `execute` after `eta` and successful target dispatch | refunded to the proposer (`Refunded`) |
+| `Active → Defeated` | no majority after the deadline | forfeited to the configured treasury (`Forfeated`) |
 | `Active → Cancelled` | proposer revokes the proposal | refunded to the proposer (`Refunded`) |
+| `Queued → Cancelled` | proposer revokes the queued proposal | refunded to the proposer (`Refunded`) |
 
 `BondState` mirrors this exactly: `Posted` (in custody), `Refunded` (back
 with the proposer), or `Forfeited` (paid to the treasury).
@@ -130,7 +140,7 @@ permissionless and keyed by `execute(proposal_id)`:
    frozen. A strict `for` majority moves the proposal to `Succeeded` — the
    bond remains in custody and **no target call is made yet**. Otherwise the
    proposal becomes `Defeated` and the bond is forfeited.
-2. **Dispatch** (proposal `Succeeded`): the contract performs a real
+2. **Dispatch** (proposal `Queued` after `eta`): the contract performs a real
    cross-contract call to `proposal.target`'s `execute` entrypoint with the
    stored `action` payload as its sole argument:
 
@@ -147,11 +157,11 @@ permissionless and keyed by `execute(proposal_id)`:
      transitions to `Executed`, and `Finalised` + `BondReleased` events are
      emitted. The proposal is now terminal.
    - **On target revert:** `ForgeError::ContractInvocationFailed` is
-     returned, the proposal **stays `Succeeded`**, the bond stays in
+     returned, the proposal **stays `Queued`**, the bond stays in
      custody, and the target's state is unchanged — the dispatch can be
-     re-attempted by anyone.
+     re-attempted by anyone after the same `eta` window or by re-queueing.
    - **On refund failure:** the whole invocation reverts, including the
-     already-executed target dispatch; the proposal stays `Succeeded` and
+     already-executed target dispatch; the proposal stays `Queued` and
      retryable.
 
 Because the tuple return is `Result<Result<(), ForgeError>, HostError>`, a
@@ -193,24 +203,26 @@ A full lifecycle, from deployment to on-chain effect:
    otherwise it becomes `Defeated` and the bond is forfeited to the
    treasury (`Finalised` + `BondReleased` with `forfeited: true`).
 
-5. **Dispatch.** Anyone calls `execute(&proposal_id)` again. The contract
-   invokes `target.execute(action)`. On success it refunds the bond to the
-   proposer, marks the proposal `Executed`, and emits `Finalised` +
-   `BondReleased` with `forfeited: false`. On failure it stays `Succeeded`
+5. **Queue + dispatch.** Anyone calls `queue(&proposal_id)` after the vote
+   finalises to `Succeeded`; the contract records `eta = now + delay`. Once
+   the ledger timestamp reaches `eta`, anyone calls `execute(&proposal_id)`.
+   The contract invokes `target.execute(action)`. On success it refunds the
+   bond to the proposer, marks the proposal `Executed`, and emits `Finalised`
+   + `BondReleased` with `forfeited: false`. On failure it stays `Queued`
    and can be retried.
 
-6. **Cancel (alternative).** While the proposal is still `Active`, the
-   original proposer may call `cancel_proposal(&proposal_id, &proposer)` to
-   refund the bond and freeze the proposal as `Cancelled` — even after the
-   deadline, as long as it has not been executed.
+6. **Cancel (alternative).** While the proposal is still `Active` or
+   `Queued`, the original proposer may call
+   `cancel_proposal(&proposal_id, &proposer)` to refund the bond and freeze
+   the proposal as `Cancelled`.
 
 7. **Keep alive (optional).** A keeper periodically calls
    `touch_ttl(&proposal_id)` to extend the 30-day TTL horizon of long-lived
    proposals (see [Storage & TTL](#storage--ttl-maintenance)).
 
 Indexers reconstruct the full lifecycle from the event stream alone:
-`Proposed` → `VoteCast` × n → `Finalised` → (optional `BondReleased`), each
-keyed by `proposal_id`.
+`Proposed` → `VoteCast` × n → `Finalised` → (optional `Queued`) → `Finalised`
+→ (optional `BondReleased`), each keyed by `proposal_id`.
 
 ## Events
 
@@ -225,9 +237,12 @@ monitoring, each keyed by the standard `proposal_id` topic:
   - Topics: `proposal_id: u64`
   - Data: `voter: Address`, `support: bool`
 - **`Finalised`** — emitted by `execute` on every state transition
-  (`Active` → `Succeeded`, `Active` → `Defeated`, `Succeeded` → `Executed`).
+  (`Active` → `Succeeded`, `Active` → `Defeated`, `Queued` → `Executed`).
   - Topics: `proposal_id: u64`
   - Data: `state: ProposalState`, `for_votes: i128`, `against_votes: i128`
+- **`Queued`** — emitted by `queue` once the proposal is queued for delayed execution.
+  - Topics: `proposal_id: u64`
+  - Data: `eta: u64`
 - **`BondPosted`** — emitted by `propose` once the bond is in custody.
   - Topics: `proposal_id: u64`
   - Data: `token: Address`, `amount: i128`

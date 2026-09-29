@@ -403,12 +403,15 @@ fn execute_refunds_the_bond_under_a_blank_envelope() {
     client.vote(&id, &accounts.user2, &true);
     env.ledger().set_timestamp(START + DURATION + 1);
     client.execute(&id); // Active -> Succeeded
+    client.queue(&id); // Succeeded -> Queued
+    let eta = client.get_eta(&id);
+    env.ledger().set_timestamp(eta);
 
     // Blank envelope: no signatures anywhere. Finalisation and the bond
     // refund must still complete — no external signer is ever demanded, and
     // the recorded authorization list stays empty.
     env.set_auths(&[]);
-    client.execute(&id); // Succeeded -> Executed, refund paid
+    client.execute(&id); // Queued -> Executed, refund paid
 
     assert_eq!(
         client.get_proposal(&id).bond_state,
@@ -417,6 +420,51 @@ fn execute_refunds_the_bond_under_a_blank_envelope() {
     assert_eq!(tc.balance(proposer), FUNDS);
     assert_eq!(tc.balance(&contract_id), 0);
     assert_eq!(env.auths().len(), 0);
+}
+
+#[test]
+fn queue_is_permissionless_under_blank_envelope() {
+    let (env, _token, _tc, _contract_id, client, accounts, target_id) = setup!();
+    let proposer = &accounts.user1;
+    let id = client.propose(proposer, &target_id, &payload(&env), &DURATION);
+    client.vote(&id, &accounts.user2, &true);
+    env.ledger().set_timestamp(START + DURATION + 1);
+    client.execute(&id); // Active -> Succeeded
+
+    // Blank envelope: queueing is permissionless.
+    env.set_auths(&[]);
+    client.queue(&id);
+
+    assert_eq!(client.get_proposal(&id).state, crate::ProposalState::Queued);
+    assert_eq!(env.auths().len(), 0);
+}
+
+#[test]
+fn cancel_during_queued_authorization_tree_is_the_proposer_entrypoint_frame() {
+    let (env, _token, _tc, contract_id, client, accounts, target_id) = setup!();
+    let proposer = &accounts.user1;
+    let id = client.propose(proposer, &target_id, &payload(&env), &DURATION);
+    client.vote(&id, &accounts.user2, &true);
+    env.ledger().set_timestamp(START + DURATION + 1);
+    client.execute(&id);
+    client.queue(&id);
+
+    client.cancel_proposal(&id, proposer);
+
+    assert_eq!(
+        env.auths(),
+        [(
+            proposer.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "cancel_proposal"),
+                    (id, proposer.clone()).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
 }
 
 #[test]

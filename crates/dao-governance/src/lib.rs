@@ -13,7 +13,8 @@
 //! propose (voting_ends = now + duration)
 //!   --> Active --vote × n--> voting ends
 //!   --> execute: for > against ? Succeeded : Defeated
-//!   --> execute (on Succeeded): target.execute(action) --> Executed (terminal)
+//!   --> queue (on Succeeded): queued for eta = now + delay
+//!   --> execute (on Queued after eta): target.execute(action) --> Executed (terminal)
 //!   --> cancel (proposer only): Cancelled (terminal)
 //! ```
 //!
@@ -21,15 +22,19 @@
 //! - If `for_votes > against_votes`, the proposal becomes `Succeeded`.
 //! - Otherwise, the proposal becomes `Defeated`.
 //!
-//! Once a proposal is `Succeeded`, calling `execute` performs a real
-//! cross-contract call (`target.execute(action)`) using `env.try_invoke_contract`.
+//! A passed proposal can be moved into the `Queued` state via `queue`, where
+//! it records an `eta` timestamp and blocks `execute` until that deadline.
+//! Once `eta` has elapsed, `execute` performs a real cross-contract call
+//! (`target.execute(action)`) using `env.try_invoke_contract`.
 //! - If the target invocation succeeds, the proposal transitions to `Executed`.
 //! - If the target invocation reverts, `ForgeError::ContractInvocationFailed` is
-//!   returned and the proposal remains in the `Succeeded` state (not `Executed`),
+//!   returned and the proposal remains in the `Queued` state (not `Executed`),
 //!   leaving target state unchanged and allowing execution to be re-attempted.
 //!
 //! `Defeated`, `Executed`, `Cancelled`, and still-`Active` proposals cannot be
-//! executed; a second `execute` on an `Executed` proposal is rejected.
+//! executed; a second `execute` on an `Executed` proposal is rejected. A
+//! `Queued` proposal cannot be executed before its `eta` and returns
+//! `ForgeError::DeadlineReached` in that case.
 //!
 //! ## Proposal bonds (token custody)
 //!
@@ -94,8 +99,9 @@
 //!   not-yet-executed proposal; the refund runs in that same call.
 //! - `get_proposal` and `get_bond_config` are read-only views.
 //!
-//! The `Queued` state is reserved for an optional timelock that lands in a
-//! follow-up; it is not reachable through the current public interface.
+//! The contract now exposes a `Queued` timelock state reachable via
+//! `queue(proposal_id)`: a passed proposal waits until its `eta` before
+//! dispatching the target action.
 //! Weighted voting by governance-token balance is intentionally out of
 //! scope for this iteration: the contract tracks proposals, votes, and timing,
 //! not balances. A bond is custody, not vote weight — it never enters the
@@ -182,7 +188,29 @@ pub trait SorobanForgeDaoGovernance {
         support: bool,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
-    /// Finalise a proposal once voting has ended, and execute passed proposals.
+    /// Queue a passed proposal (`Succeeded`) for delayed execution.
+    ///
+    /// Establishes `eta = now + delay` and transitions the proposal to `Queued`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no proposal with this id.
+    /// * [`ForgeError::InvalidInput`] — the proposal is not in `Succeeded` state.
+    /// * [`ForgeError::ArithmeticOverflow`] — current ledger timestamp + delay overflows `u64`.
+    fn queue(env: Env, proposal_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Return the queued execution ETA for a proposal.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no proposal with this id.
+    /// * [`ForgeError::InvalidInput`] — the proposal has not been queued (`eta == 0`).
+    fn get_eta(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+
+    /// Finalise a proposal once voting has ended, and execute queued proposals.
     ///
     /// Also the bond-release path: a proposal that becomes `Defeated`
     /// forfeits its bond to the configured treasury, and one that reaches
@@ -192,25 +220,28 @@ pub trait SorobanForgeDaoGovernance {
     /// # Errors
     ///
     /// * [`ForgeError::NotFound`] — no proposal with this id.
-    /// * [`ForgeError::InvalidInput`] — voting has not ended, or the
-    ///   proposal is already terminal.
+    /// * [`ForgeError::InvalidInput`] — voting has not ended, or the proposal is in
+    ///   `Succeeded` (must be queued first) or is already terminal.
+    /// * [`ForgeError::DeadlineReached`] — the proposal is `Queued` but its
+    ///   ETA has not elapsed yet.
     /// * [`ForgeError::ContractInvocationFailed`] — the target reverted;
-    ///   the proposal stays `Succeeded` and the bond stays in custody.
+    ///   the proposal stays `Queued` and the bond stays in custody.
     /// * [`ForgeError::TokenTransferFailed`] — the bond refund/forfeit
     ///   transfer failed; the proposal state is untouched (still retryable).
     fn execute(env: Env, proposal_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
     /// Withdraw a proposal that has not yet been executed.
     ///
-    /// Only the original proposer may cancel. Once cancelled the proposal is
-    /// frozen against further votes and cannot be executed. The bond is
-    /// refunded to the proposer in the same call, before the state write.
+    /// Only the original proposer may cancel. A proposal may be cancelled while
+    /// `Active` or `Queued`. Once cancelled the proposal is frozen against further
+    /// votes and cannot be executed. The bond is refunded to the proposer in the
+    /// same call, before the state write.
     ///
     /// * [`ForgeError::NotFound`] — no proposal with this id.
     /// * [`ForgeError::Unauthorized`] — `proposer` is not the original proposer.
-    /// * [`ForgeError::InvalidInput`] — the proposal is no longer `Active`.
+    /// * [`ForgeError::InvalidInput`] — the proposal is not in `Active` or `Queued` state.
     /// * [`ForgeError::TokenTransferFailed`] — the bond refund failed; the
-    ///   proposal stays `Active` and the bond stays in custody.
+    ///   proposal state is untouched and the bond stays in custody.
     fn cancel_proposal(
         env: Env,
         proposal_id: u64,
@@ -316,6 +347,10 @@ pub struct Proposal {
     pub against_votes: i128,
     /// Ledger timestamp at which voting closes.
     pub voting_ends: u64,
+    /// Delay applied before queued execution can begin.
+    pub delay: u64,
+    /// If non-zero, the queued execution timestamp. `0` means not queued.
+    pub eta: u64,
     /// Current state.
     pub state: ProposalState,
     /// SEP-41 token this proposal's bond was posted in (the configured
@@ -328,6 +363,9 @@ pub struct Proposal {
     /// terminal proposal state, exactly once.
     pub bond_state: BondState,
 }
+
+/// Default timelock delay before a passed proposal may execute.
+pub const DEFAULT_DELAY: u64 = 86_400;
 
 /// Persistent storage TTL constants.
 ///
@@ -467,6 +505,8 @@ impl DaoGovernance {
             for_votes: 0,
             against_votes: 0,
             voting_ends,
+            delay: DEFAULT_DELAY,
+            eta: 0,
             state: ProposalState::Active,
             bond_token: bond.token.clone(),
             bond_amount: bond.amount,
@@ -525,7 +565,37 @@ impl DaoGovernance {
         Ok(())
     }
 
-    /// Finalise a proposal once voting has ended, and execute passed proposals.
+    /// Queue a passed proposal (`Succeeded`) for delayed execution.
+    pub fn queue(env: Env, proposal_id: u64) -> Result<(), ForgeError> {
+        let mut proposal = Self::get_proposal_impl(&env, proposal_id)?;
+        if proposal.state != ProposalState::Succeeded {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let eta = env
+            .ledger()
+            .timestamp()
+            .checked_add(proposal.delay)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        proposal.state = ProposalState::Queued;
+        proposal.eta = eta;
+        let key = DataKey::Proposal(proposal_id);
+        env.storage().persistent().set(&key, &proposal);
+        bump_entry(&env, &key);
+        events::queued(&env, proposal_id, eta);
+        Ok(())
+    }
+
+    /// Read a stored proposal's queued eta, if any.
+    pub fn get_eta(env: Env, proposal_id: u64) -> Result<u64, ForgeError> {
+        let proposal = Self::get_proposal_impl(&env, proposal_id)?;
+        if proposal.eta == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        Ok(proposal.eta)
+    }
+
+    /// Finalise a proposal once voting has ended, and execute queued proposals.
     ///
     /// Callable by anyone after the deadline (permissionless execution), and
     /// — on the paths that release a bond — permissionless in the token
@@ -535,12 +605,13 @@ impl DaoGovernance {
     ///   strict majority of `for` votes (the bond stays in custody until a
     ///   terminal transition), or to `Defeated` otherwise — forfeiting the
     ///   bond to the treasury **before** the state write.
-    /// - A `Succeeded` proposal performs a real cross-contract call to `target`
-    ///   with `action` (`target.execute(action)`). On successful invocation,
-    ///   it refunds the bond to the proposer, then transitions to the
-    ///   terminal `Executed` state and emits an `Executed` event.
+    /// - A `Queued` proposal performs a real cross-contract call to `target`
+    ///   with `action` (`target.execute(action)`) once `eta` has elapsed.
+    ///   On successful invocation, it refunds the bond to the proposer, then
+    ///   transitions to the terminal `Executed` state and emits an `Executed`
+    ///   event.
     /// - If the target invocation reverts, `ForgeError::ContractInvocationFailed`
-    ///   is returned and the proposal remains `Succeeded` (not `Executed`),
+    ///   is returned and the proposal remains `Queued` (not `Executed`),
     ///   leaving target state unchanged and the bond in custody.
     /// - If a bond refund/forfeit transfer fails,
     ///   `ForgeError::TokenTransferFailed` is returned and the proposal
@@ -606,7 +677,11 @@ impl DaoGovernance {
                     Ok(())
                 }
             }
-            ProposalState::Succeeded => {
+            ProposalState::Succeeded => Err(ForgeError::InvalidInput),
+            ProposalState::Queued => {
+                if env.ledger().timestamp() < proposal.eta {
+                    return Err(ForgeError::DeadlineReached);
+                }
                 let target = &proposal.target;
                 let payload_val: Val = proposal.action.clone().into_val(&env);
                 let args = soroban_sdk::vec![&env, payload_val];
@@ -620,10 +695,6 @@ impl DaoGovernance {
                     return Err(ForgeError::ContractInvocationFailed);
                 }
 
-                // Refund the bond before the terminal state write, so a
-                // failed payout reverts the whole invocation — including
-                // the target dispatch above — and leaves the proposal
-                // retryable in `Succeeded`.
                 let bond = Self::bond_config_impl(&env)?;
                 let next_held = Self::bond_held(&env)
                     .checked_sub(proposal.bond_amount)
@@ -658,27 +729,25 @@ impl DaoGovernance {
                 );
                 Ok(())
             }
-            ProposalState::Defeated
-            | ProposalState::Executed
-            | ProposalState::Cancelled
-            | ProposalState::Queued => Err(ForgeError::InvalidInput),
+            ProposalState::Defeated | ProposalState::Executed | ProposalState::Cancelled => {
+                Err(ForgeError::InvalidInput)
+            }
         }
     }
 
-    /// Withdraw an active proposal before it is executed.
+    /// Withdraw a proposal that has not yet been executed.
     ///
-    /// Requires the original proposer. A proposal may be cancelled even after
-    /// voting ends and quorum is met, as long as it has not been executed (or
-    /// already cancelled). A cancelled proposal is terminal: further votes and
-    /// execution are rejected.
+    /// Requires the original proposer. A proposal may be cancelled while
+    /// `Active` or `Queued`. Once cancelled the proposal is terminal: further votes,
+    /// queueing, and execution are rejected.
     ///
     /// The bond is refunded to the proposer in this same call: transfer
     /// first, then the `Cancelled` state write — a failed refund surfaces
-    /// `TokenTransferFailed` with the proposal still `Active`.
+    /// `TokenTransferFailed` with the proposal state untouched.
     ///
     /// * [`ForgeError::NotFound`] — no proposal with this id.
     /// * [`ForgeError::Unauthorized`] — `proposer` is not the original proposer.
-    /// * [`ForgeError::InvalidInput`] — the proposal is no longer `Active`.
+    /// * [`ForgeError::InvalidInput`] — the proposal is not in `Active` or `Queued` state.
     /// * [`ForgeError::TokenTransferFailed`] — the bond refund failed.
     pub fn cancel_proposal(
         env: Env,
@@ -686,7 +755,7 @@ impl DaoGovernance {
         proposer: Address,
     ) -> Result<(), ForgeError> {
         let mut proposal = Self::get_proposal_impl(&env, proposal_id)?;
-        if proposal.state != ProposalState::Active {
+        if proposal.state != ProposalState::Active && proposal.state != ProposalState::Queued {
             return Err(ForgeError::InvalidInput);
         }
         if proposer != proposal.proposer {
@@ -842,6 +911,13 @@ mod events {
         pub against_votes: i128,
     }
 
+    #[contractevent]
+    pub struct Queued {
+        #[topic]
+        pub proposal_id: u64,
+        pub eta: u64,
+    }
+
     /// A bond entered custody with the proposal's creation.
     #[contractevent]
     pub struct BondPosted {
@@ -892,6 +968,14 @@ mod events {
             state,
             for_votes,
             against_votes,
+        }
+        .publish(env);
+    }
+
+    pub fn queued(env: &Env, proposal_id: u64, eta: u64) {
+        Queued {
+            proposal_id,
+            eta,
         }
         .publish(env);
     }
@@ -1182,6 +1266,27 @@ mod tests {
         }
     }
 
+    #[contract]
+    pub struct FlakyTarget;
+
+    #[contractimpl]
+    impl FlakyTarget {
+        pub fn set_fail(env: Env, fail: bool) {
+            env.storage().instance().set(&Symbol::new(&env, "fail"), &fail);
+        }
+
+        pub fn execute(env: Env, _payload: Bytes) {
+            let should_fail: bool = env
+                .storage()
+                .instance()
+                .get(&Symbol::new(&env, "fail"))
+                .unwrap_or(true);
+            if should_fail {
+                panic!("target failure");
+            }
+        }
+    }
+
     #[test]
     fn propose_succeeds_and_is_active() {
         let (env, client, accounts, proposal_id, target_id) = setup!();
@@ -1282,6 +1387,304 @@ mod tests {
     }
 
     #[test]
+    fn queue_sets_eta_and_blocks_early_execute() {
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+        client.queue(&proposal_id);
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.state, ProposalState::Queued);
+        assert_eq!(proposal.delay, 86_400);
+        assert_eq!(proposal.eta, START + DURATION + 1 + proposal.delay);
+        assert_eq!(client.get_eta(&proposal_id), proposal.eta);
+
+        env.ledger().set_timestamp(proposal.eta - 1);
+        let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::DeadlineReached);
+        assert_eq!(client.get_proposal(&proposal_id).state, ProposalState::Queued);
+
+        env.ledger().set_timestamp(proposal.eta);
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Executed
+        );
+    }
+
+    #[test]
+    fn queue_on_invalid_states_is_rejected() {
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
+
+        // 1. Unknown proposal
+        assert_eq!(
+            client.try_queue(&999).unwrap_err().unwrap(),
+            ForgeError::NotFound
+        );
+
+        // 2. Active proposal while voting is open
+        assert_eq!(
+            client.try_queue(&proposal_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // 3. Active proposal after deadline before finalisation
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        assert_eq!(
+            client.try_queue(&proposal_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // 4. Defeated proposal cannot be queued
+        let (env2, client2, accounts2, defeated_id, _target_id2) = setup!();
+        client2.vote(&defeated_id, &accounts2.user2, &false);
+        env2.ledger().set_timestamp(START + DURATION + 1);
+        client2.execute(&defeated_id); // Active -> Defeated
+        assert_eq!(
+            client2.try_queue(&defeated_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // 5. Cancelled proposal cannot be queued
+        let (_env3, client3, accounts3, cancelled_id, _target_id3) = setup!();
+        client3.cancel_proposal(&cancelled_id, &accounts3.user1);
+        assert_eq!(
+            client3.try_queue(&cancelled_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // 6. Double queue is rejected
+        client.execute(&proposal_id); // Active -> Succeeded
+        client.queue(&proposal_id); // Succeeded -> Queued
+        assert_eq!(
+            client.try_queue(&proposal_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // 7. Executed proposal cannot be queued
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
+        client.execute(&proposal_id); // Queued -> Executed
+        assert_eq!(
+            client.try_queue(&proposal_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+    }
+
+    #[test]
+    fn queue_eta_overflow_returns_arithmetic_overflow() {
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id); // Active -> Succeeded
+
+        // Set timestamp such that timestamp + DEFAULT_DELAY wraps u64
+        env.ledger().set_timestamp(u64::MAX - DEFAULT_DELAY + 1);
+        let err = client.try_queue(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::ArithmeticOverflow);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Succeeded
+        );
+
+        // Boundary: exact u64::MAX succeeds
+        env.ledger().set_timestamp(u64::MAX - DEFAULT_DELAY);
+        client.queue(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Queued
+        );
+        assert_eq!(client.get_eta(&proposal_id), u64::MAX);
+    }
+
+    #[test]
+    fn get_eta_views_and_error_paths() {
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
+
+        // 1. Missing proposal
+        assert_eq!(
+            client.try_get_eta(&999).unwrap_err().unwrap(),
+            ForgeError::NotFound
+        );
+
+        // 2. Active proposal (not queued)
+        assert_eq!(
+            client.try_get_eta(&proposal_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // 3. Succeeded proposal (not yet queued)
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.try_get_eta(&proposal_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // 4. Queued proposal returns eta
+        client.queue(&proposal_id);
+        let expected_eta = START + DURATION + 1 + DEFAULT_DELAY;
+        assert_eq!(client.get_eta(&proposal_id), expected_eta);
+    }
+
+    #[test]
+    fn execute_at_exact_eta_and_after_eta() {
+        let (env, client, accounts, proposal_id, target_id) = setup!();
+        let mock_target = MockTargetClient::new(&env, &target_id);
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+        client.queue(&proposal_id);
+
+        let eta = client.get_eta(&proposal_id);
+
+        // 1. At exact eta: executes successfully
+        env.ledger().set_timestamp(eta);
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Executed
+        );
+        assert_eq!(mock_target.count(), 1);
+
+        // 2. Another proposal executed well after eta (eta in the past)
+        let (env2, client2, accounts2, proposal_id2, target_id2) = setup!();
+        let mock_target2 = MockTargetClient::new(&env2, &target_id2);
+        client2.vote(&proposal_id2, &accounts2.user2, &true);
+        env2.ledger().set_timestamp(START + DURATION + 1);
+        client2.execute(&proposal_id2);
+        client2.queue(&proposal_id2);
+        let eta2 = client2.get_eta(&proposal_id2);
+
+        // Set timestamp far past eta
+        env2.ledger().set_timestamp(eta2 + 100_000);
+        client2.execute(&proposal_id2);
+        assert_eq!(
+            client2.get_proposal(&proposal_id2).state,
+            ProposalState::Executed
+        );
+        assert_eq!(mock_target2.count(), 1);
+    }
+
+    #[test]
+    fn cancel_proposal_during_queued_lifecycle() {
+        let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id); // Active -> Succeeded
+        client.queue(&proposal_id); // Succeeded -> Queued
+
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Queued
+        );
+        assert_eq!(tc.balance(&contract_id), BOND);
+        assert_eq!(bond_held(&env, &contract_id), BOND);
+
+        // 1. Non-proposer cannot cancel during Queued
+        let err = client
+            .try_cancel_proposal(&proposal_id, &accounts.user2)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Queued
+        );
+        assert_eq!(tc.balance(&contract_id), BOND);
+
+        // 2. Proposer cancels during Queued
+        client.cancel_proposal(&proposal_id, &accounts.user1);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Cancelled
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).bond_state,
+            BondState::Refunded
+        );
+        assert_eq!(tc.balance(&accounts.user1), FUNDS);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(bond_held(&env, &contract_id), 0);
+
+        // 3. Cancelled proposal cannot be executed
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
+        let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+
+        // 4. Cancelled proposal cannot be queued
+        let err = client.try_queue(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+
+        // 5. Double cancel is rejected
+        let err = client
+            .try_cancel_proposal(&proposal_id, &accounts.user1)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn retry_execution_after_target_revert_succeeds_when_target_recovers() {
+        let (env, _token, tc, contract_id, client, accounts) = bonded_env!();
+        let flaky_target_id = env.register(FlakyTarget, ());
+        let flaky_client = FlakyTargetClient::new(&env, &flaky_target_id);
+        flaky_client.set_fail(&true);
+
+        let proposal_id =
+            client.propose(&accounts.user1, &flaky_target_id, &payload(&env), &DURATION);
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+
+        client.execute(&proposal_id); // Active -> Succeeded
+        client.queue(&proposal_id); // Succeeded -> Queued
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
+
+        // First attempt reverts: proposal stays Queued, bond stays in custody
+        let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::ContractInvocationFailed);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Queued
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).bond_state,
+            BondState::Posted
+        );
+        assert_eq!(tc.balance(&contract_id), BOND);
+
+        // Target recovers: retry succeeds, transitions to Executed, bond refunded
+        flaky_client.set_fail(&false);
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Executed
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).bond_state,
+            BondState::Refunded
+        );
+        assert_eq!(tc.balance(&accounts.user1), FUNDS);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(bond_held(&env, &contract_id), 0);
+    }
+
+    #[test]
+    fn default_delay_is_non_zero_constant() {
+        assert_eq!(DEFAULT_DELAY, 86_400);
+        let (_env, client, _accounts, proposal_id, _target_id) = setup!();
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.delay, DEFAULT_DELAY);
+        assert_eq!(proposal.eta, 0);
+    }
+
+    #[test]
     fn execute_after_deadline_defeats_minority() {
         let (env, client, accounts, proposal_id, _target_id) = setup!();
         client.vote(&proposal_id, &accounts.user2, &false);
@@ -1325,7 +1728,10 @@ mod tests {
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&proposal_id); // Active -> Succeeded
-        client.execute(&proposal_id); // Succeeded -> Executed
+        client.queue(&proposal_id); // Succeeded -> Queued
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
+        client.execute(&proposal_id); // Queued -> Executed
         let err = client.try_execute(&proposal_id).unwrap_err().unwrap(); // Executed -> rejected
         assert_eq!(err, ForgeError::InvalidInput);
     }
@@ -1464,7 +1870,16 @@ mod tests {
         );
         assert_eq!(mock_target.count(), 0);
 
-        // Second execute: performs cross-contract call, transitions Succeeded -> Executed
+        // Queue: transitions Succeeded -> Queued
+        client.queue(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Queued
+        );
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
+
+        // Second execute: performs cross-contract call, transitions Queued -> Executed
         client.execute(&proposal_id);
         assert_eq!(
             client.get_proposal(&proposal_id).state,
@@ -1480,7 +1895,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_reverting_target_leaves_proposal_succeeded_and_target_unchanged() {
+    fn execute_reverting_target_leaves_proposal_queued_and_target_unchanged() {
         let (env, _token, _tc, _contract_id, client, accounts) = bonded_env!();
         let reverting_target_id = env.register(RevertingTarget, ());
 
@@ -1501,11 +1916,44 @@ mod tests {
             ProposalState::Succeeded
         );
 
+        // Queue Succeeded -> Queued
+        client.queue(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Queued
+        );
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
+
         // Execution attempt against reverting target fails with ContractInvocationFailed
         let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::ContractInvocationFailed);
 
-        // Failure ordering guarantee: proposal remains Succeeded (NOT Executed)
+        // Failure ordering guarantee: proposal remains Queued (NOT Executed)
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Queued
+        );
+    }
+
+    #[test]
+    fn execute_on_succeeded_directly_is_rejected() {
+        let (env, client, accounts, proposal_id, target_id) = setup!();
+        let mock_target = MockTargetClient::new(&env, &target_id);
+
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+
+        client.execute(&proposal_id); // Active -> Succeeded
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Succeeded
+        );
+
+        // Calling execute directly on Succeeded (without queueing) is rejected
+        let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(mock_target.count(), 0);
         assert_eq!(
             client.get_proposal(&proposal_id).state,
             ProposalState::Succeeded
@@ -1546,12 +1994,16 @@ mod tests {
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
 
-        client.execute(&proposal_id); // Succeeded
+        client.execute(&proposal_id); // Active -> Succeeded
+        client.queue(&proposal_id); // Succeeded -> Queued
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
+
         let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::ContractInvocationFailed);
         assert_eq!(
             client.get_proposal(&proposal_id).state,
-            ProposalState::Succeeded
+            ProposalState::Queued
         );
     }
 
@@ -1563,9 +2015,12 @@ mod tests {
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
 
-        // An account that did not propose or vote triggers finalisation and execution
-        client.execute(&proposal_id); // user3 or any caller
-        client.execute(&proposal_id);
+        // An account that did not propose or vote triggers finalisation, queue, and execution
+        client.execute(&proposal_id); // user3 or any caller: Active -> Succeeded
+        client.queue(&proposal_id); // Succeeded -> Queued
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
+        client.execute(&proposal_id); // Queued -> Executed
         assert_eq!(
             client.get_proposal(&proposal_id).state,
             ProposalState::Executed
@@ -1647,9 +2102,24 @@ mod tests {
         );
         assert_eq!(body.topics.get(1).unwrap(), &ScVal::U64(proposal_id));
 
-        // 6. execute invocation (Succeeded -> Executed) emits the refund
+        // 6. queue (Succeeded -> Queued) emits Queued
+        client.queue(&proposal_id);
+        let all = env.events().all();
+        let events = all.events();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        let xdr::ContractEventBody::V0(body) = &event.body;
+        assert_eq!(
+            body.topics.first().unwrap(),
+            &ScVal::Symbol("queued".try_into().unwrap())
+        );
+        assert_eq!(body.topics.get(1).unwrap(), &ScVal::U64(proposal_id));
+
+        // 7. execute invocation (Queued -> Executed) emits the refund
         //    transfer, Finalised and the bond release that pays the
         //    proposer back
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
         client.execute(&proposal_id);
         assert_eq!(env.events().all().events().len(), 3); // transfer + 2
         assert_transfer_event(&env, &contract_id, &accounts.user1, BOND);
@@ -1946,7 +2416,12 @@ mod tests {
         assert_eq!(tc.balance(&contract_id), BOND);
         assert_eq!(tc.balance(&accounts.user1), FUNDS - BOND);
 
-        client.execute(&proposal_id); // Succeeded -> Executed, bond refunded
+        client.queue(&proposal_id); // Succeeded -> Queued
+        assert_eq!(tc.balance(&contract_id), BOND);
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
+
+        client.execute(&proposal_id); // Queued -> Executed, bond refunded
         assert_eq!(
             client.get_proposal(&proposal_id).state,
             ProposalState::Executed
@@ -2031,7 +2506,10 @@ mod tests {
 
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&executed); // Active -> Succeeded
-        client.execute(&executed); // Succeeded -> Executed (refund)
+        client.queue(&executed); // Succeeded -> Queued
+        let eta = client.get_eta(&executed);
+        env.ledger().set_timestamp(eta);
+        client.execute(&executed); // Queued -> Executed (refund)
         client.cancel_proposal(&cancelled, &accounts.user2); // refund
         client.execute(&defeated); // Active -> Defeated (forfeit)
 
@@ -2074,7 +2552,10 @@ mod tests {
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&proposal_id); // Active -> Succeeded
-        client.execute(&proposal_id); // Succeeded -> Executed (refund paid)
+        client.queue(&proposal_id); // Succeeded -> Queued
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
+        client.execute(&proposal_id); // Queued -> Executed (refund paid)
 
         assert_eq!(tc.balance(&contract_id), 0);
         assert_eq!(tc.balance(&accounts.user1), FUNDS);
@@ -2106,6 +2587,10 @@ mod tests {
         client.execute(&proposal_id); // Active -> Succeeded, bond still held
         assert_eq!(mock_target.count(), 0);
 
+        client.queue(&proposal_id); // Succeeded -> Queued
+        let eta = client.get_eta(&proposal_id);
+        env.ledger().set_timestamp(eta);
+
         // Inflate the recorded bond past custody so the refund cannot pay.
         tamper_bond_amount(&env, &contract_id, proposal_id, BOND + 1);
 
@@ -2116,7 +2601,7 @@ mod tests {
         // dispatch that preceded the refund is rolled back with it.
         assert_eq!(
             client.get_proposal(&proposal_id).state,
-            ProposalState::Succeeded
+            ProposalState::Queued
         );
         assert_eq!(
             client.get_proposal(&proposal_id).bond_state,

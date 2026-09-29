@@ -99,14 +99,15 @@ treasury at a terminal transition.
 | `configure_bond` | ✅ Implemented | One-time permissionless config (token, amount, treasury); first caller wins; `propose` is rejected with `NotInitialized` while unconfigured |
 | `propose` | ✅ Implemented | Stores the target contract, opaque action payload, and voting deadline; **real token transfer** proposer → contract for the bond, before any state write |
 | `vote` | ✅ Implemented | One-vote-per-voter enforced |
-| `execute` | ✅ Implemented | Permissionless majority finalisation, then `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Succeeded`; on terminal transitions the bond is **refunded** to the proposer (`Executed`) or **forfeited** to the treasury (`Defeated`) in the same frame |
+| `queue` / `get_eta` | ✅ Implemented | Passed proposals are moved into `Queued` with a timestamped `eta` that blocks execution until the timelock has elapsed |
+| `execute` | ✅ Implemented | Permissionless majority finalisation, then `queue`-gated timelock, followed by `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Queued`; on terminal transitions the bond is **refunded** to the proposer (`Executed`) or **forfeited** to the treasury (`Defeated`) in the same frame |
 | `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; **real token transfer** refund of the bond |
 | `get_proposal` / `get_proposal_count` / `get_proposals` / `has_voted` | ✅ Implemented | Read-only views; pagination with bounds clamping |
 | `get_bond_config` | ✅ Implemented | Read-only; `NotInitialized` when no bond is configured |
 | `touch_ttl` | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a proposal; `NotFound` for unknown ids |
-| Events | ✅ Implemented | `Proposed`, `VoteCast`, `Finalised`, `BondPosted`, `BondReleased` (`proposal_id` as topic) |
-| Storage | ✅ Persistent + TTL | `DataKey::Proposal` records in persistent storage with 30-day TTL maintenance; count, bond config, custody total, and vote markers in instance storage |
-| Tests | ✅ 74 | Bond custody lifecycle (post/refund/forfeit/conservation), arithmetic boundary tests, rollback-on-failure ordering, cross-contract dispatch + retry, introspection/pagination views, plus a **negative-auth suite** (`authz.rs`): wrong-signer and args-replay rejection, the nested token authorization frame for the bond pull, `env.auths()` authorization-tree assertions |
+| Events | ✅ Implemented | `Proposed`, `VoteCast`, `Finalised`, `Queued`, `BondPosted`, `BondReleased` (`proposal_id` as topic) |
+| Storage | ✅ Persistent + TTL | `DataKey::Proposal` records in persistent storage with 30-day TTL maintenance; count, bond config, custody total, and vote markers in instance storage; queued proposals persist `delay` and `eta` in the proposal record |
+| Tests | ✅ 85 | Bond custody lifecycle (post/refund/forfeit/conservation), timelock queue + ETA enforcement, arithmetic boundary tests, rollback-on-failure ordering, cross-contract dispatch + retry, introspection/pagination views, plus a **negative-auth suite** (`authz.rs`): wrong-signer and args-replay rejection, the nested token authorization frame for the bond pull, `env.auths()` authorization-tree assertions |
 | Weighted voting | ❌ Not implemented | Follow-up |
 
 ## Subscription Payments (`crates/subscription-payments`)
