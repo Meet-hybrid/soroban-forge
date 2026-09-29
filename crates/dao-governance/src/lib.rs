@@ -2689,3 +2689,6 @@ mod authz;
 // and finalization-outcome invariants (issue #62).
 #[cfg(test)]
 mod props;
+
+#[cfg(test)]
+mod indexer_fixtures;

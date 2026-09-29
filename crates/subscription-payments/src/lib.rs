@@ -553,6 +553,11 @@ pub struct Subscription {
     pub paused_at: Option<u64>,
     /// Number of consecutive failed billing attempts.
     pub failed_attempts: u32,
+    /// Ledger timestamp at which the subscription first became overdue for the
+    /// current open period, or `None` while the subscription is current.
+    /// Set when a charge observes an elapsed due time without a successful
+    /// payment; cleared on a successful charge.
+    pub past_due_since: Option<u64>,
     /// Per-metric usage quotas priced on top of `amount`.
     ///
     /// Empty is the flat flow: the period bills exactly `amount`. The list is
@@ -1401,6 +1406,11 @@ impl SubscriptionPayments {
             paused_at: None,
             failed_attempts: 0,
             quotas,
+            past_due_since: None,
+            // Flat by default: a subscription is metered only when the
+            // subscriber declares quotas (today via `set_quotas`, and later
+            // copied from the plan it joins).
+            quotas: Vec::new(env),
             prepaid_balance: None,
         };
         env.storage()
@@ -1825,6 +1835,9 @@ mod plan;
 mod prepaid;
 #[cfg(test)]
 mod props;
+
+#[cfg(test)]
+mod indexer_fixtures;
 
 #[cfg(test)]
 mod tests {
