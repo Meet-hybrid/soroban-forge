@@ -1,44 +1,13 @@
-# Getting Started
+# Getting Started with Soroban Forge
 
-This tutorial will walk you through building and testing a Soroban Forge contract locally.
+This section covers the basics of setting up and running your first Soroban smart contract.
 
-## Prerequisites
+## Topics
 
-- Rust **stable** (pinned via `rust-toolchain.toml` to the stable channel)
-- `rustup target add wasm32v1-none`
-- `cargo install soroban-cli`
-
-## Step 1: Build
-
-```bash
-cd path/to/soroban-forge
-cargo build --workspace
-```
-
-## Step 2: Run Tests
-
-```bash
-cargo test --workspace
-```
-
-## Step 3: Run Lints
-
-```bash
-cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-## Step 4: Deploy
-
-```bash
-stellar contract deploy \
-  --wasm target/wasm32v1-none/release/soroban_forge_escrow.wasm \
-  --source-account GD... \
-  --network testnet
-```
+- [Installation](installation.md)
+- [First Contract](quick-start.md)
+- [Testing](testing.md)
 
 ## Next Steps
 
-- Explore the [Architecture](architecture/architecture.md)
-- Review [Security Best Practices](best-practices/smart-contract-security.md)
-- Read the [Contracts Overview](contracts/index.md)
+After completing the basics, explore [Best Practices](best-practices/index.md) or dive into [Contract Development](contracts/index.md).
