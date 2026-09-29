@@ -112,8 +112,8 @@ extern crate std;
 
 use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
 use soroban_sdk::{
-    contract, contractclient, contractevent, contractimpl, contracttype, Address, Bytes,
-    Env, IntoVal, Symbol, Val,
+    contract, contractclient, contractevent, contractimpl, contracttype, Address, Bytes, Env,
+    IntoVal, Symbol, Val,
 };
 
 /// Public interface for the Soroban Forge DAO governance contract.
@@ -203,10 +203,7 @@ pub trait SorobanForgeDaoGovernance {
     ///
     /// * [`ForgeError::NotFound`] — no proposal with this id.
     /// * [`ForgeError::InvalidInput`] — the proposal has not been queued (`eta == 0`).
-    fn get_eta(
-        env: Env,
-        proposal_id: u64,
-    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+    fn get_eta(env: Env, proposal_id: u64) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
     /// Finalise a proposal once voting has ended, and execute queued proposals.
     ///
@@ -956,11 +953,7 @@ mod events {
     }
 
     pub fn queued(env: &Env, proposal_id: u64, eta: u64) {
-        Queued {
-            proposal_id,
-            eta,
-        }
-        .publish(env);
+        Queued { proposal_id, eta }.publish(env);
     }
 
     pub fn bond_posted(env: &Env, proposal_id: u64, token: &Address, amount: i128) {
@@ -1255,7 +1248,9 @@ mod tests {
     #[contractimpl]
     impl FlakyTarget {
         pub fn set_fail(env: Env, fail: bool) {
-            env.storage().instance().set(&Symbol::new(&env, "fail"), &fail);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "fail"), &fail);
         }
 
         pub fn execute(env: Env, _payload: Bytes) {
@@ -1386,7 +1381,10 @@ mod tests {
         env.ledger().set_timestamp(proposal.eta - 1);
         let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::DeadlineReached);
-        assert_eq!(client.get_proposal(&proposal_id).state, ProposalState::Queued);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Queued
+        );
 
         env.ledger().set_timestamp(proposal.eta);
         client.execute(&proposal_id);

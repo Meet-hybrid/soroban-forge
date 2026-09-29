@@ -450,10 +450,7 @@ pub trait SorobanForgeSubscriptionPayments {
     /// # Errors
     ///
     /// * [`ForgeError::NotFound`] — no plan with `plan_id` exists.
-    fn get_plan(
-        env: Env,
-        plan_id: u64,
-    ) -> Result<Plan, soroban_forge_shared_utils::ForgeError>;
+    fn get_plan(env: Env, plan_id: u64) -> Result<Plan, soroban_forge_shared_utils::ForgeError>;
 
     /// Total number of plans created so far (read-only view).
     ///
@@ -653,9 +650,7 @@ impl SubscriptionPayments {
             period,
             quotas,
         };
-        env.storage()
-            .instance()
-            .set(&DataKey::Plan(plan_id), &plan);
+        env.storage().instance().set(&DataKey::Plan(plan_id), &plan);
         Ok(plan_id)
     }
 
@@ -665,7 +660,11 @@ impl SubscriptionPayments {
     /// with the plan's terms. The subscription id is drawn from the same
     /// monotonic counter as `subscribe`, so all subscription ids are globally
     /// unique regardless of creation path.
-    pub fn subscribe_to_plan(env: Env, plan_id: u64, subscriber: Address) -> Result<u64, ForgeError> {
+    pub fn subscribe_to_plan(
+        env: Env,
+        plan_id: u64,
+        subscriber: Address,
+    ) -> Result<u64, ForgeError> {
         let plan = Self::get_plan_impl(&env, plan_id)?;
         subscriber.require_auth();
 
@@ -715,7 +714,15 @@ impl SubscriptionPayments {
         }
         subscriber.require_auth();
 
-        Self::create_subscription(&env, subscriber, provider, token, amount, period, Vec::new(&env))
+        Self::create_subscription(
+            &env,
+            subscriber,
+            provider,
+            token,
+            amount,
+            period,
+            Vec::new(&env),
+        )
     }
 
     /// Explicitly authorize `provider` to create subscriptions on
@@ -798,7 +805,15 @@ impl SubscriptionPayments {
         }
         provider.require_auth();
 
-        Self::create_subscription(&env, subscriber, provider, token, amount, period, Vec::new(&env))
+        Self::create_subscription(
+            &env,
+            subscriber,
+            provider,
+            token,
+            amount,
+            period,
+            Vec::new(&env),
+        )
     }
 
     /// Bill one due period.
@@ -1575,9 +1590,9 @@ mod authz;
 #[cfg(test)]
 mod metering;
 #[cfg(test)]
-mod props;
-#[cfg(test)]
 mod plan;
+#[cfg(test)]
+mod props;
 
 #[cfg(test)]
 mod tests {

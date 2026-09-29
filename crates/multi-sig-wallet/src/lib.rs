@@ -273,8 +273,8 @@ extern crate std;
 
 use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
 use soroban_sdk::{
-    contract, contractclient, contractevent, contractimpl, contracttype, Address, Bytes,
-    Env, IntoVal, Symbol, Val, Vec,
+    contract, contractclient, contractevent, contractimpl, contracttype, Address, Bytes, Env,
+    IntoVal, Symbol, Val, Vec,
 };
 
 /// Public interface for the Soroban Forge multi-signature wallet contract.
