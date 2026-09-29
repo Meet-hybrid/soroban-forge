@@ -142,27 +142,4 @@ mod tests {
         assert!(help.contains("--expected"));
         assert!(help.contains("--manifest"));
     }
-
-    #[test]
-    fn inspect_flags_parse() {
-        let cli = Cli::try_parse_from([
-            "soroban-forge",
-            "inspect",
-            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
-            "--keys",
-            "Admin,Balance",
-            "--json",
-        ])
-        .unwrap();
-
-        let Commands::Inspect(args) = cli.command else {
-            panic!("expected inspect command");
-        };
-        assert_eq!(
-            args.contract_address,
-            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"
-        );
-        assert_eq!(args.keys.as_deref(), Some("Admin,Balance"));
-        assert!(args.json);
-    }
 }

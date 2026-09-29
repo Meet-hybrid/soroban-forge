@@ -113,6 +113,6 @@ pub struct InspectArgs {
     #[arg(long, default_value = "testnet")]
     pub network: String,
     /// Source account
-    #[arg(short, long)]
+    #[arg(long)]
     pub source: Option<String>,
 }
