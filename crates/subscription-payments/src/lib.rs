@@ -1072,6 +1072,33 @@ impl SubscriptionPayments {
         }
         subscription.subscriber.require_auth();
 
+        // Prorated refund of unused subscription time. Only meaningful for
+        // pull-mode subscriptions that have already paid for the open period:
+        // the subscriber has been charged for `[last_charged, last_charged +
+        // period)` and is cancelling partway through it, so the unelapsed
+        // fraction is returned. Prepaid balances are refunded in full below.
+        let mut prorated_refund = None;
+        if subscription.prepaid_balance.is_none() {
+            let now = env.ledger().timestamp();
+            let period_end = subscription
+                .last_charged
+                .checked_add(subscription.period)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            if now < period_end {
+                let unused = period_end
+                    .checked_sub(now)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+                let refund_amount = subscription
+                    .amount
+                    .checked_mul(unused as i128)
+                    .ok_or(ForgeError::ArithmeticOverflow)?
+                    / subscription.period as i128;
+                if refund_amount > 0 {
+                    prorated_refund = Some(refund_amount);
+                }
+            }
+        }
+
         let mut refund = None;
         if let Some(balance) = subscription.prepaid_balance {
             if balance > 0 {
@@ -1087,6 +1114,18 @@ impl SubscriptionPayments {
                 subscription.prepaid_balance = Some(0);
                 refund = Some(balance);
             }
+        }
+
+        if let Some(amount) = prorated_refund {
+            let transfer_result = token::TokenClient::new(&env, &subscription.token).try_transfer(
+                &subscription.provider,
+                &subscription.subscriber,
+                &amount,
+            );
+            if !matches!(transfer_result, Ok(Ok(()))) {
+                return Err(ForgeError::TokenTransferFailed);
+            }
+            events::balance_refunded(&env, subscription_id, amount, 0);
         }
 
         subscription.status = SubscriptionStatus::Cancelled;
@@ -1500,6 +1539,14 @@ mod events {
         pub subscriber: Address,
     }
 
+    /// Emitted when a prorated refund is paid to the subscriber on cancel.
+    #[contractevent]
+    pub struct Refunded {
+        #[topic]
+        pub subscription_id: u64,
+        pub amount: i128,
+    }
+
     #[contractevent]
     pub struct Deposited {
         #[topic]
@@ -1522,16 +1569,6 @@ mod events {
         pub subscription_id: u64,
         pub amount: i128,
         pub balance_after: i128,
-    }
-
-    /// Prorated refund of unused subscription time on cancellation.
-    #[contractevent]
-    pub struct Refunded {
-        #[topic]
-        pub subscription_id: u64,
-        pub subscriber: Address,
-        pub amount: i128,
-        pub unused_seconds: u64,
     }
 
     pub fn deposited(env: &Env, subscription_id: u64, amount: i128, balance_after: i128) {
@@ -1557,22 +1594,6 @@ mod events {
             subscription_id,
             amount,
             balance_after,
-        }
-        .publish(env);
-    }
-
-    pub fn refunded(
-        env: &Env,
-        subscription_id: u64,
-        subscriber: &Address,
-        amount: i128,
-        unused_seconds: u64,
-    ) {
-        Refunded {
-            subscription_id,
-            subscriber: subscriber.clone(),
-            amount,
-            unused_seconds,
         }
         .publish(env);
     }
