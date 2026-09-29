@@ -119,7 +119,7 @@ flowchart LR
     shared[shared-utils<br/>errors · types · storage patterns]
     testutils[test-utils<br/>Env harness · mock accounts]
     sdk[soroban-sdk 21.5.1]
-    cli[cli<br/>build · test · lint · deploy]
+    cli[cli<br/>build · lint · test · deploy · new · verify · invoke · events]
     ts[typescript-sdk]
     net[(Stellar network)]
 
@@ -158,7 +158,7 @@ soroban-forge/
 ├── crates/                   # Rust smart contracts and libraries
 │   ├── shared-utils/         # ForgeError, storage patterns, shared types
 │   ├── test-utils/           # Soroban Env test harness and mock accounts
-│   ├── cli/                  # Developer CLI (build / test / lint / deploy)
+│   ├── cli/                  # Developer CLI (build / lint / test / deploy / new / verify / invoke / events)
 │   ├── escrow/               # ✅ implemented
 │   ├── vesting/              # ✅ implemented
 │   ├── multi-sig-wallet/
