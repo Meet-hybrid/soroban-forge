@@ -143,6 +143,33 @@ use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env, Vec,
 };
 
+/// Status of an escrow.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EscrowStatus {
+    Pending,
+    Funded,
+    Completed,
+    Refunded,
+    Disputed,
+    Cancelled,
+}
+
+/// Escrow record.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowData {
+    pub buyer: Address,
+    pub seller: Address,
+    pub arbiter: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub released: i128,
+    pub timeout: u64,
+    pub status: EscrowStatus,
+    pub scheduled_release: Option<u64>,
+}
+
 use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
 
 /// Public interface for the Soroban Forge escrow contract.
@@ -167,6 +194,32 @@ pub trait SorobanForgeEscrow {
         amount: i128,
         timeout: u64,
     ) -> Result<u64, ForgeError>;
+
+    /// Schedule a future release of the full remaining balance to the seller.
+    ///
+    /// Requires the buyer; only valid while `Funded`. `release_at` must be
+    /// strictly in the future. Overwrites any previously scheduled release.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Funded`, or
+    ///   `release_at` is not in the future.
+    fn schedule_release(env: Env, escrow_id: u64, release_at: u64) -> Result<(), ForgeError>;
+
+    /// Execute a previously scheduled release once the time-lock has expired.
+    ///
+    /// Permissionless: anyone may call once `release_at` has passed. Only
+    /// valid while `Funded` and a schedule exists.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Funded`, no schedule
+    ///   exists, or the time-lock has not yet expired.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the payout.
+    fn execute_scheduled(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
     /// Fund the escrow, pulling `amount` of the escrow's token from the
     /// buyer into this contract. Requires the buyer; only valid while
