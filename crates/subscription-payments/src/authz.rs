@@ -771,3 +771,39 @@ fn charge_catchup_authorization_tree_contains_provider_and_token_transfer_frames
         ],
     );
 }
+
+#[test]
+fn deposit_accepts_subscriber_signature() {
+    let (env, token, _contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    env.mock_all_auths_allowing_non_root_auth();
+    client.deposit(&id, &1000);
+    assert_eq!(client.get_prepaid_balance(&id), 1000);
+}
+
+#[test]
+fn deposit_rejects_non_subscriber_signature() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let third_party = &accounts.user3;
+
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    env.mock_auths(&[MockAuth {
+        address: third_party,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit",
+            args: (id, 1000_i128).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_deposit(&id, &1000);
+    assert_auth_abort!(res);
+}

@@ -7,6 +7,7 @@ pull a fixed `amount` per `period` (seconds) through SEP-41 token transfers.
 
 ```rust
 fn subscribe(subscriber, provider, token, amount, period) -> Result<u64, ForgeError>
+fn deposit(subscription_id, amount) -> Result<(), ForgeError>
 fn charge(subscription_id) -> Result<i128, ForgeError>
 fn charge_catchup(subscription_id, max_periods: u32) -> Result<i128, ForgeError>
 fn set_quotas(subscription_id, quotas: Vec<MetricQuota>) -> Result<(), ForgeError>
@@ -14,6 +15,7 @@ fn record_usage(subscription_id, metric: Symbol, units: u64) -> Result<(), Forge
 fn quote_period(subscription_id) -> Result<i128, ForgeError>
 fn cancel(subscription_id) -> Result<(), ForgeError>
 fn get_subscription(subscription_id) -> Result<Subscription, ForgeError>
+fn get_prepaid_balance(subscription_id) -> Result<i128, ForgeError>
 fn get_usage(subscription_id, metric: Symbol) -> Result<UsageRecord, ForgeError>
 fn get_subscription_count() -> u64
 fn subscriptions_for_subscriber(subscriber, offset, limit) -> Result<Vec<Subscription>, ForgeError>
@@ -88,6 +90,28 @@ with the `min` skipped for an uncapped quota.
   `base + Σ caps`. A `u64` unit-counter overflow surfaces as
   `ArithmeticOverflow` rather than wrapping into a silent underbill.
 
+## Prepaid Balance Mode
+
+An opt-in prepaid balance mode allows subscribers to fund upcoming charges in advance:
+
+- `deposit(subscription_id, amount)`: Pulls `amount` of token from subscriber to the contract address via SEP-41 `try_transfer` (transfer-before-state). Credited to the subscription's prepaid balance in storage.
+- `charge`: When charging, if `prepaid_balance >= period_amount`, the contract debits `period_amount` directly from its held prepaid balance and transfers it to the provider. If `prepaid_balance < period_amount`, it falls back to pulling from the subscriber's wallet. If the wallet transfer fails, it transitions to `PastDue` per retry policy.
+- `charge_catchup`: Settles each elapsed period from prepaid balance as long as sufficient funds remain, falling back to wallet transfer once depleted.
+- `cancel`: When a subscription with remaining prepaid balance is cancelled, the contract automatically and atomically refunds the exact remaining balance back to the subscriber.
+- `get_prepaid_balance(subscription_id)`: Read-only view returning the current prepaid balance.
+
+### Conservation Invariant
+
+Financial conservation holds across arbitrary sequences of operations:
+```text
+Σdeposits − Σdebits − Σrefunds == prepaid_balance == contract_token_balance
+```
+and upon cancellation:
+```text
+prepaid_balance == 0  and  contract_token_balance == 0
+```
+Property-tested against randomized call sequences via `proptest`.
+
 ## Subscription States
 
 - `Active` — chargeable
@@ -111,6 +135,7 @@ are only loaded for the requested page slice.
 
 - `get_subscription_count()` returns the total number of subscriptions created
   (the monotonic id counter; cancellation never lowers it).
+- `get_prepaid_balance(subscription_id)` returns the current prepaid balance of the subscription.
 - `subscriptions_for_subscriber(subscriber, offset, limit)` returns a page of
   `Subscription` records for the subscriber, in creation order.
 - `subscriptions_for_provider(provider, offset, limit)` returns a page of
@@ -130,6 +155,7 @@ of `0` fails with `ForgeError::InvalidInput`.
 - `Usage(subscription_id, metric)` — the open period's raw unit counter for one
   metric, stamped with the `last_charged` window it belongs to; removed by the
   charge that closes the period.
+- `PrepaidBalance(subscription_id)` — prepaid balance for `subscription_id: u64`.
 
 ## Payment Semantics
 
@@ -149,4 +175,7 @@ The contract emits typed on-chain lifecycle events for indexers and off-chain mo
 - `UsageRecorded` (topics: `subscription_id: u64`, `metric: Symbol`) — emitted per `record_usage` call. Contains the `units` added, the running `period_units` for the open period, and the `period_start` window those units belong to, so an indexer can rebuild each settled period's overage.
 - `QuotasSet` (topic: `subscription_id: u64`) — emitted when `set_quotas` replaces the declared terms. Contains the full `quotas` list, so the pricing an indexer needs travels with the event.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
+- `Deposited` (topic: `subscription_id: u64`) — emitted when funds are deposited into prepaid balance via `deposit`. Contains `subscriber`, `amount`, and `new_balance`.
+- `BalanceDebited` (topic: `subscription_id: u64`) — emitted when a charge is debited from prepaid balance. Contains `amount` and `remaining_balance`.
+- `BalanceRefunded` (topic: `subscription_id: u64`) — emitted on `cancel` when remaining prepaid balance is refunded. Contains `subscriber` and `amount`.
 

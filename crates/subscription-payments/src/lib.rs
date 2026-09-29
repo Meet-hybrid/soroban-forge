@@ -390,6 +390,37 @@ pub trait SorobanForgeSubscriptionPayments {
         offset: u32,
         limit: u32,
     ) -> Result<Vec<Subscription>, soroban_forge_shared_utils::ForgeError>;
+
+    /// Deposit funds into the subscription's prepaid balance via SEP-41 token transfer.
+    ///
+    /// Requires the subscriber. Tokens are held by the contract until debited
+    /// by `charge` or refunded on `cancel`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no such subscription.
+    /// * [`ForgeError::InvalidInput`] — `amount <= 0` or subscription is `Cancelled`.
+    /// * [`ForgeError::Unauthorized`] — the caller is not `subscriber`.
+    /// * [`ForgeError::TokenTransferFailed`] — the SEP-41 transfer into the contract failed.
+    /// * [`ForgeError::ArithmeticOverflow`] — adding `amount` would overflow `i128`.
+    fn deposit(
+        env: Env,
+        subscription_id: u64,
+        amount: i128,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the subscription's prepaid balance (read-only view; requires no authorization).
+    ///
+    /// Returns `0` if no balance has been deposited or if all prepaid funds
+    /// have been debited/refunded.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no such subscription.
+    fn get_prepaid_balance(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Lifecycle state of a subscription.
@@ -501,6 +532,8 @@ enum DataKey {
     /// `record_usage`, removed by the charge that closes the period, read by
     /// the amount derivation.
     Usage(u64, Symbol),
+    /// Prepaid balance for `subscription_id: u64`.
+    PrepaidBalance(u64),
 }
 
 /// The deployable subscription payments contract.
@@ -656,41 +689,56 @@ impl SubscriptionPayments {
         // the subscription untouched and no funds in flight.
         let amount = Self::derive_period_amount(&env, &subscription)?;
 
-        // Execute SEP-41 token transfer from subscriber to provider
-        let transfer_result = token::TokenClient::new(&env, &subscription.token).try_transfer(
-            &subscription.subscriber,
-            &subscription.provider,
-            &amount,
-        );
+        let bal_key = DataKey::PrepaidBalance(subscription_id);
+        let prepaid_balance: i128 = env.storage().instance().get(&bal_key).unwrap_or(0);
 
-        match transfer_result {
-            Ok(Ok(())) => {
-                subscription.last_charged = next_due;
-                subscription.failed_attempts = 0;
-                subscription.status = SubscriptionStatus::Active;
-                subscription.paused_at = None;
-                // Period rollover: the meters go in the same frame that closes
-                // the period, so the next period starts from zero units.
-                Self::rollover_usage(&env, &subscription);
-                env.storage()
-                    .instance()
-                    .set(&DataKey::Subscription(subscription_id), &subscription);
-                events::charged(&env, &subscription, amount);
-                Ok(amount)
-            }
-            _ => {
-                let failed = subscription.failed_attempts.saturating_add(1);
-                subscription.failed_attempts = failed;
-                if failed >= MAX_RETRIES {
-                    subscription.status = SubscriptionStatus::Cancelled;
+        let (transfer_success, debited_from_balance) = if prepaid_balance >= amount {
+            let res =
+                transfer_from_contract(&env, &subscription.token, &subscription.provider, amount);
+            (res.is_ok(), true)
+        } else {
+            let res = token::TokenClient::new(&env, &subscription.token).try_transfer(
+                &subscription.subscriber,
+                &subscription.provider,
+                &amount,
+            );
+            (matches!(res, Ok(Ok(()))), false)
+        };
+
+        if transfer_success {
+            if debited_from_balance {
+                let new_balance = prepaid_balance - amount;
+                if new_balance == 0 {
+                    env.storage().instance().remove(&bal_key);
                 } else {
-                    subscription.status = SubscriptionStatus::PastDue;
+                    env.storage().instance().set(&bal_key, &new_balance);
                 }
-                env.storage()
-                    .instance()
-                    .set(&DataKey::Subscription(subscription_id), &subscription);
-                Ok(0)
+                events::balance_debited(&env, subscription_id, amount, new_balance);
             }
+            subscription.last_charged = next_due;
+            subscription.failed_attempts = 0;
+            subscription.status = SubscriptionStatus::Active;
+            subscription.paused_at = None;
+            // Period rollover: the meters go in the same frame that closes
+            // the period, so the next period starts from zero units.
+            Self::rollover_usage(&env, &subscription);
+            env.storage()
+                .instance()
+                .set(&DataKey::Subscription(subscription_id), &subscription);
+            events::charged(&env, &subscription, amount);
+            Ok(amount)
+        } else {
+            let failed = subscription.failed_attempts.saturating_add(1);
+            subscription.failed_attempts = failed;
+            if failed >= MAX_RETRIES {
+                subscription.status = SubscriptionStatus::Cancelled;
+            } else {
+                subscription.status = SubscriptionStatus::PastDue;
+            }
+            env.storage()
+                .instance()
+                .set(&DataKey::Subscription(subscription_id), &subscription);
+            Ok(0)
         }
     }
 
@@ -722,6 +770,9 @@ impl SubscriptionPayments {
         let periods = core::cmp::min(max_periods as u64, elapsed_periods);
 
         let mut total = 0_i128;
+        let bal_key = DataKey::PrepaidBalance(subscription_id);
+        let mut prepaid_balance: i128 = env.storage().instance().get(&bal_key).unwrap_or(0);
+
         for _ in 0..periods {
             let next_due = subscription
                 .last_charged
@@ -732,13 +783,24 @@ impl SubscriptionPayments {
             // is the only one that can carry overage: every period that follows
             // derives the base amount. Same helper, same arithmetic, per period.
             let amount = Self::derive_period_amount(&env, &subscription)?;
-            let transfer_result = token::TokenClient::new(&env, &subscription.token).try_transfer(
-                &subscription.subscriber,
-                &subscription.provider,
-                &amount,
-            );
-            if !matches!(transfer_result, Ok(Ok(()))) {
-                return Err(ForgeError::TokenTransferFailed);
+
+            if prepaid_balance >= amount {
+                transfer_from_contract(&env, &subscription.token, &subscription.provider, amount)?;
+                prepaid_balance = prepaid_balance
+                    .checked_sub(amount)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+                if prepaid_balance == 0 {
+                    env.storage().instance().remove(&bal_key);
+                } else {
+                    env.storage().instance().set(&bal_key, &prepaid_balance);
+                }
+                events::balance_debited(&env, subscription_id, amount, prepaid_balance);
+            } else {
+                let transfer_result = token::TokenClient::new(&env, &subscription.token)
+                    .try_transfer(&subscription.subscriber, &subscription.provider, &amount);
+                if !matches!(transfer_result, Ok(Ok(()))) {
+                    return Err(ForgeError::TokenTransferFailed);
+                }
             }
             total = total
                 .checked_add(amount)
@@ -914,6 +976,15 @@ impl SubscriptionPayments {
         }
         subscription.subscriber.require_auth();
 
+        // Exact refund of remaining prepaid balance
+        let bal_key = DataKey::PrepaidBalance(subscription_id);
+        let balance: i128 = env.storage().instance().get(&bal_key).unwrap_or(0);
+        if balance > 0 {
+            transfer_from_contract(&env, &subscription.token, &subscription.subscriber, balance)?;
+            env.storage().instance().remove(&bal_key);
+            events::balance_refunded(&env, subscription_id, &subscription.subscriber, balance);
+        }
+
         subscription.status = SubscriptionStatus::Cancelled;
         subscription.paused_at = None;
         env.storage()
@@ -983,6 +1054,47 @@ impl SubscriptionPayments {
         }
         let ids = Self::index_ids(&env, &DataKey::ProviderSubscriptions(provider));
         Self::resolve_page(&env, &ids, offset, limit)
+    }
+
+    /// Deposit funds into the subscription's prepaid balance.
+    ///
+    /// Requires `amount > 0` and the subscriber's authorization. Tokens are
+    /// transferred into the contract address before the prepaid balance is
+    /// credited (transfer-before-state).
+    pub fn deposit(env: Env, subscription_id: u64, amount: i128) -> Result<(), ForgeError> {
+        if amount <= 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        if subscription.status == SubscriptionStatus::Cancelled {
+            return Err(ForgeError::InvalidInput);
+        }
+        subscription.subscriber.require_auth();
+
+        transfer_into_contract(&env, &subscription.token, &subscription.subscriber, amount)?;
+
+        let bal_key = DataKey::PrepaidBalance(subscription_id);
+        let current: i128 = env.storage().instance().get(&bal_key).unwrap_or(0);
+        let new_balance = current
+            .checked_add(amount)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        env.storage().instance().set(&bal_key, &new_balance);
+
+        events::deposited(
+            &env,
+            subscription_id,
+            &subscription.subscriber,
+            amount,
+            new_balance,
+        );
+        Ok(())
+    }
+
+    /// Read the subscription's current prepaid balance (read-only view).
+    pub fn get_prepaid_balance(env: Env, subscription_id: u64) -> Result<i128, ForgeError> {
+        let _ = Self::get_subscription_impl(&env, subscription_id)?;
+        let bal_key = DataKey::PrepaidBalance(subscription_id);
+        Ok(env.storage().instance().get(&bal_key).unwrap_or(0))
     }
 
     /// Create a new subscription through the single shared creation path used
@@ -1275,97 +1387,49 @@ fn declares_metric(subscription: &Subscription, metric: &Symbol) -> bool {
         .any(|quota| quota.metric == *metric)
 }
 
-/// Lifecycle events emitted by the subscription payments contract.
-mod events {
-    use super::*;
-
-    #[contractevent]
-    pub struct Charged {
-        #[topic]
-        pub subscription_id: u64,
-        /// Amount actually transferred for the settled period: the derived
-        /// `base + overage` amount, not the base alone.
-        pub amount: i128,
-        pub last_charged: u64,
-        pub next_charge_at: u64,
-    }
-
-    /// Usage metered for one metric in the open period. Indexers can rebuild
-    /// every settled period's overage from these plus the plan's quotas.
-    #[contractevent]
-    pub struct UsageRecorded {
-        #[topic]
-        pub subscription_id: u64,
-        #[topic]
-        pub metric: Symbol,
-        /// Units added by this call.
-        pub units: u64,
-        /// Running total for the open period, including this call.
-        pub period_units: u64,
-        /// The billing window these units belong to.
-        pub period_start: u64,
-    }
-
-    /// The subscription's declared quota list was replaced.
-    #[contractevent]
-    pub struct QuotasSet {
-        #[topic]
-        pub subscription_id: u64,
-        pub quotas: Vec<MetricQuota>,
-    }
-
-    #[contractevent]
-    pub struct Cancelled {
-        #[topic]
-        pub subscription_id: u64,
-        pub subscriber: Address,
-    }
-
-    pub fn charged(env: &Env, subscription: &Subscription, amount: i128) {
-        let next_charge_at = subscription
-            .last_charged
-            .saturating_add(subscription.period);
-        Charged {
-            subscription_id: subscription.subscription_id,
-            amount,
-            last_charged: subscription.last_charged,
-            next_charge_at,
-        }
-        .publish(env);
-    }
-
-    pub fn usage_recorded(env: &Env, record: &UsageRecord, units: u64) {
-        UsageRecorded {
-            subscription_id: record.subscription_id,
-            metric: record.metric.clone(),
-            units,
-            period_units: record.units,
-            period_start: record.period_start,
-        }
-        .publish(env);
-    }
-
-    pub fn quotas_set(env: &Env, subscription: &Subscription) {
-        QuotasSet {
-            subscription_id: subscription.subscription_id,
-            quotas: subscription.quotas.clone(),
-        }
-        .publish(env);
-    }
-
-    pub fn cancelled(env: &Env, subscription: &Subscription) {
-        Cancelled {
-            subscription_id: subscription.subscription_id,
-            subscriber: subscription.subscriber.clone(),
-        }
-        .publish(env);
+/// Move `amount` of `token` from `from` into this contract.
+fn transfer_into_contract(
+    env: &Env,
+    token: &Address,
+    from: &Address,
+    amount: i128,
+) -> Result<(), ForgeError> {
+    match token::TokenClient::new(env, token).try_transfer(
+        from,
+        env.current_contract_address(),
+        &amount,
+    ) {
+        Ok(Ok(())) => Ok(()),
+        _ => Err(ForgeError::TokenTransferFailed),
     }
 }
+
+/// Move `amount` of `token` from this contract to `to`.
+fn transfer_from_contract(
+    env: &Env,
+    token: &Address,
+    to: &Address,
+    amount: i128,
+) -> Result<(), ForgeError> {
+    match token::TokenClient::new(env, token).try_transfer(
+        &env.current_contract_address(),
+        to,
+        &amount,
+    ) {
+        Ok(Ok(())) => Ok(()),
+        _ => Err(ForgeError::TokenTransferFailed),
+    }
+}
+
+/// Lifecycle events emitted by the subscription payments contract.
+mod events;
 
 #[cfg(test)]
 mod authz;
 #[cfg(test)]
 mod metering;
+#[cfg(test)]
+mod prepaid;
 #[cfg(test)]
 mod props;
 

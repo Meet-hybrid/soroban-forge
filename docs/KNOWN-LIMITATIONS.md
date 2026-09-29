@@ -20,7 +20,7 @@ contract** and remain open for the other four:
    (proposal bonds) have since gained settlement the same way — including
    `distribute`'s real royalty payout — and multi-sig `execute` performs
    real cross-contract invocations;
-   subscriptions still move nothing.
+   subscription payments settles due periods and supports opt-in prepaid balance mode with contract custody.
 2. **Instance-only storage** — escrow, multi-sig wallet, DAO governance, and marketplace royalties now use **persistent** entries with TTL bumps on every write and permissionless `touch_ttl` keeper entrypoints. Vesting and subscriptions still use instance storage.
 3. **No events** — escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit lifecycle events; only vesting remains silent.
 4. **Arbiter stored but unreachable** — `dispute` (claimant-authorized)
@@ -32,21 +32,15 @@ contract** and remain open for the other four:
 
 ## Still open
 
-### 1. Token settlement for subscription payments
+### 1. Token settlement for subscription payments (Implemented)
 
-Subscriptions remain state machines: amounts are validated and stored, never
-moved. (Marketplace royalties moved off this list: `settle_sale` transfers
-real SEP-41 tokens with the escrow pattern. Multi-sig wallet also
-moved off this list: `execute` performs real cross-contract
-invocations via `try_invoke_contract`. Vesting also moved off this
-list: `claim` transfers the vested amount to the beneficiary with
-transfer-before-state ordering. DAO governance also moved off this list:
-`propose` pulls a SEP-41 proposal bond into contract custody and the bond is
-refunded to the proposer (`Executed`, `Cancelled`) or forfeited to the
-configured treasury (`Defeated`) in the same frame as the terminal
-transition.) The remaining contract gets its own tranche using the escrow
-pattern (see
-[RESUBMISSION.md](RESUBMISSION.md#phase-1--flagship-escrow-primitive-3-weeks)).
+Subscription payments settles real SEP-41 tokens:
+`charge` executes pull transfers subscriber → provider; `deposit` enables an opt-in
+prepaid mode where tokens are held in contract custody; `charge` prioritizes
+debiting from prepaid balance before falling back to subscriber wallet; and `cancel`
+refunds the exact remaining prepaid balance. Conservation
+($\Sigma\text{deposits} - \Sigma\text{debits} - \Sigma\text{refunds} == \text{balance}$)
+is verified with a randomized property test suite.
 
 ### 2. Instance-only storage outside escrow, multi-sig wallet, DAO governance, and marketplace royalties
 
