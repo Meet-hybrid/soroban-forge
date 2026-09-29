@@ -170,6 +170,7 @@ const MAX_CATCHUP_PERIODS: u32 = 32;
 
 /// Permissionless renewals are accepted for seven days after a period is due.
 pub const RENEWAL_WINDOW: u64 = 7 * 24 * 60 * 60;
+
 /// Maximum number of per-metric quotas one subscription may declare.
 ///
 /// Every charge derives its amount by walking the quota list, so the list is
@@ -308,6 +309,7 @@ pub trait SorobanForgeSubscriptionPayments {
         env: Env,
         subscription_id: u64,
     ) -> Result<RenewalPolicy, soroban_forge_shared_utils::ForgeError>;
+
     /// Declare (or replace) the metered-usage quotas of `subscription_id`.
     ///
     /// Requires the subscriber: a quota prices the overage the subscriber is
@@ -377,7 +379,6 @@ pub trait SorobanForgeSubscriptionPayments {
         env: Env,
         subscription_id: u64,
     ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
-
     /// Pause an active subscription, preventing further charges while paused.
     ///
     /// Requires the subscriber. Only valid when `Active`.
@@ -759,8 +760,6 @@ impl SubscriptionPayments {
         }
 
         // Execute SEP-41 token transfer from subscriber to provider
-        match Self::settle_period(&env, &subscription, false) {
-            Ok(()) => {
         let transfer_result = token::TokenClient::new(&env, &subscription.token).try_transfer(
             &subscription.subscriber,
             &subscription.provider,
@@ -1055,7 +1054,7 @@ impl SubscriptionPayments {
             .instance()
             .set(&DataKey::Subscription(subscription_id), &subscription);
         env.storage().instance().set(&key, &policy);
-        events::charged(&env, &subscription);
+        events::charged(&env, &subscription, subscription.amount);
         events::renewed(&env, &subscription, policy.completed_renewals);
         Ok(subscription.amount)
     }
@@ -1095,6 +1094,8 @@ impl SubscriptionPayments {
             allowance_live_until_ledger: stored.allowance_live_until_ledger,
             eligible,
         })
+    }
+
     /// Declare (or replace) the metered-usage quotas of `subscription_id`.
     ///
     /// Requires the subscriber — see the module docs on metered usage for why
@@ -1785,7 +1786,7 @@ mod events {
         pub completed_renewals: u32,
     }
 
-    pub fn charged(env: &Env, subscription: &Subscription) {
+    #[contractevent]
     pub struct Deposited {
         #[topic]
         pub subscription_id: u64,

@@ -132,7 +132,6 @@ A permissionless public keeper entrypoint `touch_tx_ttl(tx_id)` allows
 anyone to bump a transaction's persistent TTL without modifying its state;
 an unknown `tx_id` returns `ForgeError::NotFound`. A separate
 `touch_ttl(token)` keeper extends the persistent balance entries' TTL.
-
 ## Atomic Batch Transactions
 
 `submit_batch` stores one pending `WalletTx` with 1–10 ordered `BatchOp`s:

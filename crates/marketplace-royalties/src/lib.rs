@@ -1911,63 +1911,6 @@ mod tests {
         assert!(!events.events().is_empty());
     }
 
-    #[test]
-    fn settle_sale_override_uses_per_call_split_and_preserves_summary() {
-        let (_env, token, tc, _contract_id, client, accounts) = setup_settlement!();
-        let override_ = SplitOverride {
-            recipient: accounts.validator.clone(),
-            bps: 1_000,
-        };
-        let settlement = client.settle_sale_with_split(
-            &accounts.arbiter,
-            &token,
-            &accounts.user1,
-            &accounts.user3,
-            &1_000_i128,
-            &Some(override_),
-        );
-        assert_eq!(settlement.seller_net, 900);
-        assert_eq!(settlement.royalty_share, 100);
-        assert_eq!(tc.balance(&accounts.user3), 900);
-        assert_eq!(tc.balance(&accounts.validator), 100);
-        assert_eq!(
-            client.get_royalty(&accounts.arbiter).recipient,
-            accounts.user2
-        );
-        assert_eq!(
-            client
-                .get_settlement_summary(&accounts.arbiter)
-                .royalties_paid,
-            100
-        );
-    }
-
-    #[test]
-    fn settle_sale_override_rejects_rate_over_conservation_cap() {
-        let (_env, token, tc, _contract_id, client, accounts) = setup_settlement!();
-        let err = client
-            .try_settle_sale_with_split(
-                &accounts.arbiter,
-                &token,
-                &accounts.user1,
-                &accounts.user3,
-                &1_000_i128,
-                &Some(SplitOverride {
-                    recipient: accounts.validator.clone(),
-                    bps: 10_001,
-                }),
-            )
-            .unwrap_err()
-            .unwrap();
-        assert_eq!(err, ForgeError::InvalidInput);
-        assert_eq!(tc.balance(&accounts.user1), 1_000);
-        assert_eq!(
-            client
-                .try_get_settlement_summary(&accounts.arbiter)
-                .unwrap_err()
-                .unwrap(),
-            ForgeError::NotFound
-        );
     /// The quote is the settlement's own math: quoting a sale and then
     /// settling it returns identical numbers, floor rounding included
     /// (1,030 at 500 bps floors the 51.5 royalty share to 51).
@@ -2133,5 +2076,64 @@ mod tests {
         assert_eq!(tc.balance(seller), balances_before.1);
         assert_eq!(tc.balance(recipient), balances_before.2);
         assert!(env.events().all().events().is_empty());
+    }
+
+    #[test]
+    fn settle_sale_override_uses_per_call_split_and_preserves_summary() {
+        let (_env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let override_ = SplitOverride {
+            recipient: accounts.validator.clone(),
+            bps: 1_000,
+        };
+        let settlement = client.settle_sale_with_split(
+            &accounts.arbiter,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+            &Some(override_),
+        );
+        assert_eq!(settlement.seller_net, 900);
+        assert_eq!(settlement.royalty_share, 100);
+        assert_eq!(tc.balance(&accounts.user3), 900);
+        assert_eq!(tc.balance(&accounts.validator), 100);
+        assert_eq!(
+            client.get_royalty(&accounts.arbiter).recipient,
+            accounts.user2
+        );
+        assert_eq!(
+            client
+                .get_settlement_summary(&accounts.arbiter)
+                .royalties_paid,
+            100
+        );
+    }
+
+    #[test]
+    fn settle_sale_override_rejects_rate_over_conservation_cap() {
+        let (_env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let err = client
+            .try_settle_sale_with_split(
+                &accounts.arbiter,
+                &token,
+                &accounts.user1,
+                &accounts.user3,
+                &1_000_i128,
+                &Some(SplitOverride {
+                    recipient: accounts.validator.clone(),
+                    bps: 10_001,
+                }),
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(tc.balance(&accounts.user1), 1_000);
+        assert_eq!(
+            client
+                .try_get_settlement_summary(&accounts.arbiter)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
     }
 }
