@@ -1608,6 +1608,9 @@ mod prepaid;
 mod props;
 
 #[cfg(test)]
+mod indexer_fixtures;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
