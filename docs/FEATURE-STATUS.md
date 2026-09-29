@@ -60,58 +60,38 @@ treasury at a terminal transition.
 | Entrypoint                                         | Status         | Notes                                                                                                                                                                                                                   |
 | -------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `initialize`                                       | ✅ Implemented | Owner set + threshold validation                                                                                                                                                                                        |
-| `submit`                                           | ✅ Implemented | Creates pending transaction record in **persistent storage** (TTL-bumped on write)                                                                                                                                      |
-| `confirm`                                          | ✅ Implemented | One-confirmation-per-owner enforced; tx record re-bumped in persistent storage                                                                                                                                          |
-| `execute`                                          | ✅ Implemented | Threshold check + cross-contract `try_invoke_contract` to recorded `target`; status flip **after** invocation; target revert surfaces as `ForgeError::ContractInvocationFailed` and leaves tx `Pending`; events emitted |
-| `get_threshold` / `get_tx`                         | ✅ Implemented | Read-only; `get_tx` reads from persistent storage                                                                                                                                                                       |
+| `submit` / `submit_call`                           | ✅ Implemented | Creates pending transaction record with optional expiry deadline in **persistent storage** (TTL-bumped on write); supports opaque payloads and typed calls                                                               |
+| `confirm`                                          | ✅ Implemented | One-confirmation-per-owner enforced; tx record re-bumped in persistent storage; boundary-pinned rejection (`ForgeError::DeadlineReached`) at or after expiry                                                             |
+| `execute`                                          | ✅ Implemented | Threshold check + cross-contract `try_invoke_contract` to recorded `target`; status flip **after** invocation; target revert surfaces as `ForgeError::ContractInvocationFailed` and leaves tx `Pending`; reaching threshold before expiry remains executable after deadline |
+| `get_threshold` / `get_tx` / `is_live`             | ✅ Implemented | Read-only; `get_tx` reads from persistent storage with lazy expiry evaluation (`TxStatus::Expired`); `is_live` / `is_tx_live` reports whether tx is live and pending                                                   |
 | `submit_withdrawal`                                | ✅ Implemented | Typed `TxKind::Withdrawal` tx; balance validated at execution (transfer first, state second); per-token rolling limit enforced at submission                                                                            |
 | `deposit` / `balance` / `touch_ttl`                | ✅ Implemented | Per-token persistent balance entries; permissionless TTL keeper                                                                                                                                                         |
 | `touch_tx_ttl`                                     | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a transaction record without touching its state; `NotFound` for unknown ids                                                                                         |
 | `set_withdrawal_limit` / `remove_withdrawal_limit` | ✅ Implemented | `TxKind::LimitChange` txs on the same threshold+confirmation machinery; no effect below threshold                                                                                                                       |
 | `get_withdrawal_limit` / `get_withdrawal_window` / `get_window_usage` / `check_withdrawal` | ✅ Implemented | Read-only; missing limit/window reads as `None`/empty; simulation reports initialization, amount, limit, and custody-balance outcomes; no storage mutation |
-| Storage                                            | ✅ Persistent + TTL | `DataKey::Tx` records in persistent storage (migrated from instance) with 30-day TTL maintenance; owners, threshold, and limits remain instance storage                                                                |
-| Tests                                              | ✅ 109         | Full lifecycle, threshold/quorum, withdrawal + limit-change paths, keeper TTL tests, failure ordering, negative-auth suite (`authz.rs`)                                                                                  |
-| `submit`                                           | ✅ Implemented | Creates pending transaction record with opaque payload                                                                                                                                                                  |
-| `submit_call`                                      | ✅ Implemented | Creates pending typed cross-contract call with target address, function name, and arguments                                                                                                                             |
-| `confirm`                                          | ✅ Implemented | One-confirmation-per-owner enforced                                                                                                                                                                                     |
-| `execute`                                          | ✅ Implemented | Threshold check + cross-contract `try_invoke_contract`; supports opaque payloads and typed calls; status flip **after** invocation; target revert surfaces as `ForgeError::ContractInvocationFailed` and leaves tx `Pending` |
-| `get_threshold` / `get_tx`                         | ✅ Implemented | Read-only                                                                                                                                                                                                               |
-| `submit_withdrawal`                                | ✅ Implemented | Typed `TxKind::Withdrawal` tx; balance validated at execution (transfer first, state second); per-token rolling limit enforced at submission                                                                            |
-| `deposit` / `balance` / `touch_ttl`                | ✅ Implemented | Per-token persistent balance entries; permissionless TTL keeper                                                                                                                                                         |
-| `set_withdrawal_limit` / `remove_withdrawal_limit` | ✅ Implemented | `TxKind::LimitChange` txs on the same threshold+confirmation machinery; no effect below threshold                                                                                                                       |
-| `get_withdrawal_limit` / `get_withdrawal_window` / `get_window_usage` / `check_withdrawal` | ✅ Implemented | Read-only; missing limit/window reads as `None`/empty; simulation reports initialization, amount, limit, and custody-balance outcomes; no storage mutation |
-| Entrypoint | Status | Notes |
-|---|---|---|
-| `initialize` | ✅ Implemented | Owner set + threshold validation |
-| `submit` | ✅ Implemented | Creates pending transaction record |
-| `confirm` | ✅ Implemented | One-confirmation-per-owner enforced |
-| `execute` | ✅ Implemented | Threshold check + cross-contract `try_invoke_contract` to recorded `target`; status flip **after** invocation; target revert surfaces as `ForgeError::ContractInvocationFailed` and leaves tx `Pending`; events emitted |
-| `get_threshold` / `get_tx` | ✅ Implemented | Read-only |
-| `submit_withdrawal` | ✅ Implemented | Typed `TxKind::Withdrawal` tx; balance validated at execution (transfer first, state second); per-token rolling limit enforced at submission |
-| `deposit` / `balance` / `touch_ttl` | ✅ Implemented | Per-token persistent balance entries; permissionless TTL keeper |
-| `set_withdrawal_limit` / `remove_withdrawal_limit` | ✅ Implemented | `TxKind::LimitChange` txs on the same threshold+confirmation machinery; no effect below threshold |
-| `get_withdrawal_limit` / `get_window_usage` | ✅ Implemented | Read-only; `None`/`0` when no limit is configured |
-| `add_owner` / `remove_owner` / `set_threshold` | ✅ Implemented | Owner-set and threshold governance via the same typed-tx machinery: `TxKind::AddOwner` / `RemoveOwner` / `SetThreshold` must cross the **current** threshold before `execute` applies them; submission and execution both re-validate the resulting state; removed-owner confirmations are scrubbed from still-pending txs; `remove_owner` guards the final owner and `set_threshold` requires `1 <= t <= owners.len()` |
-| `get_owners` / `is_owner` / `get_confirmations` / `get_rejections` / `get_tx_count` / `get_transactions` / `get_transactions_by_status` | ✅ Implemented | Read-only views |
-| `submit_batch` / `TxKind::Batch` | ✅ Implemented | One threshold-approved record, 1–10 ordered withdrawal/call/limit-change operations, aggregate limit reservation, rollback on failure, per-step success events |
+| `add_owner` / `remove_owner` / `set_threshold`     | ✅ Implemented | Owner-set and threshold governance via typed-tx machinery: `TxKind::AddOwner` / `RemoveOwner` / `SetThreshold`; must cross threshold before `execute` applies them                                                      |
+| `get_owners` / `is_owner` / `get_confirmations` / `get_rejections` / `get_tx_count` / `get_transactions` / `get_transactions_by_status` | ✅ Implemented | Read-only views; `get_transactions_by_status` includes `TxStatus::Expired`                                                                                                             |
+| `submit_batch` / `TxKind::Batch`                   | ✅ Implemented | One threshold-approved record, 1–10 ordered withdrawal/call/limit-change operations, aggregate limit reservation, rollback on failure, per-step success events |
+| Tests                                              | ✅ 155         | Full lifecycle, threshold/quorum, withdrawal + limit-change paths, per-tx expiry with lazily evaluated Expired state and boundary-pinned confirmations, keeper TTL tests, negative-auth suite (`authz.rs`), proptest suite (`props.rs`) |
 
 ## DAO Governance (`crates/dao-governance`)
 
 | Entrypoint | Status | Notes |
 |---|---|---|
+| `initialize` | ✅ Implemented | One-time permissionless configuration of the SEP-41 governance token used to weight votes |
 | `configure_bond` | ✅ Implemented | One-time permissionless config (token, amount, treasury); first caller wins; `propose` is rejected with `NotInitialized` while unconfigured |
-| `propose` | ✅ Implemented | Stores the target contract, opaque action payload, and voting deadline; **real token transfer** proposer → contract for the bond, before any state write |
-| `vote` | ✅ Implemented | One-vote-per-voter enforced |
+| `propose` | ✅ Implemented | Stores the target contract, opaque action payload, and voting deadline; enforces proposer cooldown limit (`DEFAULT_MAX_ACTIVE_PROPOSALS = 5`, returning `ForgeError::ProposerCooldown`); **real token transfer** proposer → contract for the bond, before any state write |
+| `vote` | ✅ Implemented | One-vote-per-voter; adds the voter's and delegators' current governance-token balances to the selected tally; zero-balance votes rejected |
 | `delegate` / `undelegate` / `get_delegate` | ✅ Implemented | Authorized delegation for future proposals; self-delegation/cycles rejected; proposal-creation snapshots determine weighted vote power |
-| `execute` | ✅ Implemented | Permissionless majority finalisation, then `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Succeeded`; on terminal transitions the bond is **refunded** to the proposer (`Executed`) or **forfeited** to the treasury (`Defeated`) in the same frame |
-| `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; **real token transfer** refund of the bond |
-| `get_proposal` / `get_proposal_count` / `get_proposals` / `has_voted` | ✅ Implemented | Read-only views; pagination with bounds clamping |
+| `execute` | ✅ Implemented | Permissionless majority finalisation, then `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Succeeded`; on terminal transitions the bond is **refunded** to the proposer (`Executed`) or **forfeited** to the treasury (`Defeated`) in the same frame; decrements proposer active count |
+| `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; **real token transfer** refund of the bond; decrements proposer active count |
+| `get_proposal` / `get_proposal_count` / `get_proposals` / `has_voted` / `get_active_proposal_count` | ✅ Implemented | Read-only views; pagination with bounds clamping; proposer active proposal count tracking |
 | `get_bond_config` | ✅ Implemented | Read-only; `NotInitialized` when no bond is configured |
 | `touch_ttl` | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a proposal; `NotFound` for unknown ids |
-| Events | ✅ Implemented | `Proposed`, `VoteCast`, `VotePowerCast`, `Delegated`, `Undelegated`, `Finalised`, `BondPosted`, `BondReleased` |
-| Storage | ✅ Persistent + TTL | `DataKey::Proposal` records in persistent storage with 30-day TTL maintenance; count, bond config, custody total, and vote markers in instance storage |
-| Tests | ✅ | Bond custody lifecycle, delegation snapshots/cycles, arithmetic boundaries, rollback ordering, cross-contract dispatch + retry, views, and negative authorization coverage |
-| Weighted voting | ❌ Not implemented | Follow-up |
+| `Events` | ✅ Implemented | `Proposed`, `VoteCast` (includes weight), `VotePowerCast`, `Delegated`, `Undelegated`, `Finalised`, `BondPosted`, `BondReleased` (`proposal_id` as topic) |
+| `Storage` | ✅ Persistent + TTL | `DataKey::Proposal` records in persistent storage with 30-day TTL maintenance; count, bond config, governance-token config, custody total, vote markers, delegation mappings/snapshots, and proposer active counts in instance storage |
+| `Tests` | ✅ 85 | Bond custody lifecycle (post/refund/forfeit/conservation), proposer cooldown limit and decrements, delegation snapshots/cycles, weighted voting and arithmetic boundary tests, rollback-on-failure ordering, cross-contract dispatch + retry, introspection/pagination views, plus a **negative-auth suite** (`authz.rs`) and **property suite** (`props.rs`) |
+| `Weighted voting` | ✅ Implemented | Balance-weighted voting powered by immutable SEP-41 governance token configured at `initialize` and delegation snapshots |
 
 ## Subscription Payments (`crates/subscription-payments`)
 
@@ -120,7 +100,7 @@ treasury at a terminal transition.
 | `subscribe` | ✅ Implemented | Validates `amount > 0` / `period > 0` before auth; subscriber-authorized; record + sequential id + both subscriber/provider indexes written atomically |
 | `subscribe_on_behalf_of` | ✅ Implemented | Provider-initiated; requires a **subscriber opt-in** (`ProviderOptIn`) checked before provider auth; shares the same id counter and record shape as `subscribe` |
 | `authorize_provider` / `revoke_provider` / `is_provider_authorized` | ✅ Implemented | Explicit per-relationship opt-in; subscriber-authorized; idempotent; read-only view has no auth |
-| `charge` | ✅ Implemented | Provider-authorized; pull mode transfers subscriber → provider; prepaid mode transfers an exact period amount from contract custody → provider; insufficient prepaid balance follows retry → `PastDue`, auto-cancelling after 3 failures with exact remainder refund |
+| `charge` | ✅ Implemented | Provider-authorized; pull mode transfers subscriber → provider; prepaid mode transfers an exact period amount from contract custody → provider; a subscription whose due time has elapsed is observable as `PastDue` (time-derived), and a successful catch-up charge bills exactly one overdue period, restores `Active`, and advances the due timestamp one period; insufficient prepaid balance follows retry → `PastDue`, auto-cancelling after 3 failures with exact remainder refund |
 | `deposit` / `withdraw_balance` | ✅ Implemented | Subscriber-authorized prepaid opt-in and top-up pulls exact funds before state writes; surplus withdrawal transfers contract → subscriber before balance update; failed transfers leave state unchanged |
 | `set_renewal_policy` / `renew` / `get_renewal_policy` | ✅ Implemented | Subscriber-consented policy; permissionless single-period renewal within a seven-day window; zero maximum means unlimited; separate policy record preserves `Subscription` XDR shape |
 | `pause` / `resume` | ✅ Implemented | Subscriber-authorized; `resume` advances the next due date by the elapsed paused duration |
@@ -132,6 +112,7 @@ treasury at a terminal transition.
 | `cancel` | ✅ Implemented | Subscriber-authorized from `Active` / `Paused` / `PastDue`; refunds exact remaining prepaid balance before `Cancelled`; rejects already-`Cancelled` |
 | `get_subscription` / `get_subscription_count` / `subscriptions_for_subscriber` / `subscriptions_for_provider` | ✅ Implemented | Read-only views; paged by `offset`/`limit` with `limit == 0` → `InvalidInput`; empty index yields an empty page, not an error |
 | Plan management | ❌ Not implemented | Follow-up |
+| `PastDue` lifecycle | ✅ Implemented | Time-derived lapsed state (`Active → PastDue → Active`); `PastDueEntered` event per transition; recoverable only through a successful catch-up charge (never reverts by time alone); `cancel` from `PastDue` and `pause`/`resume` interactions defined and tested; one-period-per-call invariant preserved with overflow-safe `checked_add` due math |
 
 ## Marketplace Royalties (`crates/marketplace-royalties`)
 

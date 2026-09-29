@@ -279,7 +279,12 @@ export const ForgeError = {
    * (a valid withdrawal that is too large right now) from a malformed
    * argument.
    */
-  13: {message:"WithdrawalLimitExceeded"}
+  13: {message:"WithdrawalLimitExceeded"},
+  /**
+   * A proposer has reached the maximum allowed concurrent active proposals
+   * or is within the proposer cooldown window.
+   */
+  14: {message:"ProposerCooldown"}
 }
 
 
