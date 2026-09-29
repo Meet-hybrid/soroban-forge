@@ -271,7 +271,7 @@ compile_error!(
 #[cfg(test)]
 extern crate std;
 
-use soroban_forge_shared_utils::ForgeError;
+use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Bytes,
     Env, IntoVal, Symbol, Val, Vec,
@@ -2140,13 +2140,14 @@ fn transfer_from_contract(
     }
 }
 
-/// Bump a persistent entry's TTL to the [`ttl::BUMP_AMOUNT`] horizon when
-/// it falls inside [`ttl::BUMP_THRESHOLD`]. The standard threshold/extend
-/// pattern: cheap no-op while the entry is fresh, decisive near expiry.
+/// Bump a persistent entry's TTL to the workspace policy's 30-day horizon
+/// when it falls inside its one-day threshold — see
+/// `soroban_forge_shared_utils::ttl`.
+///
+/// Thin wrapper over [`soroban_forge_shared_utils::bump_entry`] — the
+/// canonical helper (issue #127); the policy lives there.
 fn bump_entry(env: &Env, key: &DataKey) {
-    env.storage()
-        .persistent()
-        .extend_ttl(key, ttl::BUMP_THRESHOLD, ttl::BUMP_AMOUNT);
+    shared_bump_entry(env, key);
 }
 
 /// Lifecycle events. The tx id is a **topic** so indexers can filter
