@@ -110,7 +110,9 @@
 #[cfg(test)]
 extern crate std;
 
-use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
+use soroban_forge_shared_utils::{
+    bump_entry as shared_bump_entry, transfer_from_contract, transfer_to_contract, ForgeError,
+};
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, Address, Bytes, Env,
     IntoVal, Symbol, Val,
@@ -358,6 +360,9 @@ pub struct Proposal {
     /// terminal proposal state, exactly once.
     pub bond_state: BondState,
 }
+
+/// Default timelock delay before a passed proposal may execute.
+pub const DEFAULT_DELAY: u64 = 86_400;
 
 /// Bump a persistent entry's TTL to the workspace policy's 30-day horizon
 /// when it falls inside its one-day threshold — see
