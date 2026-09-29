@@ -11,6 +11,8 @@ fn charge(subscription_id) -> Result<i128, ForgeError>
 fn deposit(subscription_id, amount) -> Result<i128, ForgeError>
 fn withdraw_balance(subscription_id, amount) -> Result<i128, ForgeError>
 fn charge_catchup(subscription_id, max_periods: u32) -> Result<i128, ForgeError>
+fn pause(subscription_id) -> Result<(), ForgeError>
+fn resume(subscription_id) -> Result<(), ForgeError>
 fn set_quotas(subscription_id, quotas: Vec<MetricQuota>) -> Result<(), ForgeError>
 fn record_usage(subscription_id, metric: Symbol, units: u64) -> Result<(), ForgeError>
 fn quote_period(subscription_id) -> Result<i128, ForgeError>
@@ -46,6 +48,10 @@ elapsed_periods)` periods in one atomic invocation. `max_periods == 0` is a
 - `charge_catchup` refuses `PastDue`; call `charge` to use the existing retry
   policy. A failed catch-up transfer returns `TokenTransferFailed` and rolls
   back all transfers and `last_charged` through Soroban frame rollback.
+- `pause` requires the subscriber and is valid only for `Active` subscriptions;
+  it prevents `charge` and `charge_catchup` while paused.
+- `resume` requires the subscriber and is valid only for `Paused` subscriptions;
+  it advances `last_charged` by the paused duration so paused time is not billed.
 - `cancel` requires the subscriber and prevents further charges.
 - `set_quotas`, `record_usage`, and the metering views are described under
   [Metered usage](#metered-usage-quotas-and-overage).
@@ -108,8 +114,15 @@ with the `min` skipped for an uncapped quota.
 ## Subscription States
 
 - `Active` — chargeable
+- `Paused` — temporarily not chargeable; `charge` and `charge_catchup` are
+  refused, while the subscriber may `resume` or `cancel`
 - `Cancelled` — no further charges
 - `PastDue` — a failed single-period payment requiring `charge` retry semantics
+
+The implemented transitions are `Active -> Paused -> Active` for pause/resume.
+Cancellation is allowed from `Active`, `Paused`, and `PastDue`; `Cancelled` is
+terminal. Pausing records the ledger timestamp, and resuming shifts the next
+charge window by the elapsed pause duration.
 
 ## Prepaid money flow
 
@@ -196,3 +209,8 @@ The contract emits typed on-chain lifecycle events for indexers and off-chain mo
 - `BalanceDebited` (topic: `subscription_id: u64`) — successful prepaid period settlement; contains the exact `amount` and `balance_after`.
 - `BalanceRefunded` (topic: `subscription_id: u64`) — successful subscriber withdrawal or cancellation refund; contains `amount` and `balance_after`.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
+
+`pause` and `resume` currently emit no contract events. `Paused`/`Resumed`
+events are planned in [issue #12](https://github.com/Meet-hybrid/soroban-forge/issues/12);
+until that work lands, indexers should observe the status through the stored
+subscription record rather than expecting lifecycle events for these calls.
