@@ -248,3 +248,5 @@ Proposal records (`DataKey::Proposal(u64)`) are stored in persistent storage. `D
 `propose`, `vote`, `execute`, and `cancel_proposal` extend proposal persistent storage TTL on every write to a 30-day horizon (`30 * DAY_IN_LEDGERS = 518,400` ledgers).
 
 A permissionless public keeper entrypoint `touch_ttl(proposal_id)` allows anyone to bump a proposal's persistent TTL without modifying its state. If the proposal ID does not exist, `touch_ttl` returns `ForgeError::NotFound`.
+
+Vote marks (`DataKey::Vote(proposal_id, voter)`) live in instance storage, whose lifetime is the contract instance's own TTL. To keep the two halves of a vote on the same lifetime discipline, `vote` and `touch_ttl` extend the instance TTL to the same 30-day horizon as the proposal record: for as long as a proposal remains live and votable, the marks enforcing one-vote-per-voter are guaranteed to outlive it, so `has_voted` cannot report a stale answer on a live proposal.
