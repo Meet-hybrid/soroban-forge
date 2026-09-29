@@ -16,7 +16,8 @@
 //!                  v       v
 //!                   cancel -> Cancelled (no further charges)
 //! subscribe -> Active --(period elapses, charge succeeds)--> bills amount, advances
-//!            -> Active --(period elapses, charge fails)---> PastDue (arrears retry)
+//!            -> Active --(period elapses, due time passes)--> PastDue (lapsed)
+//!            -> PastDue --(catch-up charge succeeds)-------> Active (due advanced one period)
 //!            -> PastDue --(retry exceeds max retries)-----> Cancelled
 //!            -> cancel -> Cancelled (no further charges)
 //! ```

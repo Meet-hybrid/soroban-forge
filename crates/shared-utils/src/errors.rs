@@ -49,4 +49,9 @@ pub enum ForgeError {
     /// (a valid withdrawal that is too large right now) from a malformed
     /// argument.
     WithdrawalLimitExceeded = 13,
+    /// A subscription is in the `PastDue` lapsed state and the requested
+    /// operation cannot proceed until the overdue period is caught up by a
+    /// successful charge. Kept distinct from [`ForgeError::InvalidInput`] so
+    /// integrators can build dunning flows on a meaningful lapsed state.
+    SubscriptionPastDue = 14,
 }
