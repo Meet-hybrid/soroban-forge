@@ -34,7 +34,7 @@ fn subscriptions_for_provider(provider, offset, limit) -> Result<Vec<Subscriptio
   one derived period amount from contract custody to the provider. If the
   balance cannot cover it, no partial transfer occurs and the existing retry
   policy moves the subscription to `PastDue` (and auto-cancels after three
-  failed attempts). Depositing while `PastDue` allows the next `charge` retry
+  failed attempts). Depositing while `PastDue` allows the next `charg` retry
   to recover it. `charge_catchup` rejects prepaid subscriptions so it cannot
   bypass this one-period lapse policy by pulling from the subscriber.
 - `withdraw_balance` requires the subscriber and returns a requested amount
@@ -68,13 +68,13 @@ struct MetricQuota {
     metric: Symbol,             // e.g. api_calls
     included_units: u64,        // covered by the base `amount`
     overage_price: i128,        // per started bucket
-    bucket_units: u64,          // units per bucket, must be > 0
+    bucket_units: u64,             // units per bucket, must be > 0
     max_overage_units: Option<u64>, // cap on billable overage units
 }
 ```
 
 The billable amount for one period is derived in a single pure helper used by
-`charge`, by every period of `charge_catchup`, and by `quote_period`:
+`charg`, by every period of `charge_catchup`, and by `quote_period`:
 
 ```text
 amount = base
@@ -92,12 +92,12 @@ with the `min` skipped for an uncapped quota.
   rejects a metric the subscription does not declare, so usage the subscriber
   has not been asked to pay for can never be billed.
 - `record_usage` accumulates **raw units** for the open period only, so each
-  period's amount is a pure function of that period's units: charging `N`
+  period's amount is a pure function of that period's units: charging `N
   periods bills exactly `N` times the per-period derivation, and no rounding can
   compound across periods. A bucket is billed once started (rounded up), and the
   price is per bucket, never per unit.
-- Meters are dropped atomically with the charge that closes the period, in the
-  same frame that advances `last_charged`. A failed transfer returns before that
+- Meters are dropped atomically with the charge that closes the period, in
+  the same frame that advances `last_charged`. A failed transfer returns before that
   point, so every meter survives and the arrears retry re-derives an identical
   amount.
 - `charge_catchup` settles the open period **last**: usage can only be metered
@@ -114,10 +114,46 @@ with the `min` skipped for an uncapped quota.
 ## Subscription States
 
 - `Active` — chargeable
+- `PastDue` — the open period has elapsed without a successful charge; chargeable
+  through the catch-up path
 - `Paused` — temporarily not chargeable; `charge` and `charge_catchup` are
   refused, while the subscriber may `resume` or `cancel`
 - `Cancelled` — no further charges
-- `PastDue` — a failed single-period payment requiring `charge` retry semantics
+
+The contract maintains an explicit lapsed state so integrators can build
+dunning (reminders, retries, suspension) on top of the contract. The lifecycle is
+<code>Active → PastDue → Active</code>, with the following transition table:
+
+| From | Event | To | Notes |
+|------|-------|----|-------|
+| `Active` | Open period ends without a successful charge (time-derived) | `PastDue` | Entered as soon as the due timestamp is observable; no call required to observe it via the view |
+| `Active` | Successful `charge` within the grace window | `Active` | Due timestamp advances exactly one period |
+| `PastDue` | Successful `charg` (catch-up) | `Active` | Bills the overdue period with identical amount math; due timestamp advances exactly one period |
+| `PastDue` | Passage of time alone | `PastDue` | Never silently reverts to `Active` |
+| `PastDue` | `cancel` | `Cancelled` | Refunds any prepaid remainder exactly as from `Active` |
+| `PastDue` | `pause` | `Paused` | Lapse bookkeeping is preserved and resumes with the subscription |
+| `Paused` | `resume` while the open period has elapsed | `PastDue` | The lapse is re-derived from the due timestamp on resume |
+| `PastDue` | Successful catch-up charge while paused | `Paused` | Catch-up advances the due timestamp but the status remains `Paused` until resume |
+
+- `PastDue` means the open period has elapsed without a successful charge. It is
+  reachable through the public interface: the trigger is time-derived, so a
+  subscription whose due timestamp has elapsed is reported as `PastDue` by
+  `get_subscription` and the `is_past_due` view without anyone calling
+  `charg`.
+- A successful catch-up `charg` on a `PastDue` subscription bills the
+  overdue period with identical amount math, restores `Active`, and advances
+  the due timestamp exactly one period — the one-period-per-call invariant is
+  preserved.
+- `PastDue` is recoverable only through a successful charge; it never
+  silently reverts to `Active` by the passage of time alone.
+- The grace window is a contract constant. There is no admin or principal in
+  this contract, so the window is not configurable at runtime. A charge that
+  lands after the due timestamp but within the grace window still bills the
+  normal one-period amount and keeps the subscription `Active`.
+- Charging a `Cancelled` subscription behaves exactly as today: it fails with
+  `ForgeError::NotActive`. Double-charging remains impossible.
+- Auto-cancellation after N lapsed periods is out of scope for this state;
+  the lapse bookkeeping is exposed so a future follow-up can build on it.
 
 The implemented transitions are `Active -> Paused -> Active` for pause/resume.
 Cancellation is allowed from `Active`, `Paused`, and `PastDue`; `Cancelled` is
@@ -138,7 +174,7 @@ the existing pull flow and `prepaid_balance == None`.
 | `withdraw_balance` | contract → subscriber, exact requested amount | subtract amount after transfer succeeds |
 | `cancel` / retry-limit auto-cancel | contract → subscriber, full remaining balance | set to `Some(0)` after refund succeeds |
 
-The conservation invariant is `Σdeposits − Σperiod debits − Σwithdrawals −
+The conservation invariant is `Σdeposits ‒ Σperiod debits ‒ Σwithdrawals ‒
 Σcancellation refunds == prepaid_balance` after every successful operation.
 The randomized lifecycle property test compares each operation with an
 independent balance/state mirror and also checks the SEP-41 contract balance.
@@ -153,12 +189,11 @@ for this record shape change.
 
 ## Secondary Indices
 
-Each subscription is indexed in two secondary lists, written on the `subscribe`
-success path:
+Each subscription is indexed in two secondary lists, written on the `subscribe`Jsuccess path:
 
-- `SubscriberSubscriptions(subscriber)` — creation-order subscription ids for
+-  `SubscriberSubscriptions(subscriber)` — creation-order subscription ids for
   which the address is the subscriber.
-- `ProviderSubscriptions(provider)` — creation-order subscription ids for which
+-  `ProviderSubscriptions(provider)` — creation-order subscription ids for which
   the address is the provider.
 
 The indices store lightweight `Vec<u64>` id lists; full `Subscription` records
@@ -166,25 +201,30 @@ are only loaded for the requested page slice.
 
 ## View Methods
 
-- `get_subscription_count()` returns the total number of subscriptions created
+-  `get_subscription_count()` returns the total number of subscriptions created
   (the monotonic id counter; cancellation never lowers it).
-- `subscriptions_for_subscriber(subscriber, offset, limit)` returns a page of
+-  `subscriptions_for_subscriber(subscriber, offset, limit)` returns a page of
   `Subscription` records for the subscriber, in creation order.
-- `subscriptions_for_provider(provider, offset, limit)` returns a page of
+-  `subscriptions_for_provider(provider, offset, limit)` returns a page of
   `Subscription` records for the provider, in creation order.
+-  `is_past_due(subscription_id)` returns whether the subscription is currently
+  lapsed. It is a pure read of the due timestamp and the grace window, aligned
+  with the next-due / over-due queries of issue #71.
 
-Both enumeration methods are read-only (no authorization, no storage writes).
+All enumeration methods are read-only (no authorization, no storage writes).
 `offset` skips the first `offset` subscriptions and `limit` caps the page size:
 an empty index or an out-of-bounds offset yields an empty `Vec`, and a `limit`
 of `0` fails with `ForgeError::InvalidInput`.
 
 ## Storage
 
-- `Subscription(id)` — the record for id `u64`.
-- `Count` — monotonic subscription id counter.
-- `SubscriberSubscriptions(address)` — subscriber id index.
-- `ProviderSubscriptions(address)` — provider id index.
-- `Usage(subscription_id, metric)` — the open period's raw unit counter for one
+-  `Subscription(id)` — the record for id `u64`. The record carries the
+  lapsed bookkeeping (a due-since timestamp or missed-period counter) alongside
+  the existing fields.
+-  `Count` — monotonic subscription id counter.
+-  `SubscriberSubscriptions(address)` — subscriber id index.
+-  `ProviderSubscriptions(address)` — provider id index.
+-  `Usage(subscription_id, metric)` — the open period's raw unit counter for one
   metric, stamped with the `last_charged` window it belongs to; removed by the
   charge that closes the period.
 
@@ -197,12 +237,25 @@ uses checked operations. For a metered subscription the billed amount is the
 derived `base + overage` amount rather than `amount` alone; it is computed
 before the transfer, so an unrepresentable bill never moves funds.
 
+When a subscription is `PastDue`, a charge bills the overdue period with the
+identical amount math as a normal charge and restores `Active`. The due
+timestamp advances exactly one period, so the one-period-per-call invariant holds
+even when catching up. Timestamp arithmetic on due and catch-up math uses
+`checked_add` and surfaces `ArithmeticOverflow` at the `u64` boundaries.
+
 ## Events
 
 The contract emits typed on-chain lifecycle events for indexers and off-chain monitoring:
 
 - `Subscribed` (topic: `subscription_id: u64`) — emitted when a subscription is created via `subscribe`. Contains `subscriber`, `provider`, `token`, `amount`, and `period`.
 - `Charged` (topic: `subscription_id: u64`) — emitted on successful billing via `charge` (one event) or `charge_catchup` (one event per settled period). Contains `amount`, `last_charged`, and `next_charge_at`. For a metered subscription `amount` is the derived `base + overage` amount, not the base alone.
+- `PastDueEntered` (topic: `subscription_id: u64`) — emitted once when a
+  subscription becomes lapsed. Contains the `due_since` timestamp and the
+  `missed_periods` counter, so an indexer can drive dunning without reading
+  storage. It is never emitted twice for the same lapse.
+- `PastDueRecovered` (topic: `subscription_id: u64`) — emitted when a
+  successful catch-up `charg` restores a `PastDue` subscription to `Active`.
+  Contains the catch-up `amount` and the new `last_charged` / `next_charge_at`.
 - `UsageRecorded` (topics: `subscription_id: u64`, `metric: Symbol`) — emitted per `record_usage` call. Contains the `units` added, the running `period_units` for the open period, and the `period_start` window those units belong to, so an indexer can rebuild each settled period's overage.
 - `QuotasSet` (topic: `subscription_id: u64`) — emitted when `set_quotas` replaces the declared terms. Contains the full `quotas` list, so the pricing an indexer needs travels with the event.
 - `Deposited` (topic: `subscription_id: u64`) — successful prepaid deposit; contains `amount` and `balance_after`.
