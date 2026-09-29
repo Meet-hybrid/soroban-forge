@@ -157,7 +157,7 @@ impl World {
     /// Submit an opaque tx against the counting target; returns its id.
     fn submit(&self) -> u64 {
         self.client
-            .submit(&self.accounts.user1, &self.target, &self.payload())
+            .submit(&self.accounts.user1, &self.target, &self.payload(), &None)
     }
 
     /// Dispatch count recorded by the counting target.

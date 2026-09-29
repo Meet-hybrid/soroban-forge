@@ -21,6 +21,7 @@ fn get_proposal(proposal_id) -> Result<Proposal, ForgeError>
 fn get_proposal_count() -> u64
 fn get_proposals(offset, limit) -> Result<Vec<Proposal>, ForgeError>
 fn has_voted(proposal_id, voter) -> Result<bool, ForgeError>
+fn get_active_proposal_count(proposer) -> u32
 fn touch_ttl(proposal_id) -> Result<(), ForgeError>
 ```
 
@@ -83,6 +84,14 @@ Transition rules enforced by the contract:
   (`ForgeError::Unauthorized` otherwise) and an `Active` proposal; it works
   even after the deadline and after quorum is met, as long as the proposal
   has not been executed or cancelled.
+
+## Proposer cooldown and active proposal limit
+
+To bound proposal creation rates and prevent spam, the contract enforces a concurrent active proposal limit:
+- **Active limit**: Each proposer can have at most `DEFAULT_MAX_ACTIVE_PROPOSALS = 5` concurrent active proposals.
+- **Enforcement**: Calling `propose` when the proposer already has 5 active proposals returns `ForgeError::ProposerCooldown`.
+- **Accounting**: The active count increments on a successful `propose` and decrements when a proposal reaches a terminal state (`Cancelled` via `cancel_proposal`, or `Defeated` / `Executed` via `execute`).
+- **Read-only view**: `get_active_proposal_count(proposer: Address) -> u32` returns the current number of active proposals for `proposer` with zero auth requirements and no state mutations.
 
 ## Proposal bonds
 
