@@ -18,6 +18,11 @@
 //! is tested directly (`dispute_by_outsider_is_rejected`). Full negative
 //! signature testing needs `set_auths` fixtures and is tracked in the
 //! security-invariant backlog.
+//!
+//! Time-lock coverage: scheduling a release in the future, executing it
+//! only after the delay elapses, rejecting early execution, rejecting
+//! scheduling on non-Funded or already-scheduled escrows, and confirming
+//! that scheduled escrows still allow refund/dispute before execution.
 
 use crate::{
     BasketEscrowData, Escrow, EscrowAsset, EscrowData, EscrowStatus, SorobanForgeEscrowClient,
@@ -1390,6 +1395,21 @@ fn deposit_basket_moves_every_leg_into_custody() {
     assert_eq!(tc_b.balance(&contract_id), AMOUNT);
     assert_eq!(tc_a.balance(buyer), 0);
     assert_eq!(tc_b.balance(buyer), 0);
+// Time-lock release
+// -----------------------------------------------------------------------
+
+#[test]
+fn schedule_release_sets_future_timestamp() {
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    let release_at = START + 500;
+    client.schedule_release(&id, &release_at);
+
+    let record: EscrowData = client.get_escrow(&id);
+    assert_eq!(record.scheduled_release_at, Some(release_at));
     assert_eq!(client.get_status(&id), EscrowStatus::Funded);
 }
 
@@ -1484,6 +1504,99 @@ fn release_partial_basket_marks_completed_only_when_all_legs_exhausted() {
 
     assert_eq!(tc_a.balance(&contract_id), 0);
     assert_eq!(tc_b.balance(&contract_id), 0);
+fn schedule_release_rejects_past_or_present_timestamp() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    let err = client
+        .try_schedule_release(&id, &START)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    let err = client
+        .try_schedule_release(&id, &(START - 1))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(&contract_id), AMOUNT);
+    assert_eq!(client.get_escrow(&id).scheduled_release_at, None);
+}
+
+#[test]
+fn schedule_release_requires_funded_state() {
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+
+    let err = client
+        .try_schedule_release(&id, &(START + 100))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+}
+
+#[test]
+fn schedule_release_cannot_run_twice() {
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.schedule_release(&id, &(START + 100));
+
+    let err = client
+        .try_schedule_release(&id, &(START + 200))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(client.get_escrow(&id).scheduled_release_at, Some(START + 100));
+}
+
+#[test]
+fn schedule_release_rejected_after_completion() {
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.release(&id);
+
+    let err = client
+        .try_schedule_release(&id, &(START + 100))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+}
+
+#[test]
+fn execute_scheduled_before_time_lock_is_rejected() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.schedule_release(&id, &(START + 500));
+
+    let err = client.try_execute_scheduled(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(&contract_id), AMOUNT);
+    assert_eq!(tc.balance(seller), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+}
+
+#[test]
+fn execute_scheduled_after_time_lock_pays_seller() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    let release_at = START + 500;
+    client.schedule_release(&id, &release_at);
+
+    env.ledger().set_timestamp(release_at);
+    client.execute_scheduled(&id);
+
+    assert_eq!(tc.balance(seller), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
     assert_eq!(client.get_status(&id), EscrowStatus::Completed);
 }
 
@@ -1532,6 +1645,45 @@ fn refund_basket_returns_every_leg_to_the_buyer() {
     assert_eq!(tc_b.balance(buyer), AMOUNT);
     assert_eq!(tc_a.balance(&contract_id), 0);
     assert_eq!(tc_b.balance(&contract_id), 0);
+fn execute_scheduled_requires_scheduled_state() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    let err = client.try_execute_scheduled(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(&contract_id), AMOUNT);
+}
+
+#[test]
+fn execute_scheduled_cannot_run_twice() {
+    let (env, token, tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    let release_at = START + 500;
+    client.schedule_release(&id, &release_at);
+    env.ledger().set_timestamp(release_at);
+    client.execute_scheduled(&id);
+
+    let err = client.try_execute_scheduled(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(seller), AMOUNT);
+}
+
+#[test]
+fn scheduled_escrow_still_allows_refund_before_deadline() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.schedule_release(&id, &(START + 500));
+
+    client.refund(&id);
+
+    assert_eq!(tc.balance(buyer), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
     assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
 }
 
@@ -1715,4 +1867,75 @@ fn basket_conservation_over_a_terminal_path() {
         AMOUNT
     );
     assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+fn scheduled_escrow_still_allows_dispute_and_resolve() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.schedule_release(&id, &(START + 500));
+
+    client.dispute(&id, buyer);
+    client.resolve(&id, &true);
+
+    assert_eq!(tc.balance(seller), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+}
+
+#[test]
+fn scheduled_escrow_blocks_direct_release() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.schedule_release(&id, &(START + 500));
+
+    let err = client.try_release(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(&contract_id), AMOUNT);
+    assert_eq!(tc.balance(seller), 0);
+}
+
+#[test]
+fn scheduled_escrow_blocks_partial_release() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.schedule_release(&id, &(START + 500));
+
+    let err = client.try_release_partial(&id, &100).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(&contract_id), AMOUNT);
+}
+
+#[test]
+fn schedule_release_on_missing_escrow_is_not_found() {
+    let (_env, _token, _tc, _id, client, _accounts) = setup!();
+    assert_eq!(
+        client
+            .try_schedule_release(&999, &(START + 100))
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(
+        client.try_execute_scheduled(&999).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+}
+
+#[test]
+fn time_lock_conservation_holds() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    let release_at = START + 500;
+    client.schedule_release(&id, &release_at);
+    env.ledger().set_timestamp(release_at);
+    client.execute_scheduled(&id);
+
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(tc.balance(buyer) + tc.balance(seller), AMOUNT);
 }

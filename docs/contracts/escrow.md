@@ -10,6 +10,8 @@ fn deposit(escrow_id) -> Result<(), ForgeError>
 fn release(escrow_id) -> Result<(), ForgeError>
 fn release_partial(escrow_id, amount) -> Result<(), ForgeError>
 fn refund(escrow_id) -> Result<(), ForgeError>
+fn schedule_release(escrow_id, release_at) -> Result<(), ForgeError>
+fn execute_scheduled(escrow_id) -> Result<(), ForgeError>
 fn dispute(escrow_id, claimant) -> Result<(), ForgeError>
 fn resolve(escrow_id, in_favor_of_seller) -> Result<(), ForgeError>
 fn cancel(escrow_id) -> Result<(), ForgeError>
@@ -161,6 +163,57 @@ carries `partial_amount` (the incremental transfer) and the full `EscrowData`
 remains exclusively for the `release` entrypoint and signals terminal
 completion to indexers.
 
+## Time-Lock Release
+
+`schedule_release(escrow_id, release_at)` lets the buyer schedule a full
+release for a future ledger timestamp. `execute_scheduled(escrow_id)` performs
+the release once `release_at` has passed. This enables scheduled payments,
+cool-off periods, and regulatory reversal windows without changing the
+existing immediate-release path.
+
+### Scheduling
+
+- `schedule_release` is buyer-authorized and only valid while
+  `status == Funded` and no schedule is already pending.
+- `release_at` must be strictly greater than the current ledger timestamp;
+  otherwise `InvalidInput` is returned and no storage is modified.
+- The scheduled release covers the **remaining** balance only, consistent with
+  `release`, `refund`, and `resolve`.
+- Scheduling does not move funds. The escrow stays `Funded` and
+  `release_partial` remains available until `execute_scheduled` runs.
+
+### Execution
+
+- `execute_scheduled` is permissionless: anyone may call it once the
+  time-lock has expired. Funds always go to the seller.
+- It requires `status == Funded` and a pending schedule whose `release_at` is
+  `<=` the current ledger timestamp. Calling before expiry returns
+  `InvalidInput` and leaves the schedule intact.
+- On success it transfers the remaining balance to the seller, transitions to
+  `Completed`, and clears the scheduled state.
+
+### Storage
+
+Scheduled release state is stored under `DataKey::ScheduledRelease(escrow_id)`
+as an `Option<ScheduledRelease>` carrying `release_at` and the `scheduled_by`
+address. Absence of the key means no schedule is pending. Terminal transitions
+(`release`, `release_partial` final, `refund`, `resolve`, `cancel`) clear any
+pending schedule.
+
+### Events
+
+- `ReleaseScheduled` — emitted by `schedule_release`, carrying `escrow_id`,
+  `release_at`, and `scheduled_by`.
+- `ScheduledReleased` — emitted by `execute_scheduled`, carrying `escrow_id`
+  and the full `EscrowData` after the terminal transition. The existing
+  `Released` event remains exclusive to the immediate `release` entrypoint.
+
+### Non-goals
+
+Partial time-lock, recurring schedules, and time-locked refunds are out of
+scope. A schedule may be replaced only after it has been executed or the
+escrow has reached a terminal state.
+
 ## Storage Compatibility
 
 `EscrowData` now carries a `released: i128` field. Records written by
@@ -180,6 +233,9 @@ writes the current schema back.
 
 `DataKey::Escrow(id)` is unchanged.
 
+`DataKey::ScheduledRelease(id)` is a new key; old records have no entry and
+decode as `None`.
+
 ## WASM Budget
 
 Current size: ~28 KB  
@@ -188,3 +244,4 @@ Limit: < 150 KB
 ## Feature Flags
 
 - `test-utils` — enables test-only helpers (proptest, authz tests)
+- `time-lock` — enables time-lock release entrypoints and tests
