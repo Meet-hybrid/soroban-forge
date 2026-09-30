@@ -2,11 +2,22 @@
 
 //! # Soroban Forge — Vesting contract
 //!
-//! A token-vesting contract that releases a beneficiary's tokens linearly
-//! over time, optionally behind a cliff.
+//! A token-vesting contract that releases a beneficiary's tokens over time.
+//! Two schedule shapes share one id space and one claim path:
 //!
-//! Timings are expressed as **durations in seconds measured from the schedule
-//! start** (the ledger timestamp recorded at creation):
+//! - **linear** ([`VestingSchedule`], created by `create_schedule`) — an
+//!   optional cliff followed by a straight-line ramp to `duration`;
+//! - **tranche** ([`TrancheSchedule`], created by `create_tranche_schedule`) —
+//!   an explicit, ordered table of discrete unlocks.
+//!
+//! The two are deliberately **not** merged into one record: the linear
+//! record's wire shape and its floor-division math stay exactly as they were,
+//! and a tranche schedule lives under its own `DataKey` variant.
+//!
+//! Timings in both shapes are expressed as **durations in seconds measured
+//! from the schedule start** (the ledger timestamp recorded at creation).
+//!
+//! ## Linear shape
 //!
 //! ```text
 //! start ......... start+cliff ................... start+duration
@@ -20,11 +31,47 @@
 //! - otherwise `total_amount * (t - (start + cliff)) / (duration - cliff)`,
 //!   using integer (floor) division so claims never round up.
 //!
+//! ## Tranche shape
+//!
+//! A grant agreement of the form "25% at TGE, 25% at +6 months, 50% at +12
+//! months" is not expressible as a ramp, so the tranche kind takes the unlock
+//! table verbatim: an ordered list of [`Tranche`]s, each an offset from
+//! `start` plus the amount that unlocks at it.
+//!
+//! ```text
+//!        t1            t2                t3
+//! start   |             |                 |
+//!   |     |   tranche 1  |   tranche 2     |   tranche 3
+//!   | Locked  (a1)         (a2)              (a3)
+//!   |     |  vested:      vested:           vested:
+//!   |     |     0  ->     a1  ->            a1+a2  ->  total
+//!   +-----+--------------+------------------+---------.
+//! ```
+//!
+//! Offsets are strictly increasing, so the vested amount is a **step function**
+//! of the sum of every tranche whose offset has elapsed: `0` before `t1`,
+//! `a1` between `t1` and `t2`, `a1 + a2` between `t2` and `t3`, and the full
+//! total from `t3` on. Nothing accrues between unlocks, and the vested amount
+//! never decreases, so a claim at any moment pays exactly the difference
+//! since the last one.
+//!
+//! Unlock progress is compared on the *elapsed offset* rather than on
+//! `start + unlock_at`, so an offset of `u64::MAX` cannot overflow: that
+//! tranche simply never unlocks.
+//!
+//! ## Status
+//!
+//! Both kinds derive status from the same two inputs — ledger time and the
+//! claimed amount: `Locked` before the first unlock, `Vesting` from the first
+//! unlock until the final amount is claimed, `Completed` once `claimed ==
+//! total_amount`. `Revoked` is reserved (see below).
+//!
 //! Authorization model:
-//! - `create_schedule` requires the beneficiary.
+//! - `create_schedule` and `create_tranche_schedule` require the beneficiary.
 //! - `claim` requires the beneficiary.
-//! - `claimable` and `get_status` are read-only views.
-//! - `touch_ttl` is permissionless (keeper entrypoint).
+//! - `revoke` requires the creator.
+//! - `claimable`, `get_status`, `get_schedule`, and `get_tranche_schedule`
+//!   are read-only views.
 //!
 //! ## Settlement (load-bearing)
 //!
@@ -39,14 +86,74 @@
 //! is the outer atomicity guarantee: any `Err` returned from `claim` reverts
 //! the whole invocation, including sub-invocations.
 //!
-//! The `Revoked` status is reserved for a revocation method that lands in a
-//! follow-up; it is not reachable through the current public interface.
+//! A creator may revoke a schedule through `revoke`, which applies a
+//! [`RevocationPolicy`] to claw back tokens; the `Revoked` status is set on
+//! the schedule and further claims are rejected.
 
 #[cfg(test)]
 extern crate std;
 
-use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, Env};
+use soroban_forge_shared_utils::ttl::TTLHelper;
+use soroban_forge_shared_utils::{transfer_from_contract, ForgeError};
+use soroban_sdk::{
+    contract, contractclient, contractevent, contractimpl, contracttype, Address, Env, Vec,
+};
+
+mod events {
+    use super::*;
+
+    #[contractevent]
+    pub struct ScheduleCreated {
+        #[topic]
+        pub schedule_id: u64,
+        pub schedule: VestingSchedule,
+    }
+
+    #[contractevent]
+    pub struct Claimed {
+        #[topic]
+        pub schedule_id: u64,
+        pub amount: i128,
+        pub claimed: i128,
+        pub status: VestingStatus,
+    }
+
+    pub fn schedule_created(env: &Env, schedule_id: u64, schedule: &VestingSchedule) {
+        ScheduleCreated {
+            schedule_id,
+            schedule: schedule.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn claimed(env: &Env, schedule_id: u64, amount: i128, total: i128, status: VestingStatus) {
+        Claimed {
+            schedule_id,
+            amount,
+            claimed: total,
+            status,
+        }
+        .publish(env);
+    }
+}
+
+/// Maximum number of tranches a single schedule may carry.
+///
+/// Grant agreements express unlock tables with a handful of entries (a TGE
+/// tranche plus quarterly or half-yearly ones), and every claimable/status
+/// call scans the stored table, so the cap bounds the instruction use of a
+/// claim. Creation rejects a longer table with [`ForgeError::InvalidInput`]
+/// rather than truncating it. The cap is deliberately generous relative to
+/// real agreements; raise it only with a reason.
+pub const MAX_TRANCHES: u32 = 32;
+
+/// Minimum TTL (in ledgers) applied to persistent entries when they are
+/// written or bumped. Roughly 30 days at 5s per ledger.
+pub const MIN_TTL: u32 = 518_400;
+
+/// TTL (in ledgers) requested when bumping a persistent entry. Roughly 60
+/// days at 5s per ledger.
+pub const BUMP_TTL: u32 = 1_036_800;
 
 /// Ledger-time constants for TTL bumps.
 ///
@@ -84,11 +191,88 @@ pub trait SorobanForgeVesting {
         duration: u64,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
+    /// Create a new tranche (discrete unlock) vesting schedule for
+    /// `beneficiary`.
+    ///
+    /// `tranches` is the unlock table: an ordered list of [`Tranche`]s, each
+    /// an offset in seconds from creation plus the amount that unlocks at it.
+    /// It must be non-empty, hold at most [`MAX_TRANCHES`] entries with
+    /// strictly increasing offsets and positive amounts, and sum to at most
+    /// `i128::MAX`. The table is validated, stored once, and immutable
+    /// afterwards. The id comes from the same counter as
+    /// [`create_schedule`](Self::create_schedule), so both kinds share one id
+    /// space.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — the table is empty, longer than
+    ///   [`MAX_TRANCHES`], holds a non-positive amount, or an offset that does
+    ///   not strictly increase.
+    /// * [`ForgeError::ArithmeticOverflow`] — the table's amounts sum past
+    ///   `i128::MAX`.
+    fn create_tranche_schedule(
+        env: Env,
+        beneficiary: Address,
+        token: Address,
+        tranches: Vec<Tranche>,
+    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+
+    /// Revoke a vesting schedule, clawing back tokens per `policy`.
+    ///
+    /// Requires the schedule's creator. The cliff period must have been
+    /// reached (revocation before the cliff is rejected). `FullClawback`
+    /// returns every unclaimed token to the creator; `KeepUnvested` returns
+    /// only the unvested portion, leaving already-vested tokens claimable by
+    /// the beneficiary. The schedule transitions to [`VestingStatus::Revoked`]
+    /// and further claims are rejected.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no schedule with this id.
+    /// * [`ForgeError::Unauthorized`] — caller is not the creator.
+    /// * [`ForgeError::InvalidInput`] — revocation attempted before the cliff,
+    ///   or the schedule is already fully vested/revoked.
+    fn revoke(
+        env: Env,
+        schedule_id: u64,
+        policy: RevocationPolicy,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the full linear schedule record (read-only view).
+    ///
+    /// The record view for the linear kind, mirroring
+    /// `get_tranche_schedule` and the workspace's other record views
+    /// (`get_escrow`, `get_tx`, `get_proposal`, `get_subscription`) — the
+    /// record-view convention of issue #125. Returns the stored record:
+    /// `claimed` reflects completed claims, while `status` is the stored
+    /// lifecycle state and is refreshed on claim (between claims
+    /// `get_status` derives the current one from ledger time).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no linear schedule with this id (a
+    ///   tranche id is `NotFound` here, and vice versa).
+    fn get_schedule(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<VestingSchedule, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the full tranche schedule record, immutable unlock table included
+    /// (read-only view).
+    ///
+    /// The tranche kind's record view, mirroring `get_schedule` (the linear
+    /// kind's, issue #125); a linear id is `NotFound` here, and vice versa.
+    fn get_tranche_schedule(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<TrancheSchedule, soroban_forge_shared_utils::ForgeError>;
+
     /// Claim tokens that have vested as of the current ledger time.
     ///
-    /// Requires the beneficiary. Transfers the exact vested-but-unclaimed
-    /// amount from this contract to the beneficiary, then records the claim;
-    /// returns `0` without issuing a transfer when nothing is claimable.
+    /// Requires the beneficiary. Works for both schedule kinds and transfers
+    /// the exact vested-but-unclaimed amount from this contract to the
+    /// beneficiary, then records the claim; returns `0` without issuing a
+    /// transfer when nothing is claimable.
     ///
     /// # Errors
     ///
@@ -99,6 +283,9 @@ pub trait SorobanForgeVesting {
     fn claim(env: Env, schedule_id: u64) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 
     /// Return the amount currently claimable by `schedule_id` (read-only).
+    ///
+    /// Kind-aware: a linear id is measured against its cliff and duration, a
+    /// tranche id against its unlock table.
     fn claimable(
         env: Env,
         schedule_id: u64,
@@ -110,16 +297,64 @@ pub trait SorobanForgeVesting {
         schedule_id: u64,
     ) -> Result<VestingStatus, soroban_forge_shared_utils::ForgeError>;
 
-    /// Permissionless TTL keeper: bumps the schedule entry's TTL to the
-    /// [`ttl::BUMP_AMOUNT`] horizon when it falls inside
-    /// [`ttl::BUMP_THRESHOLD`]. Call periodically for schedules that must
-    /// outlive their entry's current TTL. Costs fees; changes nothing
-    /// else.
+    /// Read all schedule ids belonging to `beneficiary` in creation order (read-only).
     ///
-    /// # Errors
+    /// Returns an empty list if the beneficiary has no schedules.
     ///
-    /// * [`ForgeError::NotFound`] — no schedule with this id.
-    fn touch_ttl(env: Env, schedule_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+    /// *Growth note:* this index lives in instance storage, so its cost scales
+    /// linearly with the number of schedules per beneficiary.
+    fn schedules_for_beneficiary(env: Env, beneficiary: Address) -> soroban_sdk::Vec<u64>;
+
+    /// Read the total number of schedules ever created (read-only).
+    fn schedule_count(env: Env) -> u64;
+
+    /// Permissionless TTL keeper: bump the TTL of the persistent entries for
+    /// `schedule_id`. Mirrors the escrow contract's `touch_ttl`.
+    fn touch_ttl(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+}
+
+/// Events emitted by the vesting contract.
+///
+/// Mirrors escrow's event coverage: one event per state-changing entrypoint,
+/// with identifiers in topics and amounts/addresses in the data payload.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VestingEvent {
+    /// A linear schedule was created.
+    ScheduleCreated {
+        schedule_id: u64,
+        beneficiary: Address,
+        token: Address,
+        total_amount: i128,
+        cliff: u64,
+        duration: u64,
+        start: u64,
+    },
+    /// A tranche schedule was created.
+    TrancheScheduleCreated {
+        schedule_id: u64,
+        beneficiary: Address,
+        token: Address,
+        total_amount: i128,
+        tranches: u32,
+        start: u64,
+    },
+    /// A claim was settled and tokens were transferred.
+    Claimed {
+        schedule_id: u64,
+        beneficiary: Address,
+        amount: i128,
+        claimed_total: i128,
+    },
+    /// A schedule was revoked (reserved; not yet reachable).
+    Revoked {
+        schedule_id: u64,
+        beneficiary: Address,
+        unvested_amount: i128,
+    },
 }
 
 /// Lifecycle state of a vesting schedule.
@@ -134,6 +369,17 @@ pub enum VestingStatus {
     Completed,
     /// Schedule was terminated before completion (reserved).
     Revoked,
+}
+
+/// Policy applied when a schedule is revoked.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RevocationPolicy {
+    /// All unclaimed tokens are returned to the creator.
+    FullClawback,
+    /// Only the unvested portion is returned; already-vested tokens remain
+    /// claimable by the beneficiary.
+    KeepUnvested,
 }
 
 /// A single token-vesting schedule.
@@ -154,19 +400,84 @@ pub struct VestingSchedule {
     pub duration: u64,
     /// Amount already claimed by the beneficiary.
     pub claimed: i128,
+    /// Address authorized to revoke this schedule.
+    pub creator: Address,
     /// Current lifecycle state.
     pub status: VestingStatus,
 }
 
-/// Storage keys. Schedules are per-id **persistent** entries so the byte
-/// budget scales per record; only the id counter lives in instance storage
-/// (one small entry, written once per creation).
+/// One entry of a tranche schedule's unlock table: an amount that becomes
+/// claimable at a fixed offset from the schedule start.
+///
+/// A grant agreement's "25% at TGE, 25% at +6 months, 50% at +12 months"
+/// is three of these, not a ramp.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Tranche {
+    /// Seconds after `start` at which this tranche unlocks. Compared as an
+    /// offset, so `u64::MAX` is a valid (never-reached) boundary rather than
+    /// an overflow.
+    pub unlock_at: u64,
+    /// Amount that unlocks at `unlock_at`; must be positive.
+    pub amount: i128,
+}
+
+/// A vesting schedule whose unlock table is an explicit list of tranches
+/// instead of a cliff-plus-ramp.
+///
+/// A separate record from [`VestingSchedule`] on purpose: the linear record's
+/// wire shape stays untouched, and the two kinds sit under distinct
+/// `DataKey` variants while sharing one monotonic id counter.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TrancheSchedule {
+    /// Recipient of the unlocked tokens.
+    pub beneficiary: Address,
+    /// Token contract whose balance is drawn down.
+    pub token: Address,
+    /// Sum of every tranche amount; the amount unlocked at the last unlock.
+    pub total_amount: i128,
+    /// Ledger timestamp the tranche offsets are measured from (creation
+    /// time).
+    pub start: u64,
+    /// The immutable unlock table, ordered by strictly increasing
+    /// `unlock_at`. Non-empty and at most [`MAX_TRANCHES`] long.
+    pub tranches: Vec<Tranche>,
+    /// Amount already claimed by the beneficiary.
+    pub claimed: i128,
+    /// Address authorized to revoke this schedule.
+    pub creator: Address,
+    /// Current lifecycle state.
+    pub status: VestingStatus,
+}
+
+/// Instance-storage keys.
+///
+/// Both schedule kinds are instance-only entries (see the persistent-storage
+/// migration tracked in issue #55) keyed by the same id, so the variants
+/// partition the id space: an id addresses a linear record or a tranche
+/// record, never both.
 #[contracttype]
 enum DataKey {
-    /// The vesting record for `u64` id.
+    /// The linear vesting record for `u64` id.
     Schedule(u64),
+    /// The list of schedule ids for a given beneficiary.
+    BeneficiarySchedules(Address),
     /// Monotonic id counter.
+    /// The tranche vesting record for `u64` id, unlock table included.
+    TrancheSchedule(u64),
+    /// Monotonic id counter, shared by both kinds.
     Count,
+    /// Address authorized to revoke a schedule.
+    Creator(u64),
+}
+
+/// A stored schedule of either kind, as returned by [`Vesting::load`].
+enum Stored {
+    /// A linear (cliff + ramp) schedule.
+    Linear(VestingSchedule),
+    /// A tranche (discrete unlock table) schedule.
+    Tranche(TrancheSchedule),
 }
 
 /// The deployable vesting contract.
@@ -200,14 +511,16 @@ impl Vesting {
 
         let id = Self::next_id(&env)?;
         let start = env.ledger().timestamp();
+        let creator = beneficiary.clone();
         let mut schedule = VestingSchedule {
-            beneficiary,
+            beneficiary: beneficiary.clone(),
             token,
             total_amount,
             start,
             cliff,
             duration,
             claimed: 0,
+            creator: creator.clone(),
             status: VestingStatus::Locked,
         };
         // Derive the initial status from time (cliff == 0 starts `Vesting`).
@@ -215,34 +528,280 @@ impl Vesting {
         env.storage()
             .persistent()
             .set(&DataKey::Schedule(id), &schedule);
-        bump_entry(&env, &DataKey::Schedule(id));
+        events::schedule_created(&env, id, &schedule);
+
+        let mut schedules: soroban_sdk::Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::BeneficiarySchedules(beneficiary.clone()))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        schedules.push_back(id);
+        env.storage().instance().set(
+            &DataKey::BeneficiarySchedules(beneficiary.clone()),
+            &schedules,
+        );
+
+        env.events().publish(
+            (soroban_sdk::symbol_short!("created"), id),
+            VestingEvent::ScheduleCreated {
+                schedule_id: id,
+                beneficiary: schedule.beneficiary.clone(),
+                token: schedule.token.clone(),
+                total_amount: schedule.total_amount,
+                cliff: schedule.cliff,
+                duration: schedule.duration,
+                start: schedule.start,
+            },
+        );
+        env.storage().instance().set(&DataKey::Creator(id), &creator);
         Ok(id)
+    }
+
+    /// Create a new tranche vesting schedule and return its stable id.
+    ///
+    /// `tranches` is the unlock table, ordered by strictly increasing
+    /// `unlock_at` offsets in seconds from the creation timestamp. Requires a
+    /// non-empty table of at most [`MAX_TRANCHES`] entries, every
+    /// `amount > 0`, and a cumulative sum that fits in `i128`; the table is
+    /// then stored once and treated as immutable. The beneficiary is
+    /// authorized at creation time, mirroring `create_schedule`.
+    ///
+    /// A first tranche at `unlock_at == 0` is allowed: it unlocks at the
+    /// creation timestamp, the "TGE tranche" of a typical grant agreement.
+    pub fn create_tranche_schedule(
+        env: Env,
+        beneficiary: Address,
+        token: Address,
+        tranches: Vec<Tranche>,
+    ) -> Result<u64, ForgeError> {
+        let total_amount = Self::validate_tranches(&tranches)?;
+        beneficiary.require_auth();
+
+        let id = Self::next_id(&env)?;
+        let start = env.ledger().timestamp();
+        let creator = beneficiary.clone();
+        let mut schedule = TrancheSchedule {
+            beneficiary,
+            token,
+            total_amount,
+            start,
+            tranches,
+            claimed: 0,
+            creator: creator.clone(),
+            status: VestingStatus::Locked,
+        };
+        // Derive the initial status from time (a table starting at 0 begins
+        // `Vesting`, mirroring the linear `cliff == 0` case).
+        schedule.status = Self::tranche_status(&schedule, start)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::TrancheSchedule(id), &schedule);
+        env.events().publish(
+            (soroban_sdk::symbol_short!("tranche"), id),
+            VestingEvent::TrancheScheduleCreated {
+                schedule_id: id,
+                beneficiary: schedule.beneficiary.clone(),
+                token: schedule.token.clone(),
+                total_amount: schedule.total_amount,
+                tranches: schedule.tranches.len(),
+                start: schedule.start,
+            },
+        );
+        env.storage().instance().set(&DataKey::Creator(id), &creator);
+        Ok(id)
+    }
+
+    /// Read the full linear schedule record (read-only view; no state
+    /// change).
+    ///
+    /// Mirrors `get_tranche_schedule`: the stored record, unchanged. A
+    /// tranche id is `NotFound` here; use `get_tranche_schedule` for those.
+    pub fn get_schedule(env: Env, schedule_id: u64) -> Result<VestingSchedule, ForgeError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(ForgeError::NotFound)
+    }
+
+    /// Read the full tranche schedule record, unlock table included
+    /// (read-only view; no state change).
+    pub fn get_tranche_schedule(env: Env, schedule_id: u64) -> Result<TrancheSchedule, ForgeError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::TrancheSchedule(schedule_id))
+            .ok_or(ForgeError::NotFound)
     }
 
     /// Claim the vested-but-unclaimed amount.
     ///
-    /// Requires the beneficiary. Returns exactly what vested since the last
-    /// claim (or `0` when nothing is claimable), so repeated claims can never
-    /// overpay or underpay.
+    /// Requires the beneficiary. Works for both schedule kinds — the id
+    /// resolves to a linear or a tranche record and the matching math runs.
+    /// Returns exactly what vested since the last claim (or `0` when nothing
+    /// is claimable), so repeated claims can never overpay or underpay.
     ///
     /// Ordering: the SEP-41 transfer runs **before** the schedule write —
     /// see the module docs. A zero-claim call returns before either.
     pub fn claim(env: Env, schedule_id: u64) -> Result<i128, ForgeError> {
-        let mut schedule = Self::get_schedule(&env, schedule_id)?;
-        // NOTE: when a revocation method lands, `claim` must be gated on
-        // `schedule.status != Revoked`; the status is currently unreachable.
-        schedule.beneficiary.require_auth();
-
         let now = env.ledger().timestamp();
+        match Self::load(&env, schedule_id)? {
+            Stored::Linear(schedule) => Self::settle_linear(&env, schedule_id, schedule, now),
+            Stored::Tranche(schedule) => Self::settle_tranche(&env, schedule_id, schedule, now),
+        }
+    }
+
+    /// Amount currently claimable (read-only view; no state change).
+    pub fn claimable(env: Env, schedule_id: u64) -> Result<i128, ForgeError> {
+        let now = env.ledger().timestamp();
+        match Self::load(&env, schedule_id)? {
+            Stored::Linear(schedule) => Self::claimable_amount(&schedule, now),
+            Stored::Tranche(schedule) => Self::tranche_claimable(&schedule, now),
+        }
+    }
+
+    /// Read the current lifecycle status (read-only view).
+    ///
+    /// The status is derived from the ledger time and claimed amount rather
+    /// than the stored field, so it is always current between claims.
+    pub fn get_status(env: Env, schedule_id: u64) -> Result<VestingStatus, ForgeError> {
+        let now = env.ledger().timestamp();
+        match Self::load(&env, schedule_id)? {
+            Stored::Linear(schedule) => Self::current_status(&schedule, now),
+            Stored::Tranche(schedule) => Self::tranche_status(&schedule, now),
+        }
+    }
+
+    /// Permissionless TTL keeper: bump the TTL of the persistent entries for
+    /// `schedule_id`. Mirrors the escrow contract's `touch_ttl`.
+    pub fn touch_ttl(env: Env, schedule_id: u64) -> Result<(), ForgeError> {
+        let helper = TTLHelper::new(env.storage(), MIN_TTL);
+        helper.touch(&env, &[DataKey::Schedule(schedule_id), DataKey::TrancheSchedule(schedule_id)])
+    }
+
+    /// Revoke a schedule, clawing back tokens per `policy`.
+    ///
+    /// Requires the creator. Rejects revocation before the cliff (or before
+    /// the first tranche unlock) and revocation of an already-completed or
+    /// already-revoked schedule. On success the schedule is marked
+    /// [`VestingStatus::Revoked`] and the clawed-back amount is transferred
+    /// from this contract to the creator.
+    pub fn revoke(
+        env: Env,
+        schedule_id: u64,
+        policy: RevocationPolicy,
+    ) -> Result<(), ForgeError> {
+        let now = env.ledger().timestamp();
+        let creator: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Creator(schedule_id))
+            .ok_or(ForgeError::NotFound)?;
+        creator.require_auth();
+
+        match Self::load(&env, schedule_id)? {
+            Stored::Linear(mut schedule) => {
+                if schedule.status == VestingStatus::Revoked {
+                    return Err(ForgeError::InvalidInput);
+                }
+                let cliff_time = schedule
+                    .start
+                    .checked_add(schedule.cliff)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+                if now < cliff_time {
+                    return Err(ForgeError::InvalidInput);
+                }
+                let vested = Self::vested_amount(&schedule, now)?;
+                let clawback = match policy {
+                    RevocationPolicy::FullClawback => schedule
+                        .total_amount
+                        .checked_sub(schedule.claimed)
+                        .ok_or(ForgeError::ArithmeticOverflow)?,
+                    RevocationPolicy::KeepUnvested => schedule
+                        .total_amount
+                        .checked_sub(vested)
+                        .ok_or(ForgeError::ArithmeticOverflow)?,
+                };
+                if clawback > 0 {
+                    transfer_from_contract(&env, &schedule.token, &creator, clawback)?;
+                }
+                schedule.status = VestingStatus::Revoked;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Schedule(schedule_id), &schedule);
+                Ok(())
+            }
+            Stored::Tranche(mut schedule) => {
+                if schedule.status == VestingStatus::Revoked {
+                    return Err(ForgeError::InvalidInput);
+                }
+                let unlocked = Self::tranche_unlocked(&schedule, now)?;
+                let first_offset = schedule
+                    .tranches
+                    .get(0)
+                    .map(|t| t.unlock_at)
+                    .unwrap_or(0);
+                if Self::elapsed_since(schedule.start, now) < first_offset {
+                    return Err(ForgeError::InvalidInput);
+                }
+                let clawback = match policy {
+                    RevocationPolicy::FullClawback => schedule
+                        .total_amount
+                        .checked_sub(schedule.claimed)
+                        .ok_or(ForgeError::ArithmeticOverflow)?,
+                    RevocationPolicy::KeepUnvested => schedule
+                        .total_amount
+                        .checked_sub(unlocked)
+                        .ok_or(ForgeError::ArithmeticOverflow)?,
+                };
+                if clawback > 0 {
+                    transfer_from_contract(&env, &schedule.token, &creator, clawback)?;
+                }
+                schedule.status = VestingStatus::Revoked;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::TrancheSchedule(schedule_id), &schedule);
+                Ok(())
+            }
+        }
+    }
+
+    /// Load a schedule of either kind by id.
+    ///
+    /// The two kinds occupy distinct [`DataKey`] variants under one id
+    /// counter, so the linear read is attempted first and a tranche id simply
+    /// falls through to the tranche read.
+    fn load(env: &Env, schedule_id: u64) -> Result<Stored, ForgeError> {
+        if let Some(schedule) = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+        {
+            return Ok(Stored::Linear(schedule));
+        }
+        if let Some(schedule) = env
+            .storage()
+            .instance()
+            .get(&DataKey::TrancheSchedule(schedule_id))
+        {
+            return Ok(Stored::Tranche(schedule));
+        }
+        Err(ForgeError::NotFound)
+    }
+
+    /// Settle a claim against a linear schedule: transfer-before-state, then
+    /// record `claimed` and the derived status.
+    fn settle_linear(
+        env: &Env,
+        schedule_id: u64,
+        mut schedule: VestingSchedule,
+        now: u64,
+    ) -> Result<i128, ForgeError> {
+        if schedule.status == VestingStatus::Revoked {
+            return Err(ForgeError::InvalidInput);
+        }
         let amount = Self::claimable_amount(&schedule, now)?;
-        if amount == 0 {
+        if !Self::authorize_and_pay(env, &schedule.beneficiary, &schedule.token, amount)? {
             return Ok(0);
         }
-
-        // Pay the beneficiary before recording anything: a failed transfer
-        // returns TokenTransferFailed with `claimed`/`status` untouched.
-        transfer_from_contract(&env, &schedule.token, &schedule.beneficiary, amount)?;
-
         schedule.claimed = schedule
             .claimed
             .checked_add(amount)
@@ -251,23 +810,129 @@ impl Vesting {
         env.storage()
             .persistent()
             .set(&DataKey::Schedule(schedule_id), &schedule);
-        bump_entry(&env, &DataKey::Schedule(schedule_id));
+        events::claimed(
+            env,
+            schedule_id,
+            amount,
+            schedule.claimed,
+            schedule.status.clone(),
+        );
+        env.events().publish(
+            (soroban_sdk::symbol_short!("claimed"), schedule_id),
+            VestingEvent::Claimed {
+                schedule_id,
+                beneficiary: schedule.beneficiary.clone(),
+                amount,
+                claimed_total: schedule.claimed,
+            },
+        );
         Ok(amount)
     }
 
-    /// Amount currently claimable (read-only view; no state change).
-    pub fn claimable(env: Env, schedule_id: u64) -> Result<i128, ForgeError> {
-        let schedule = Self::get_schedule(&env, schedule_id)?;
-        Self::claimable_amount(&schedule, env.ledger().timestamp())
+    /// Settle a claim against a tranche schedule: the same
+    /// transfer-before-state discipline as [`Self::settle_linear`], over the
+    /// unlock table's step function.
+    fn settle_tranche(
+        env: &Env,
+        schedule_id: u64,
+        mut schedule: TrancheSchedule,
+        now: u64,
+    ) -> Result<i128, ForgeError> {
+        if schedule.status == VestingStatus::Revoked {
+            return Err(ForgeError::InvalidInput);
+        }
+        let amount = Self::tranche_claimable(&schedule, now)?;
+        if !Self::authorize_and_pay(env, &schedule.beneficiary, &schedule.token, amount)? {
+            return Ok(0);
+        }
+        schedule.claimed = schedule
+            .claimed
+            .checked_add(amount)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        schedule.status = Self::tranche_status(&schedule, now)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::TrancheSchedule(schedule_id), &schedule);
+        events::claimed(
+            env,
+            schedule_id,
+            amount,
+            schedule.claimed,
+            schedule.status.clone(),
+        );
+        env.events().publish(
+            (soroban_sdk::symbol_short!("claimed"), schedule_id),
+            VestingEvent::Claimed {
+                schedule_id,
+                beneficiary: schedule.beneficiary.clone(),
+                amount,
+                claimed_total: schedule.claimed,
+            },
+        );
+        Ok(amount)
     }
 
-    /// Read the current lifecycle status (read-only view).
+    /// Authorize the beneficiary, then pay `amount` from this contract.
     ///
-    /// The status is derived from the ledger time and claimed amount rather
-    /// than the stored field, so it is always current between claims.
-    pub fn get_status(env: Env, schedule_id: u64) -> Result<VestingStatus, ForgeError> {
-        let schedule = Self::get_schedule(&env, schedule_id)?;
-        Self::current_status(&schedule, env.ledger().timestamp())
+    /// Returns `Ok(true)` when a transfer ran and `Ok(false)` when `amount` is
+    /// zero, so a zero claim exits without ever issuing an empty transfer.
+    /// The payment happens here — before the caller's state write — so a
+    /// failed transfer leaves the schedule's `claimed`/`status` untouched.
+    fn authorize_and_pay(
+        env: &Env,
+        beneficiary: &Address,
+        token: &Address,
+        amount: i128,
+    ) -> Result<bool, ForgeError> {
+        beneficiary.require_auth();
+        if amount == 0 {
+            return Ok(false);
+        }
+        transfer_from_contract(env, token, beneficiary, amount)?;
+        Ok(true)
+    }
+
+    /// Validate an unlock table and return the sum of its amounts.
+    ///
+    /// Rejects an empty table, one longer than [`MAX_TRANCHES`], a
+    /// non-positive amount, and an offset that does not strictly increase
+    /// (a repeat or a rewind), and checks the cumulative sum so a table
+    /// totalling past `i128::MAX` never reaches storage. The first offset is
+    /// unconstrained; only the ordering between entries is.
+    fn validate_tranches(tranches: &Vec<Tranche>) -> Result<i128, ForgeError> {
+        if tranches.is_empty() || tranches.len() > MAX_TRANCHES {
+            return Err(ForgeError::InvalidInput);
+        }
+        let mut total: i128 = 0;
+        let mut previous_unlock: Option<u64> = None;
+        for tranche in tranches.iter() {
+            if tranche.amount <= 0 {
+                return Err(ForgeError::InvalidInput);
+            }
+            if let Some(previous) = previous_unlock {
+                if tranche.unlock_at <= previous {
+                    return Err(ForgeError::InvalidInput);
+                }
+            }
+            previous_unlock = Some(tranche.unlock_at);
+            total = total
+                .checked_add(tranche.amount)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+        }
+        Ok(total)
+    }
+
+    /// Read all schedule ids belonging to `beneficiary` in creation order.
+    pub fn schedules_for_beneficiary(env: Env, beneficiary: Address) -> soroban_sdk::Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::BeneficiarySchedules(beneficiary))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    /// Read the total number of schedules ever created.
+    pub fn schedule_count(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::Count).unwrap_or(0)
     }
 
     /// Permissionless keeper: bump the schedule entry's TTL without changing
@@ -287,15 +952,6 @@ impl Vesting {
         let id = count.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;
         env.storage().instance().set(&DataKey::Count, &id);
         Ok(id)
-    }
-
-    /// Load a schedule by id. A missing id is `NotFound`; the lookup never
-    /// writes, so it cannot create an entry as a side effect.
-    fn get_schedule(env: &Env, schedule_id: u64) -> Result<VestingSchedule, ForgeError> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Schedule(schedule_id))
-            .ok_or(ForgeError::NotFound)
     }
 
     /// Derive the lifecycle status from ledger time and claimed amount.
@@ -358,436 +1014,78 @@ impl Vesting {
             .checked_sub(schedule.claimed)
             .ok_or(ForgeError::ArithmeticOverflow)
     }
-}
 
-/// Move `amount` of `token` from this contract to `to`.
-///
-/// Token failures are bucketed into [`ForgeError::TokenTransferFailed`]
-/// rather than forwarded — the same policy as escrow: a client receiving
-/// `Error(Contract, #N)` cannot know whether `N` came from the token or this
-/// contract, and the root cause remains visible in the transaction's
-/// diagnostic events.
-fn transfer_from_contract(
-    env: &Env,
-    token: &Address,
-    to: &Address,
-    amount: i128,
-) -> Result<(), ForgeError> {
-    match token::TokenClient::new(env, token).try_transfer(
-        &env.current_contract_address(),
-        to,
-        &amount,
-    ) {
-        Ok(Ok(())) => Ok(()),
-        // Token returned a typed error (insufficient balance, custom token
-        // logic) or the host aborted (most commonly an undeployed token
-        // address). The raw discriminant is intentionally discarded.
-        _ => Err(ForgeError::TokenTransferFailed),
+    /// Seconds elapsed since `start`, saturating at zero.
+    ///
+    /// Tranche progress is compared on this offset instead of on
+    /// `start + unlock_at`, which keeps a `u64::MAX` offset from overflowing:
+    /// the tranche is simply never reached. A ledger timestamp before `start`
+    /// yields `0`, i.e. nothing unlocked — the conservative direction.
+    fn elapsed_since(start: u64, now: u64) -> u64 {
+        now.saturating_sub(start)
+    }
+
+    /// Derive the lifecycle status of a tranche schedule.
+    ///
+    /// Same two inputs as the linear kind — ledger time and claimed amount —
+    /// with the first unlock standing in for the cliff: `Locked` before it,
+    /// `Vesting` from it until the final amount is claimed, `Completed` once
+    /// `claimed == total_amount`.
+    fn tranche_status(schedule: &TrancheSchedule, now: u64) -> Result<VestingStatus, ForgeError> {
+        if schedule.claimed >= schedule.total_amount {
+            return Ok(VestingStatus::Completed);
+        }
+        // Creation rejects an empty table, so the first tranche is always
+        // there; the arm is defensive only.
+        let Some(first) = schedule.tranches.get(0) else {
+            return Ok(VestingStatus::Locked);
+        };
+        if Self::elapsed_since(schedule.start, now) < first.unlock_at {
+            return Ok(VestingStatus::Locked);
+        }
+        Ok(VestingStatus::Vesting)
+    }
+
+    /// Unlocked amount of a tranche schedule at ledger time `now`: the sum of
+    /// every tranche whose offset has elapsed.
+    ///
+    /// The scan stops at the first tranche that has not unlocked yet, which is
+    /// exact because creation guarantees strictly increasing offsets (and
+    /// bounded because the table is capped at [`MAX_TRANCHES`]). The
+    /// cumulative sum is checked even though creation already proved it fits
+    /// in `i128`, so a tampered record fails loudly instead of wrapping.
+    fn tranche_unlocked(schedule: &TrancheSchedule, now: u64) -> Result<i128, ForgeError> {
+        let elapsed = Self::elapsed_since(schedule.start, now);
+        let mut total: i128 = 0;
+        for tranche in schedule.tranches.iter() {
+            if tranche.unlock_at > elapsed {
+                break;
+            }
+            total = total
+                .checked_add(tranche.amount)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+        }
+        Ok(total)
+    }
+
+    /// Claimable amount of a tranche schedule at ledger time `now` (unlocked
+    /// minus claimed).
+    fn tranche_claimable(schedule: &TrancheSchedule, now: u64) -> Result<i128, ForgeError> {
+        let unlocked = Self::tranche_unlocked(schedule, now)?;
+        // `unlocked` is monotonic in `now` and `claimed` only ever rises to a
+        // previously unlocked value, so the subtraction cannot underflow; use
+        // checked arithmetic to fail loudly if the invariant is ever broken.
+        unlocked
+            .checked_sub(schedule.claimed)
+            .ok_or(ForgeError::ArithmeticOverflow)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
-    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-    use soroban_sdk::Env;
+mod tests;
 
-    const START: u64 = 1_000_000;
-    const CLIFF: u64 = 1_000;
-    const DURATION: u64 = 4_000;
-    const TOTAL: i128 = 10_000;
+#[cfg(test)]
+mod authz;
 
-    /// Build a fresh env with mocked auths, a registered contract, and named
-    /// accounts. The generated client borrows the env, so it cannot be
-    /// returned from a helper.
-    macro_rules! setup {
-        () => {{
-            let env = Env::default();
-            env.mock_all_auths();
-            env.ledger().set_timestamp(START);
-
-            // Real Stellar Asset Contract — the same fixture escrow uses.
-            let admin = Address::generate(&env);
-            let sac = env.register_stellar_asset_contract_v2(admin);
-            let token = sac.address();
-            let token_admin = StellarAssetClient::new(&env, &token);
-            let token_client = TokenClient::new(&env, &token);
-            let contract_id = env.register(Vesting, ());
-            let client = SorobanForgeVestingClient::new(&env, &contract_id);
-            let accounts = TestAccounts::generate(&env);
-            // Fund the schedule contract up front with the full allocation,
-            // the way a deployment is topped up before schedules run.
-            token_admin.mint(&contract_id, &TOTAL);
-            (env, token, token_client, contract_id, client, accounts)
-        }};
-    }
-
-    // NOTE: negative authorization tests (calling `require_auth` without a
-    // matching signature) are not runnable in-process with soroban-sdk 21.5.1:
-    // the host raises a non-unwinding panic that aborts the test binary. They
-    // are tracked in the security-invariant test backlog (Issue 7).
-
-    fn create(
-        client: &SorobanForgeVestingClient<'_>,
-        token: &Address,
-        accounts: &TestAccounts,
-    ) -> u64 {
-        client.create_schedule(&accounts.user1, token, &TOTAL, &CLIFF, &DURATION)
-    }
-
-    #[test]
-    fn create_schedule_succeeds_and_is_locked() {
-        let (_env, token, _tc, _cid, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-        assert_eq!(client.get_status(&id), VestingStatus::Locked);
-        assert_eq!(client.claimable(&id), 0);
-    }
-
-    #[test]
-    fn create_schedule_assigns_distinct_ids() {
-        let (_env, token, _tc, _cid, client, accounts) = setup!();
-        let id1 = create(&client, &token, &accounts);
-        let id2 = create(&client, &token, &accounts);
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn create_schedule_without_cliff_starts_vesting() {
-        let (_env, _token, _tc, _cid, client, accounts) = setup!();
-        let id = client.create_schedule(
-            &accounts.user1,
-            &accounts.validator,
-            &TOTAL,
-            &0_u64,
-            &DURATION,
-        );
-        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
-    }
-
-    #[test]
-    fn create_schedule_rejects_zero_total() {
-        let (_env, _token, _tc, _cid, client, accounts) = setup!();
-        let err = client
-            .try_create_schedule(
-                &accounts.user1,
-                &accounts.validator,
-                &0_i128,
-                &CLIFF,
-                &DURATION,
-            )
-            .unwrap_err()
-            .unwrap();
-        assert_eq!(err, ForgeError::InvalidInput);
-    }
-
-    #[test]
-    fn create_schedule_rejects_zero_duration() {
-        let (_env, _token, _tc, _cid, client, accounts) = setup!();
-        let err = client
-            .try_create_schedule(&accounts.user1, &accounts.validator, &TOTAL, &CLIFF, &0_u64)
-            .unwrap_err()
-            .unwrap();
-        assert_eq!(err, ForgeError::InvalidInput);
-    }
-
-    #[test]
-    fn create_schedule_rejects_cliff_after_duration() {
-        let (_env, _token, _tc, _cid, client, accounts) = setup!();
-        let err = client
-            .try_create_schedule(
-                &accounts.user1,
-                &accounts.validator,
-                &TOTAL,
-                &5_000_u64,
-                &4_000_u64,
-            )
-            .unwrap_err()
-            .unwrap();
-        assert_eq!(err, ForgeError::InvalidInput);
-    }
-
-    #[test]
-    fn claimable_before_cliff_is_zero() {
-        let (env, token, _tc, _cid, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-        // Halfway between start and the cliff.
-        env.ledger().set_timestamp(START + CLIFF / 2);
-        assert_eq!(client.claimable(&id), 0);
-    }
-
-    #[test]
-    fn claimable_at_cliff_is_zero() {
-        let (env, token, _tc, _cid, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-        env.ledger().set_timestamp(START + CLIFF);
-        assert_eq!(client.claimable(&id), 0);
-    }
-
-    #[test]
-    fn claim_before_cliff_returns_zero() {
-        let (env, token, _tc, _cid, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-        env.ledger().set_timestamp(START + CLIFF / 2);
-        assert_eq!(client.claim(&id), 0);
-    }
-
-    #[test]
-    fn claimable_midway_is_half() {
-        let (env, token, _tc, _cid, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-        // Halfway through the vesting window (cliff .. duration).
-        env.ledger()
-            .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
-        assert_eq!(client.claimable(&id), TOTAL / 2);
-    }
-
-    #[test]
-    fn claimable_at_duration_is_full() {
-        let (env, token, _tc, _cid, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-        env.ledger().set_timestamp(START + DURATION);
-        assert_eq!(client.claimable(&id), TOTAL);
-    }
-
-    #[test]
-    fn claimable_after_duration_is_full() {
-        let (env, token, _tc, _cid, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-        env.ledger().set_timestamp(START + DURATION + 1);
-        assert_eq!(client.claimable(&id), TOTAL);
-    }
-
-    #[test]
-    fn claim_pays_exact_amount() {
-        let (env, token, _tc, _cid, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-        env.ledger()
-            .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
-        assert_eq!(client.claim(&id), TOTAL / 2);
-    }
-
-    #[test]
-    fn repeated_claims_never_overpay_or_underpay() {
-        let (env, token, _tc, _cid, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-
-        // Claim half at the midway point.
-        env.ledger()
-            .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
-        assert_eq!(client.claim(&id), TOTAL / 2);
-        assert_eq!(client.claimable(&id), 0);
-
-        // Advance past the end; the remaining half becomes claimable.
-        env.ledger().set_timestamp(START + DURATION + 100);
-        assert_eq!(client.claim(&id), TOTAL - TOTAL / 2);
-        assert_eq!(client.claimable(&id), 0);
-
-        // A further claim is a no-op.
-        assert_eq!(client.claim(&id), 0);
-        assert_eq!(client.get_status(&id), VestingStatus::Completed);
-    }
-
-    #[test]
-    fn claim_after_end_completes_status() {
-        let (env, token, _tc, _cid, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-        env.ledger().set_timestamp(START + DURATION + 1);
-        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
-        assert_eq!(client.claim(&id), TOTAL);
-        assert_eq!(client.get_status(&id), VestingStatus::Completed);
-    }
-
-    #[test]
-    fn claim_without_cliff_vests_from_start() {
-        let (env, _token, _tc, _cid, client, accounts) = setup!();
-        let id = client.create_schedule(
-            &accounts.user1,
-            &accounts.validator,
-            &TOTAL,
-            &0_u64,
-            &DURATION,
-        );
-        env.ledger().set_timestamp(START + DURATION / 2);
-        assert_eq!(client.claimable(&id), TOTAL / 2);
-    }
-
-    #[test]
-    fn cliff_equals_duration_vests_at_once() {
-        let (env, _token, _tc, _cid, client, accounts) = setup!();
-        let id = client.create_schedule(
-            &accounts.user1,
-            &accounts.validator,
-            &TOTAL,
-            &DURATION,
-            &DURATION,
-        );
-        env.ledger().set_timestamp(START + DURATION - 1);
-        assert_eq!(client.claimable(&id), 0);
-        env.ledger().set_timestamp(START + DURATION);
-        assert_eq!(client.claimable(&id), TOTAL);
-    }
-
-    #[test]
-    fn claim_missing_schedule_is_not_found() {
-        let (_env, _token, _tc, _cid, client, _accounts) = setup!();
-        let err = client.try_claim(&999).unwrap_err().unwrap();
-        assert_eq!(err, ForgeError::NotFound);
-    }
-
-    #[test]
-    fn claimable_missing_schedule_is_not_found() {
-        let (_env, _token, _tc, _cid, client, _accounts) = setup!();
-        let err = client.try_claimable(&999).unwrap_err().unwrap();
-        assert_eq!(err, ForgeError::NotFound);
-    }
-
-    #[test]
-    fn get_status_missing_schedule_is_not_found() {
-        let (_env, _token, _tc, _cid, client, _accounts) = setup!();
-        let err = client.try_get_status(&999).unwrap_err().unwrap();
-        assert_eq!(err, ForgeError::NotFound);
-    }
-
-    #[test]
-    fn claimable_overflow_is_reported() {
-        let (env, _token, _tc, _cid, client, accounts) = setup!();
-        // A huge total with a non-trivial elapsed time overflows the
-        // intermediate `total * elapsed` product.
-        let id = client.create_schedule(
-            &accounts.user1,
-            &accounts.validator,
-            &i128::MAX,
-            &0_u64,
-            &1_000_u64,
-        );
-        env.ledger().set_timestamp(START + 500);
-        let err = client.try_claimable(&id).unwrap_err().unwrap();
-        assert_eq!(err, ForgeError::ArithmeticOverflow);
-    }
-
-    // -------------------------------------------------------------------
-    // Settlement: claim pays real SEP-41 tokens
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn claim_transfers_vested_tokens_to_beneficiary() {
-        let (env, token, tc, contract_id, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-
-        // Halfway through the vesting window: 5_000 claimable.
-        env.ledger()
-            .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
-        assert_eq!(client.claim(&id), TOTAL / 2);
-
-        // Tokens actually moved, and the schedule recorded the claim.
-        assert_eq!(tc.balance(&accounts.user1), TOTAL / 2);
-        assert_eq!(tc.balance(&contract_id), TOTAL - TOTAL / 2);
-        assert_eq!(client.claimable(&id), 0);
-        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
-    }
-
-    #[test]
-    fn final_claim_settles_remainder_and_completes() {
-        let (env, token, tc, contract_id, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-
-        env.ledger()
-            .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
-        assert_eq!(client.claim(&id), TOTAL / 2);
-
-        env.ledger().set_timestamp(START + DURATION + 100);
-        assert_eq!(client.claim(&id), TOTAL - TOTAL / 2);
-
-        // Full allocation paid out; contract drained; schedule completed.
-        assert_eq!(tc.balance(&accounts.user1), TOTAL);
-        assert_eq!(tc.balance(&contract_id), 0);
-        assert_eq!(client.get_status(&id), VestingStatus::Completed);
-        assert_eq!(client.claimable(&id), 0);
-
-        // A repeated claim after completion is a silent no-op: no transfer.
-        assert_eq!(client.claim(&id), 0);
-        assert_eq!(tc.balance(&accounts.user1), TOTAL);
-        assert_eq!(tc.balance(&contract_id), 0);
-    }
-
-    #[test]
-    fn repeated_claims_settle_token_balances_each_time() {
-        let (env, token, tc, contract_id, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-
-        // Three separate claims across the window; each moves exactly the
-        // newly claimable amount and nothing more.
-        env.ledger().set_timestamp(START + CLIFF + 1_000);
-        assert_eq!(client.claim(&id), 3_333);
-        assert_eq!(tc.balance(&accounts.user1), 3_333);
-
-        env.ledger().set_timestamp(START + CLIFF + 2_000);
-        assert_eq!(client.claim(&id), 3_333);
-        assert_eq!(tc.balance(&accounts.user1), 6_666);
-
-        env.ledger().set_timestamp(START + DURATION + 1);
-        assert_eq!(client.claim(&id), 3_334);
-        assert_eq!(tc.balance(&accounts.user1), TOTAL);
-        assert_eq!(tc.balance(&contract_id), 0);
-        assert_eq!(client.get_status(&id), VestingStatus::Completed);
-    }
-
-    #[test]
-    fn failed_transfer_leaves_claim_unchanged() {
-        let (env, token, tc, contract_id, client, accounts) = setup!();
-        // Schedule promises double what the contract actually holds.
-        let id = client.create_schedule(&accounts.user1, &token, &(TOTAL * 2), &0_u64, &DURATION);
-        env.ledger().set_timestamp(START + DURATION + 1);
-        assert_eq!(client.claimable(&id), TOTAL * 2);
-
-        let err = client.try_claim(&id).unwrap_err().unwrap();
-        assert_eq!(err, ForgeError::TokenTransferFailed);
-
-        // Nothing moved, nothing recorded: balances and schedule unchanged.
-        assert_eq!(tc.balance(&accounts.user1), 0);
-        assert_eq!(tc.balance(&contract_id), TOTAL);
-        assert_eq!(client.claimable(&id), TOTAL * 2);
-        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
-    }
-
-    #[test]
-    fn zero_claim_issues_no_token_transfer() {
-        let (env, token, tc, contract_id, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-
-        // Before the cliff: returns 0, moves nothing.
-        env.ledger().set_timestamp(START + CLIFF / 2);
-        assert_eq!(client.claim(&id), 0);
-        assert_eq!(tc.balance(&accounts.user1), 0);
-        assert_eq!(tc.balance(&contract_id), TOTAL);
-
-        // A second immediate claim right after a payout is also a no-op.
-        env.ledger()
-            .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
-        assert_eq!(client.claim(&id), TOTAL / 2);
-        assert_eq!(client.claim(&id), 0);
-        assert_eq!(tc.balance(&accounts.user1), TOTAL / 2);
-        assert_eq!(tc.balance(&contract_id), TOTAL - TOTAL / 2);
-    }
-
-    #[test]
-    fn floor_division_residue_stays_claimable_until_final_claim() {
-        let (env, token, tc, contract_id, client, accounts) = setup!();
-        let id = create(&client, &token, &accounts);
-
-        // 1_000 / 3_000 through the window:
-        // 10_000 * 1_000 / 3_000 = 3_333 (floored) — one stroop of residue
-        // stays behind, and the final claim pays it out in full.
-        env.ledger().set_timestamp(START + CLIFF + 1_000);
-        let first = client.claim(&id);
-        assert_eq!(first, 3_333);
-
-        env.ledger().set_timestamp(START + DURATION + 1);
-        let rest = client.claim(&id);
-        assert_eq!(first + rest, TOTAL);
-        assert_eq!(tc.balance(&accounts.user1), TOTAL);
-        assert_eq!(tc.balance(&contract_id), 0);
-    }
-}
+#[cfg(test)]
+mod props;

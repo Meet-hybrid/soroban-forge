@@ -10,22 +10,24 @@ decision — not an oversight.
 
 ## Resolved in the SDK 27 / Phase 1 migration
 
-These were the headline gaps in v0.1.0; all are closed **for the escrow
-contract** and remain open for the other five:
+These were the headline gaps in v0.1.0; SEP-41 settlement now covers escrow,
+royalties, vesting, DAO bonds, and both subscription payment modes:
 
 1. **No token settlement** — escrow now performs real SEP-41 transfers
    (`deposit` pulls from the buyer, `release`/`refund`/`resolve` pay out)
    with transfer-before-state ordering so a failed transfer leaves no
-   partial state. Marketplace royalties and vesting have since gained
-   settlement the same way; DAO governance and subscriptions still move
-   nothing.
-2. **Instance-only storage** — escrow records now live in per-id
-   **persistent** entries with TTL bumps on every write and a
-   permissionless `touch_ttl` keeper entrypoint. The other five still use
-   instance storage exclusively.
-3. **No events** — escrow emits `EscrowCreated`, `Deposited`, `Released`,
-   `Refunded`, `Disputed`, `Resolved`, `Cancelled` (escrow id as topic).
-   The other five are still silent.
+   partial state. Marketplace royalties, vesting, and DAO governance
+   (proposal bonds) have since gained settlement the same way — including
+   `distribute`'s real royalty payout — and multi-sig `execute` performs
+   real cross-contract invocations; subscriptions transfer pull-mode charges
+   directly from subscriber to provider and custody prepaid deposits for exact
+   period debits and refunds.
+2. **Instance-only storage** — escrow, multi-sig wallet, DAO governance, and marketplace royalties now use **persistent** entries with TTL bumps on every write and permissionless `touch_ttl` keeper entrypoints. Vesting and subscriptions still use instance storage.
+3. **No events** — escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit lifecycle events; only vesting remains silent.
+   real cross-contract invocations;
+   subscriptions still move nothing.
+2. **Instance-only storage** — escrow, multi-sig wallet, DAO governance, marketplace royalties, and subscription records use **persistent** entries with TTL bumps and permissionless `touch_ttl` keeper entrypoints. Vesting records remain in instance storage; subscription counters and enumeration indexes remain instance-scoped.
+3. **No events** — escrow, multi-sig wallet, DAO governance, subscription payments, marketplace royalties, and vesting emit lifecycle events.
 4. **Arbiter stored but unreachable** — `dispute` (claimant-authorized)
    and `resolve` (arbiter-only, final) make the third party live.
    `Disputed` is a real state, verified by tests.
@@ -35,48 +37,85 @@ contract** and remain open for the other five:
 
 ## Still open
 
-### 1. Token settlement for the remaining two contracts
+### 1. Subscription prepaid custody
 
-DAO governance and subscriptions remain state
-machines: amounts are validated and stored, never moved.
-(Marketplace royalties moved off this list: `settle_sale` transfers
-real SEP-41 tokens with the escrow pattern. Multi-sig wallet also
-moved off this list: `execute` performs real cross-contract
-invocations via `try_invoke_contract`. Vesting also moved off this
-list: `claim` transfers the vested amount to the beneficiary with
-transfer-before-state ordering.) Each remaining contract gets
-its own tranche using the escrow pattern (see
-[RESUBMISSION.md](RESUBMISSION.md#phase-1--flagship-escrow-primitive-3-weeks)).
+Prepaid mode is opt-in per subscription. Deposits are held by the subscription
+contract and paid to the provider per period, or returned to the subscriber on
+withdrawal or cancellation. This creates a custody trust surface: correctness
+of stored balances, token behavior, and successful refund execution matter
+while funds are held. Pull mode remains direct subscriber-to-provider transfer
+and does not custody subscription funds. There is no administrator recovery
+path for prepaid funds; subscribers can withdraw surplus or cancel to receive
+the remainder. Prepaid `charge_catchup` is rejected; subscribers use the
+single-period retry path so insufficient balance follows `PastDue` semantics.
 
-### 2. Instance-only storage outside escrow
+### 2. DAO voting uses the balance at vote time
 
-The other five contracts keep all state in `env.storage().instance()`.
+DAO governance weights each vote by the voter's current balance of its
+configured SEP-41 governance token. The balance is read when `vote` runs; no
+snapshot is kept at proposal creation or at a common voting block. A holder
+can therefore move tokens between accounts and cast votes from each account
+while a proposal is open, changing the influence represented by those
+accounts. This is a simple stake-weighted foundation, not a manipulation-
+resistant snapshot or delegation system.
+
+### 3. Instance-only storage outside escrow, multi-sig wallet, DAO governance, and marketplace royalties
+
+### 2. Instance-only storage outside escrow, multi-sig wallet, DAO governance, marketplace royalties, and subscriptions
+
+Vesting schedule records remain in `env.storage().instance()` and face the
+byte-budget and TTL-expiry bricking problem. Subscription records moved to
+persistent storage with `touch_ttl`; their small counter and enumeration
+indexes remain in instance storage. Escrow, multi-sig wallet, DAO governance,
+and marketplace royalties also use persistent records with keeper entrypoints.
+Vesting and subscriptions keep state in `env.storage().instance()`.
 Long-lived records there still face the byte budget and TTL-expiry
-bricking problem. Migrate per contract with the escrow pattern.
+bricking problem. (Escrow, multi-sig wallet, DAO governance, and marketplace royalties migrated per-record data to persistent storage with `touch_ttl`/`touch_tx_ttl` keeper entrypoints.)
 
-### 3. No events outside escrow
+Persistent entries have their own TTL cost: a multi-sig transaction or DAO
+proposal that sits below threshold / waiting for votes still needs its TTL
+extended. The permissionless keepers (`touch_tx_ttl`, `touch_ttl`) cover
+this, but who runs them is an operational question — off-chain keepers must
+visit live transactions and proposals within the 30-day horizon. (Multi-sig
+transactions now support optional per-tx expiry deadlines which lazily evaluate
+to `Expired`, self-cleaning stale pending proposals without external keepers, and
+DAO governance limits concurrent proposals to at most 5 active proposals per
+proposer.)
 
-Only escrow is observable on-chain. The rest need event modules before
-any indexer or SDK integration.
+### 4. No events in vesting contract
+An escrow whose persistent entry expires becomes inaccessible to contract
+calls until the entry is restored. Keepers can monitor its remaining TTL with
+`ttl_info` and call `touch_ttl` before expiry; `NotFound` from either means
+the id never existed or the entry is already archived. Archived entries need
+a transaction-level `RestoreFootprintOp` (or protocol auto-restoration from a
+simulated invocation) before contract access can resume. The token balance
+remains held by the escrow contract while the record is archived.
 
-### 4. Negative authorization coverage outside escrow
+### 3. No events in other contracts
 
-**Closed for escrow** (was the open item here): a dedicated negative-auth
-suite (`crates/escrow/src/authz.rs`) proves per entrypoint that a wrong
-signer is rejected by the host, that armed signatures cannot be replayed
-over different arguments, and — via `env.auths()` tree assertions — pins
-the exact authorized-invocation tree every payout path demands. It also
-documents the verified mechanics: contract self-authorization is implicit
-(the host auto-approves `require_auth` from the executing contract), which
-is why a party signature alone legitimately completes a payout.
+Vesting, escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit typed lifecycle events. Other contracts remain to be assessed for event coverage.
 
-Still open: the other five contracts' entrypoints are proven at call-graph
-level only. Vesting's `claim` now moves tokens, so its settlement path is
-covered by balance-asserted tests but not yet by a negative-auth suite;
-DAO governance and subscriptions still move nothing, keeping theirs lower
-priority until their settlement tranches.
 
-### 5. Vesting rounding residue
+### 5. Negative authorization coverage outside escrow, vesting, and DAO governance
+
+**Closed for escrow, vesting, and DAO governance** (was the open item here): dedicated
+negative-auth suites (`crates/escrow/src/authz.rs`, `crates/vesting/src/authz.rs`,
+`crates/dao-governance/src/authz.rs`) prove per entrypoint that a wrong signer is
+rejected by the host, that armed signatures cannot be replayed over different
+arguments or schedule IDs, and — via `env.auths()` tree assertions — pin the exact
+authorized-invocation tree every creation and payout path demands. The DAO suite
+additionally covers the bond-bearing paths: the proposer's signature must carry the
+nested token `transfer` authorization for the bond pull, and the outgoing
+refund/forfeit transfers are covered by contract self-authorization (blank envelope).
+They also document the verified mechanics: contract self-authorization is implicit
+(the host auto-approves `require_auth` from the executing contract), which is why
+a party signature alone legitimately completes a payout.
+
+Still open: other contract entrypoints are proven at call-graph level only.
+Subscription `deposit` and `withdraw_balance` are subscriber-authorized; the
+existing provider-authorized `charge` moves due payments to the provider.
+
+### 6. Vesting rounding residue
 
 Vesting claims use floor division; per-claim residue (at most one stroop
 × number of claims) stays in the contract until the final claim, where it
@@ -84,7 +123,7 @@ is paid out in full (settlement landed: residue is claimable, never lost,
 asserted by `floor_division_residue_stays_claimable_until_final_claim`).
 No dust-sweep entrypoint — revisit only as a convenience.
 
-### 6. Testnet only — no mainnet deployment
+### 7. Testnet only — no mainnet deployment
 
 The escrow contract **is deployed on testnet** with a verified receipt
 round (see the README proof table and `scripts/demo-testnet.sh`). There
@@ -108,7 +147,7 @@ with insufficient balance. A mainnet escrow receipt, once it exists,
 will be added to the README proof table with its own explorer links.
 Total one-time cost to finish: ~18–19 XLM on the issuer account.
 
-### 7. `packages/` are minimal
+### 8. `packages/` are minimal
 
 The TypeScript SDK is now a **generated client from the deployed escrow
 contract's ABI** (`@soroban-forge/escrow-client`, contract ID embedded) —
@@ -116,7 +155,7 @@ replacing the v0.1.0 console-log placeholder. It has no dedicated test
 suite of its own yet, and the Next.js example remains a static landing
 page (stale `teachlink` links fixed; a real demo UI is future work).
 
-### 8. Single maintainer
+### 9. Single maintainer
 
 All commits are by one person. Contributor-facing process exists — scoped
 issues with acceptance criteria, fork-first workflow — but no external
@@ -146,6 +185,14 @@ contributions have landed yet.
 
 ## Out of scope for the flagship phase (deliberate)
 
-- Settlement work for the five non-flagship contracts (one tranche each)
+- Plan management, multi-recipient royalties
 - Weighted voting, plan management, multi-recipient royalties
 - Formal verification, external audit (planned before any mainnet use)
+
+## Subscription record compatibility
+
+`Subscription` now includes `prepaid_balance: Option<i128>` so callers can
+distinguish legacy pull mode (`None`) from prepaid mode (`Some`, including
+`Some(0)`). This changes the serialized record and generated contract spec;
+clients that decode the old record shape must regenerate their bindings before
+using the updated contract.

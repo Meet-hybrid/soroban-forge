@@ -1,21 +1,52 @@
 # Vesting Contract
 
-Time-locked token release with a cliff and linear release.
+Time-locked token release in two shapes: a cliff plus linear release, or an
+explicit table of unlock tranches.
 
 ## Interface
 
 ```rust
+// linear (cliff + ramp)
 fn create_schedule(beneficiary, token, total_amount, cliff, duration) -> Result<u64, ForgeError>
+fn get_schedule(schedule_id) -> Result<VestingSchedule, ForgeError>
+// tranche (discrete unlock table)
+fn create_tranche_schedule(beneficiary, token, tranches: Vec<Tranche>) -> Result<u64, ForgeError>
+fn get_tranche_schedule(schedule_id) -> Result<TrancheSchedule, ForgeError>
+// both kinds
 fn claim(schedule_id) -> Result<i128, ForgeError>
 fn claimable(schedule_id) -> Result<i128, ForgeError>
 fn get_status(schedule_id) -> Result<VestingStatus, ForgeError>
 fn touch_ttl(schedule_id) -> Result<(), ForgeError>
 ```
 
+`Tranche { unlock_at: u64, amount: i128 }` is one entry of the unlock table:
+`unlock_at` is an **offset in seconds from the schedule start** (the ledger
+timestamp recorded at creation) and `amount` is what unlocks there.
+
+Both kinds draw ids from one counter, so the id space is shared; the two
+records live under distinct storage keys and a linear id is `NotFound` in
+`get_tranche_schedule` (and vice versa).
+
+`get_schedule` is the linear kind's read-only record view: it returns the
+stored `VestingSchedule` (beneficiary, token, total amount, start, cliff,
+duration, claimed, stored status) for an existing id, mirroring
+`get_tranche_schedule` and the workspace's other record views (`get_escrow`,
+`get_tx`, `get_proposal`, `get_subscription`). `claimed` reflects completed
+claims; the stored `status` is refreshed on claim, and `get_status` derives
+the current one from ledger time between claims.
+
 ## Timing
 
-`cliff` and `duration` are **durations in seconds measured from the schedule
-start** (the ledger timestamp recorded at creation):
+Timings in both shapes are **durations in seconds measured from the schedule
+start**.
+
+### Linear shape
+
+```text
+start ......... start+cliff ................... start+duration
+  |             (claims become possible)        (fully vested)
+  |  Locked    |            Vesting (linear)  |
+```
 
 - `start + cliff` — claims become possible;
 - `start + duration` — the schedule is fully vested.
@@ -23,9 +54,41 @@ start** (the ledger timestamp recorded at creation):
 Validation at creation: `total_amount > 0`, `duration > 0`, `cliff <= duration`
 (failures return `ForgeError::InvalidInput`).
 
+### Tranche shape
+
+```text
+       t1            t2                t3
+start  |             |                 |
+  |    |   tranche 1  |   tranche 2     |   tranche 3
+  | Locked  (a1)         (a2)              (a3)
+  |    |  vested:      vested:           vested:
+  |    |     0  ->     a1  ->            a1+a2  ->  total
+  +----+--------------+------------------+--------->
+```
+
+A grant agreement of the form "25% at TGE, 25% at +6 months, 50% at +12
+months" is a table, not a ramp, so this shape takes it verbatim. Validation at
+creation:
+
+- the table is non-empty and holds at most `MAX_TRANCHES` (32) entries;
+- every `amount > 0`;
+- `unlock_at` strictly increases (a repeat or a rewind is rejected);
+- the amounts sum to at most `i128::MAX` (`ForgeError::ArithmeticOverflow`).
+
+A first tranche at `unlock_at == 0` unlocks at the creation timestamp — the
+"TGE tranche" of a typical agreement. The table is validated, stored once, and
+immutable afterwards.
+
+## Revocation
+
+The creator of a schedule may revoke it, clawing back tokens under a
+configurable policy. Revocation is terminal: a revoked schedule can no longer
+be claimed.
+
+
 ## Release Formula
 
-The vested amount at ledger time `t` is:
+Linear, at ledger time `t`:
 
 ```text
 0                                            when t < start + cliff
@@ -33,97 +96,83 @@ total_amount * (t - (start + cliff)) / (duration - cliff)   otherwise, floored
 total_amount                                 when t >= start + duration
 ```
 
-Integer (floor) division means a claim never rounds up, so repeated claims can
-never overpay or underpay: `claim` returns exactly `vested - claimed`, or `0`
-when nothing is claimable.
+Tranche, at ledger time `t`: the sum of every tranche whose offset has
+elapsed, i.e. `0` before the first unlock, `a1` up to the second, `a1 + a2` up
+to the third, and the full total from the last unlock on. Nothing accrues
+between unlocks.
+
+Integer (floor) division means a linear claim never rounds up, so repeated
+claims can never overpay or underpay: for either kind `claim` returns exactly
+`unlocked - claimed`, or `0` when nothing is claimable. Tranche progress is
+compared on the elapsed offset rather than on `start + unlock_at`, so an offset
+of `u64::MAX` cannot overflow — that tranche simply never unlocks.
 
 ## Status
 
 Derived from ledger time and the claimed amount (always current between
-claims): `Locked` before the cliff, `Vesting` after the cliff, `Completed`
-once fully claimed. `Revoked` is reserved for a follow-up revocation method.
+claims): `Locked` before the first unlock (the cliff, for the linear kind),
+`Vesting` from the first unlock until the last amount is claimed, `Completed`
+once `claimed == total_amount`. `Revoked` is reserved for a follow-up
+revocation method.
 
 ## Authorization
 
-- `create_schedule` requires the beneficiary.
+- `create_schedule` and `create_tranche_schedule` require the beneficiary.
 - `claim` requires the beneficiary.
-- `claimable` and `get_status` are read-only views.
-- `touch_ttl` is permissionless (keeper entrypoint).
-
-## Storage and TTL
-
-| Key | Storage | Contents | TTL handling |
-|---|---|---|---|
-| `DataKey::Schedule(u64)` | **persistent**, one entry per schedule | `VestingSchedule` | Extended on `create_schedule`, on every `claim` that writes, and by `touch_ttl` |
-| `DataKey::Count` | instance | `u64` last-issued id | Lives with the contract instance (same as escrow) |
-
-This follows the escrow layout (`crates/escrow`): per-record persistent
-entries so the byte budget scales per schedule and a schedule's lifetime is
-independent of the contract instance's, with only the id counter in instance
-storage.
-
-TTL extension uses `extend_ttl(key, BUMP_THRESHOLD, BUMP_AMOUNT)` with the
-escrow constants: `BUMP_AMOUNT = 30 days` (518,400 ledgers at ~5 s per
-ledger) and `BUMP_THRESHOLD = 29 days`. An entry is only extended once its
-remaining TTL falls below the threshold, so a touch on a fresh entry costs
-almost nothing.
-
-- **State-changing calls extend the TTL.** `create_schedule` and a `claim`
-  that pays out a non-zero amount write the schedule and then extend its
-  TTL. A `claim` that returns `0` writes nothing and does not extend.
-- **Read-only calls never extend the TTL.** This covers `claimable` and
-  `get_status`.
-- **`touch_ttl(schedule_id)`** is a permissionless keeper entrypoint (no
-  authorization). It extends an existing schedule's TTL and changes nothing
-  else: no claimable amount, field or status changes. An unknown id returns
-  `ForgeError::NotFound`.
-
-Vesting windows are often longer than 30 days. A schedule that goes more
-than 30 days without a payout or a `touch_ttl` falls out of its TTL. Keepers
-should call `touch_ttl` within the 30-day horizon. Once a schedule's TTL
-runs out, it must be restored (Soroban persistent-entry restoration) before
-it can be used again. Nothing is deleted.
-
-Missing ids: every entrypoint that takes a `schedule_id` returns
-`ForgeError::NotFound` for an unknown id. The lookup is a plain
-`persistent().get` that never writes, so a failed lookup creates no storage
-entry and does not advance the id counter.
-
-## Upgrade compatibility
-
-Earlier builds stored schedules in **instance** storage under the same
-`DataKey::Schedule(u64)` key. Persistent and instance storage are separate
-namespaces, so this build cannot read schedules written by an earlier build.
-**No migration path is provided, and none is needed:**
-
-- The vesting contract has never been deployed. It is built for provenance
-  (`scripts/provenance.sh`) but is not deployed by `scripts/demo-testnet.sh`
-  or `scripts/deploy-mainnet.sh`. The project is testnet-only (see
-  [Known Limitations](../KNOWN-LIMITATIONS.md)).
-- The contract has no upgrade entrypoint (`update_current_contract_wasm`).
-  A deployed instance can never run new code against old storage. A new
-  version is always a new deployment with empty storage.
-
-The id counter (`DataKey::Count`) stays in instance storage with the same key
-and encoding.
-
-If an upgrade entrypoint is ever added, any schedules still in instance
-storage would need an explicit, one-time move into persistent entries before
-this layout could read them.
+- `claimable`, `get_status`, `get_schedule`, and `get_tranche_schedule` are
+  read-only views.
 
 ## Settlement
 
+## Events
+
+`create_schedule` publishes one `ScheduleCreated` event after storing the
+linear schedule. Its `schedule_id` is the topic and the complete
+`VestingSchedule` is the payload. A successful non-zero `claim` publishes one
+`Claimed` event after the updated record is stored; the event carries the
+schedule id, payout amount, cumulative claimed amount, and resulting status.
+Claims for both linear and tranche schedules are reported. A claim returning
+zero, read-only calls, and failed invocations publish no vesting lifecycle
+event.
+
 The contract custodies the SEP-41 token configured on the schedule, and
-`claim` settles through it:
+`claim` settles through it for both kinds:
 
 - the newly claimable amount is transferred from the contract to the
   beneficiary **before** the schedule is written (escrow's
   transfer-before-state pattern); a failed transfer returns
   `ForgeError::TokenTransferFailed` with `claimed` and `status` unchanged;
-- zero-claim calls (before the cliff, or nothing newly vested) return `0`
-  and issue **no** token transfer;
-- floor-division residue is never lost: it stays claimable between claims
-  and is paid out by the final claim.
+- zero-claim calls (before the first unlock, or nothing newly unlocked) return
+  `0` and issue **no** token transfer;
+- floor-division residue on the linear kind is never lost: it stays claimable
+  between claims and is paid out by the final claim.
+
+## Storage Layout & Upgrade Compatibility
+
+The vesting contract uses instance storage partitioned into two distinct keys:
+
+```rust
+enum DataKey {
+    /// Holds a `VestingSchedule` record keyed by monotonic schedule id.
+    Schedule(u64),
+    /// Monotonic id counter (`u64`), initialized at 0 and incremented on each schedule creation.
+    Count,
+}
+```
+
+### Storage Model
+
+- **`DataKey::Count`**: Stores a single `u64` representing the highest allocated schedule id. Next id allocation uses checked addition (`checked_add(1)`), returning `ForgeError::ArithmeticOverflow` on counter saturation.
+- **`DataKey::Schedule(u64)`**: Stores the `VestingSchedule` struct containing beneficiary, token address, total amount, start timestamp, cliff duration, total duration, claimed amount, and derived lifecycle status.
+- Instance storage lifetime is bound to the contract instance. In environments with storage TTL expiration, the contract instance TTL must be maintained to prevent storage eviction.
+
+### Upgrade Compatibility
+
+- **Key Segregation**: Because `DataKey::Schedule(u64)` uses a tuple variant and `DataKey::Count` is a unit variant, keys occupy non-overlapping namespaces within instance storage.
+- **Record Schema Evolution**:
+  - The `VestingSchedule` struct is serialized via Soroban's `#[contracttype]`. Adding new fields to `VestingSchedule` in future contract versions must maintain backwards deserialization compatibility (e.g. using `Option<T>` for newly introduced optional fields, or migrating storage records upon upgrade).
+  - Storage key enums must preserve existing discriminant ordering if extended (e.g. adding new key variants for administrative roles or persistent storage migration).
+- **Storage Tier Migration**: If migrating from instance storage to persistent storage with per-schedule TTL management (mirroring the Escrow contract architecture), `DataKey::Schedule(u64)` entries can be migrated to persistent storage while retaining `DataKey::Count` in instance storage.
 
 Tests live in-crate (`crates/vesting/src/lib.rs`) and run with
 `cargo test -p soroban-forge-vesting --all-targets --locked`.

@@ -19,20 +19,20 @@ The escrow contract is **deployed and verified on Stellar testnet**. Every
 step below was executed live; run `bash scripts/demo-testnet.sh` to reproduce
 ([step-by-step walkthrough with expected output](docs/WALKTHROUGH.md)).
 
-| Artifact | Value |
-|---|---|
-| Network | Stellar Testnet (`Test SDF Network ; September 2015`) |
-| Escrow contract | `CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB` |
-| WASM sha256 | `ccbb6603cce6d194407b822df110c91324939cea92ba21937a6d9f1e2c9e48b9` |
-| soroban-sdk | 27.0.6 · stable Rust · `wasm32v1-none` · 18,054 bytes |
+| Artifact         | Value                                                                       |
+| ---------------- | --------------------------------------------------------------------------- |
+| Network          | Stellar Testnet (`Test SDF Network ; September 2015`)                       |
+| Escrow contract  | `CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB`                  |
+| WASM sha256      | `ccbb6603cce6d194407b822df110c91324939cea92ba21937a6d9f1e2c9e48b9`          |
+| soroban-sdk      | 27.0.6 · stable Rust · `wasm32v1-none` · 18,054 bytes                       |
 | Demo token (SAC) | `CBJQ53EOHB5MWSS7CETN523WILLNVS7NQAQQAQIS5QAYTPRCZSGKL23O` (`credit` asset) |
-| Roles | buyer `GCTEIX…VSGF` · seller `GCGPZ3…4SFS` · arbiter `GCR7CB…GJTQ` |
+| Roles            | buyer `GCTEIX…VSGF` · seller `GCGPZ3…4SFS` · arbiter `GCR7CB…GJTQ`          |
 
-| Round | Flow | Transaction |
-|---|---|---|
-| 1 | create → deposit → release (seller paid 500) | [create 817950c8…](https://stellar.expert/explorer/testnet/tx/817950c8ad95ecad9636783e5e8e8b8e515f94e3364b63c2c02328ff3b675bb9) · deposit · release |
-| 2 | create → deposit → dispute(buyer) → resolve for seller | dispute + resolve transactions |
-| 3 | create → deposit → dispute(seller) → resolve for buyer | dispute + resolve transactions |
+| Round | Flow                                                   | Transaction                                                                                                                                         |
+| ----- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | create → deposit → release (seller paid 500)           | [create 817950c8…](https://stellar.expert/explorer/testnet/tx/817950c8ad95ecad9636783e5e8e8b8e515f94e3364b63c2c02328ff3b675bb9) · deposit · release |
+| 2     | create → deposit → dispute(buyer) → resolve for seller | dispute + resolve transactions                                                                                                                      |
+| 3     | create → deposit → dispute(seller) → resolve for buyer | dispute + resolve transactions                                                                                                                      |
 
 After all three rounds: **buyer 500 + seller 1000 = 1500 credit minted; the
 contract holds zero** — the on-chain conservation property (`deposited ==
@@ -40,8 +40,29 @@ paid out`) verified on a live network, matching the in-repo property test.
 The token-transfer event from round 1's deposit is visible in the transaction
 linked above: 500 `credit` moved buyer → contract.
 
-> Honest notes: testnet only (no mainnet deployment); the demo identities are
-> throwaway keys from this machine, not fixtures of the protocol; two-auth
+### Reproducible escrow smoke harness
+
+The maintained smoke flow is [scripts/demo-testnet.sh](scripts/demo-testnet.sh).
+It builds the locked escrow WASM, verifies its SHA-256 against
+[docs/testnet/escrow-wasm.sha256](docs/testnet/escrow-wasm.sha256), and writes a
+machine-readable receipt. It never creates, funds, prints, or commits keys.
+
+Run the credential-free check on a clean machine:
+
+```bash
+bash scripts/demo-testnet.sh --help
+bash scripts/demo-testnet.sh --dry-run --receipt artifacts/escrow-smoke-receipt.json
+```
+
+For a live `create_escrow → deposit → release` check, provide existing Stellar
+CLI identities and explicit `ESCROW_ID` and `TOKEN_ID` values. The live flow
+asserts `Completed`, verifies successful transaction receipts contain the
+expected lifecycle events, checks buyer/seller/contract conservation, and
+records transaction hashes in the JSON receipt. See the
+[reviewer walkthrough](docs/WALKTHROUGH.md) for the complete command.
+
+> Honest notes: testnet only (no mainnet deployment); the smoke harness uses
+> caller-provided CLI identities and never manages private keys; two-auth
 > escrow creation was deliberately **rejected as a design** — a live
 > `TxBadAuth` on every standard signing path during this demo motivated the
 > buyer-only creation flow. See [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md).
@@ -54,22 +75,30 @@ well-documented foundation, audit it for your use case, and ship.
 > your own security review. The **escrow contract is the flagship**: it holds
 > and moves real SEP-41 tokens end-to-end and is verified by a conservation
 > property test. Marketplace royalties, multi-sig, and vesting have since
-> gained real settlement too; DAO governance and subscriptions remain state
-> machines awaiting the same treatment — see the
+> gained real settlement too, DAO governance settles a SEP-41 proposal bond
+> (pulled at `propose`, refunded or forfeited at a terminal transition), and
+> subscriptions now bill each due period with a real subscriber → provider
+> transfer with past-due retry — see the
 > [Feature Status Matrix](docs/FEATURE-STATUS.md) and
 > [Known Limitations](docs/KNOWN-LIMITATIONS.md) for exactly what is and is
 > not done.
 
 ## Contracts
 
-| Contract | Description | Status |
-|----------|-------------|--------|
-| **Escrow** | Three-party escrow holding real SEP-41 tokens: `create → deposit → release / refund / dispute → resolve / cancel`, arbiter-enforced dispute flow, lifecycle events, per-record persistent storage with TTL keeping | ✅ **Flagship** · 27 tests · conservation property verified |
-| **Vesting** | Time-locked token release with cliff and linear release (`create_schedule → claim / claimable`) — `claim` settles through a real SEP-41 transfer | ✅ Settlement · 27 tests |
-| **Multi-Sig Wallet** | Multi-owner wallet with configurable approval thresholds (`initialize → submit → confirm → execute`) — no dispatch yet | ✅ State machine · 18 tests |
-| **DAO Governance** | On-chain proposals, one-vote-per-voter voting, deadline enforcement, and finalisation — executes nothing on-chain | ✅ State machine · 16 tests |
-| **Subscription Payments** | Recurring payment plans with periodic billing (`subscribe → charge / cancel`) — charges nothing | ✅ State machine · 12 tests |
-| **Marketplace Royalties** | Asset sales with configurable basis-point royalty distribution — pays no recipients | ✅ State machine · 10 tests |
+| Contract                  | Description                                                                                                                                                                                                        | Status                                                      |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| **Escrow**                | Three-party escrow holding real SEP-41 tokens: `create → deposit → release_partial (×n) / release / refund / dispute → resolve / cancel`, arbiter-enforced dispute flow, partial-release accounting (`released`/`remaining`), lifecycle events, per-record persistent storage with TTL keeping | ✅ **Flagship** · 80 tests · conservation property verified |
+| **Vesting**               | Time-locked token release with cliff and linear release (`create_schedule → claim / claimable`) — `claim` settles through a real SEP-41 transfer                                                                   | ✅ Settlement · 27 tests                                    |
+| **Multi-Sig Wallet**      | Multi-owner wallet with configurable approval thresholds + rejection (`initialize → submit/confirm/reject → execute`) — threshold-gated cross-contract invocations and token withdrawals; transactions in persistent storage with TTL keeper | ✅ State machine · 109 tests |
+| **DAO Governance**        | On-chain proposals, one-vote-per-voter voting, deadline enforcement, and finalisation — SEP-41 proposal bonds pulled at `propose` and refunded/forfeited on settlement; dispatches approved actions on-chain | ✅ **Bond settlement** · 60 tests                          |
+| **Subscription Payments** | Recurring payment plans with periodic billing (`subscribe → charge / cancel`) — charges nothing                                                                                                                    | ✅ State machine · 12 tests                                 |
+| **Marketplace Royalties** | Asset sales with configurable basis-point royalty distribution (`set_royalty → distribute / settle_sale / settle_sales`) — **real SEP-41 payout** of the royalty share and atomic batch settlement | ✅ **Royalty settlement** · 49 tests |
+| **Escrow**                | Three-party escrow holding real SEP-41 tokens: `create → deposit → release / refund / dispute → resolve / cancel`, arbiter-enforced dispute flow, lifecycle events, per-record persistent storage with TTL keeping | ✅ **Flagship** · conservation property verified |
+| **Vesting**               | Time-locked token release with cliff and linear release (`create_schedule → claim / claimable`) — `claim` settles through a real SEP-41 transfer                                                                   | ✅ Settlement |
+| **Multi-Sig Wallet**      | Multi-owner wallet with configurable approval thresholds (`initialize → submit → confirm → execute`), typed withdrawals, rolling limits, and threshold-gated owner-set/threshold governance (`add_owner` / `remove_owner` / `set_threshold`) | ✅ Settlement · 100 tests |
+| **DAO Governance**        | On-chain proposals, one-vote-per-voter voting, deadline enforcement, and finalisation — SEP-41 proposal bonds pulled at `propose` and refunded/forfeited on settlement; dispatches approved actions on-chain | ✅ **Bond settlement** · 60 tests |
+| **Subscription Payments** | Recurring billing with provider opt-in (`subscribe` / `subscribe_on_behalf_of` → `charge` / `pause` / `resume` / `cancel`) — `charge` executes a real subscriber → provider SEP-41 transfer with past-due retry and auto-cancel | ✅ Settlement · 57 tests |
+| **Marketplace Royalties** | Asset sales with configurable basis-point royalty distribution — `settle_sale` pays seller and recipient via real SEP-41 transfers                                                                                   | ✅ Settlement |
 
 Implementation work is tracked as scoped, labeled
 [issues](https://github.com/Meet-hybrid/soroban-forge/issues).
@@ -90,7 +119,7 @@ flowchart LR
     shared[shared-utils<br/>errors · types · storage patterns]
     testutils[test-utils<br/>Env harness · mock accounts]
     sdk[soroban-sdk 21.5.1]
-    cli[cli<br/>build · test · lint · deploy]
+    cli[cli<br/>build · lint · test · deploy · new · verify · invoke · events]
     ts[typescript-sdk]
     net[(Stellar network)]
 
@@ -113,10 +142,13 @@ it can be deployed and upgraded independently, while `shared-utils` and
 stateDiagram-v2
     [*] --> Pending: create_escrow
     Pending --> Funded: deposit
-    Funded --> Completed: release
-    Funded --> Refunded: refund (after deadline)
+    Funded --> Funded: release_partial (partial)
+    Funded --> Completed: release_partial (final) / release
+    Funded --> Refunded: refund (remaining balance)
     Pending --> Cancelled: cancel
-    Funded --> Disputed: (reserved)
+    Funded --> Disputed: dispute (remaining frozen)
+    Disputed --> Completed: resolve (seller wins)
+    Disputed --> Refunded: resolve (buyer wins)
 ```
 
 ## Repository layout
@@ -126,7 +158,7 @@ soroban-forge/
 ├── crates/                   # Rust smart contracts and libraries
 │   ├── shared-utils/         # ForgeError, storage patterns, shared types
 │   ├── test-utils/           # Soroban Env test harness and mock accounts
-│   ├── cli/                  # Developer CLI (build / test / lint / deploy)
+│   ├── cli/                  # Developer CLI (build / lint / test / deploy / new / verify / invoke / events)
 │   ├── escrow/               # ✅ implemented
 │   ├── vesting/              # ✅ implemented
 │   ├── multi-sig-wallet/
@@ -135,7 +167,12 @@ soroban-forge/
 │   └── marketplace-royalties/
 ├── packages/                 # Language bindings and example apps
 │   ├── typescript-sdk/       # @soroban-forge/escrow-client (generated from the deployed escrow ABI)
-│   ├── nextjs-example/       # Next.js reference application
+│   ├── vesting-client/       # @soroban-forge/vesting-client (generated)
+│   ├── multi-sig-wallet-client/  # @soroban-forge/multi-sig-wallet-client (generated)
+│   ├── subscription-payments-client/  # @soroban-forge/subscription-payments-client (generated)
+│   ├── marketplace-royalties-client/  # @soroban-forge/marketplace-royalties-client (generated)
+│   ├── dao-governance-client/  # @soroban-forge/dao-governance-client (generated)
+│   ├── nextjs-example/       # Next.js testnet escrow demo (Freighter wallet)
 │   └── deployment-templates/ # Docker and deployment templates
 ├── docs/                     # Architecture, tutorials, best practices
 ├── templates/                # Contract scaffolding templates
@@ -181,6 +218,10 @@ cargo build --release --target wasm32v1-none -p soroban-forge-escrow
 cargo run -p soroban-forge-cli -- --help
 cargo run -p soroban-forge-cli -- build --release
 cargo run -p soroban-forge-cli -- test --package soroban-forge-escrow
+
+# New commands for contract interaction
+cargo run -p soroban-forge-cli -- invoke --contract <CONTRACT_ID> --function balance --network testnet
+cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --since <LEDGER> --network testnet
 ```
 
 ### 5. Deploy to testnet
@@ -206,6 +247,24 @@ make format        # cargo fmt --all
 make lint          # cargo clippy --workspace --all-targets -- -D warnings
 make audit         # cargo audit (requires cargo-audit)
 make doc           # open rustdoc
+```
+
+### Regenerate the TypeScript clients
+
+The six `packages/*-client` directories are generated bindings produced from
+each contract's WASM. Regenerate them all from a clean local build with:
+
+```bash
+bash scripts/generate-clients.sh
+```
+
+This builds every contract for `wasm32v1-none` and runs the pinned Stellar
+CLI's `stellar contract bindings typescript --wasm` for each one, wiping and
+rewriting each package directory. Then build the packages:
+
+```bash
+(cd packages/typescript-sdk && npm install && npm run build)
+(cd packages/nextjs-example && npm install && npm run build)
 ```
 
 CI (`.github/workflows/ci.yml`) enforces: **Rustfmt · Clippy (-D warnings) ·

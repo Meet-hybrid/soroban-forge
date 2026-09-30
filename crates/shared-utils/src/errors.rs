@@ -43,4 +43,16 @@ pub enum ForgeError {
     /// distinguish them from token-transfer failures, and the invoking
     /// transaction is left un-executed.
     ContractInvocationFailed = 12,
+    /// The requested withdrawal would push a token's rolling-window total
+    /// past its configured withdrawal limit. Kept distinct from
+    /// [`ForgeError::InvalidInput`] so a caller can tell a policy rejection
+    /// (a valid withdrawal that is too large right now) from a malformed
+    /// argument.
+    WithdrawalLimitExceeded = 13,
+    /// A subscription is in the `PastDue` lapsed state and the requested
+    /// operation cannot be performed until a catch-up charge restores it to
+    /// `Active`. Kept distinct from [`ForgeError::DeadlineReached`] so a caller
+    /// can tell a lapsed billing state from an argument that was merely
+    /// too early.
+    SubscriptionPastDue = 14,
 }
