@@ -655,6 +655,25 @@ impl MarketplaceRoyalties {
         bump_entry(&env, &royalty_key);
         bump_entry(&env, &summary_key);
 
+        // Emit one `SaleSettled` per sale, mirroring `settle_sale`, so
+        // off-chain indexers see identical events whether a sale settled
+        // alone or as part of a batch.
+        for i in 0..count {
+            let (seller, amount) = sales.get(i).ok_or(ForgeError::InvalidInput)?;
+            let settlement = settlements.get(i).ok_or(ForgeError::InvalidInput)?;
+            events::sale_settled(
+                &env,
+                &collection,
+                &token,
+                &payer,
+                &seller,
+                &royalty.recipient,
+                amount,
+                settlement.seller_net,
+                settlement.royalty_share,
+            );
+        }
+
         Ok(settlements)
     }
 

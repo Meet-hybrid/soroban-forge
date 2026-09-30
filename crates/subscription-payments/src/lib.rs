@@ -1570,6 +1570,20 @@ mod events {
         pub next_charge_at: u64,
     }
 
+    /// A new subscription was created (via `subscribe` or
+    /// `subscribe_on_behalf_of`).
+    #[contractevent]
+    pub struct Subscribed {
+        #[topic]
+        pub subscription_id: u64,
+        pub subscriber: Address,
+        pub provider: Address,
+        pub token: Address,
+        pub amount: i128,
+        pub period: u64,
+        pub started_at: u64,
+    }
+
     /// Usage metered for one metric in the open period. Indexers can rebuild
     /// every settled period's overage from these plus the plan's quotas.
     #[contractevent]
@@ -1601,6 +1615,49 @@ mod events {
         pub subscriber: Address,
     }
 
+    /// A subscription was paused by the subscriber.
+    #[contractevent]
+    pub struct Paused {
+        #[topic]
+        pub subscription_id: u64,
+        pub subscriber: Address,
+        pub paused_at: u64,
+    }
+
+    /// A paused subscription was resumed by the subscriber.
+    #[contractevent]
+    pub struct Resumed {
+        #[topic]
+        pub subscription_id: u64,
+        pub subscriber: Address,
+        pub resumed_at: u64,
+        pub last_charged: u64,
+    }
+
+    /// A subscription was renewed (a successful charge advanced the period).
+    #[contractevent]
+    pub struct Renewed {
+        #[topic]
+        pub subscription_id: u64,
+        pub subscriber: Address,
+        pub provider: Address,
+        pub amount: i128,
+        pub last_charged: u64,
+        pub next_charge_at: u64,
+    }
+
+    /// A charge attempt failed and the subscription entered arrears or was
+    /// cancelled after exhausting retries.
+    #[contractevent]
+    pub struct ChargeFailed {
+        #[topic]
+        pub subscription_id: u64,
+        pub subscriber: Address,
+        pub provider: Address,
+        pub failed_attempts: u32,
+        pub status: SubscriptionStatus,
+    }
+
     pub fn charged(env: &Env, subscription: &Subscription, amount: i128) {
         let next_charge_at = subscription
             .last_charged
@@ -1610,6 +1667,19 @@ mod events {
             amount,
             last_charged: subscription.last_charged,
             next_charge_at,
+        }
+        .publish(env);
+    }
+
+    pub fn subscribed(env: &Env, subscription: &Subscription) {
+        Subscribed {
+            subscription_id: subscription.subscription_id,
+            subscriber: subscription.subscriber.clone(),
+            provider: subscription.provider.clone(),
+            token: subscription.token.clone(),
+            amount: subscription.amount,
+            period: subscription.period,
+            started_at: subscription.last_charged,
         }
         .publish(env);
     }
@@ -1637,6 +1707,51 @@ mod events {
         Cancelled {
             subscription_id: subscription.subscription_id,
             subscriber: subscription.subscriber.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn paused(env: &Env, subscription: &Subscription, paused_at: u64) {
+        Paused {
+            subscription_id: subscription.subscription_id,
+            subscriber: subscription.subscriber.clone(),
+            paused_at,
+        }
+        .publish(env);
+    }
+
+    pub fn resumed(env: &Env, subscription: &Subscription, resumed_at: u64) {
+        Resumed {
+            subscription_id: subscription.subscription_id,
+            subscriber: subscription.subscriber.clone(),
+            resumed_at,
+            last_charged: subscription.last_charged,
+        }
+        .publish(env);
+    }
+
+    pub fn renewed(env: &Env, subscription: &Subscription, amount: i128) {
+        let next_charge_at = subscription
+            .last_charged
+            .saturating_add(subscription.period);
+        Renewed {
+            subscription_id: subscription.subscription_id,
+            subscriber: subscription.subscriber.clone(),
+            provider: subscription.provider.clone(),
+            amount,
+            last_charged: subscription.last_charged,
+            next_charge_at,
+        }
+        .publish(env);
+    }
+
+    pub fn charge_failed(env: &Env, subscription: &Subscription) {
+        ChargeFailed {
+            subscription_id: subscription.subscription_id,
+            subscriber: subscription.subscriber.clone(),
+            provider: subscription.provider.clone(),
+            failed_attempts: subscription.failed_attempts,
+            status: subscription.status.clone(),
         }
         .publish(env);
     }
