@@ -102,9 +102,10 @@
 //! tally (weighted voting is tracked separately as issue #59).
 
 #[cfg(test)]
-extern crate std;
+extern crate std;use soroban_forge_shared_utils::{
+    bump_entry as shared_bump_entry, ForgeError, BUMP_AMOUNT, BUMP_THRESHOLD,
+};
 
-use soroban_forge_shared_utils::{ForgeError, TTLHelper, DEFAULT_TTL};
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Bytes,
     Env, IntoVal, Symbol, Val,
@@ -410,12 +411,32 @@ fn bump_entry(env: &Env, key: &DataKey) {
     TTLHelper::new(env.storage(), DEFAULT_TTL).bump(key);
 }
 
+/// Bump the contract instance's TTL to the workspace policy's 30-day horizon
+/// when it falls inside its one-day threshold.
+///
+/// The per-voter double-vote marks (`DataKey::Vote`) live in **instance**
+/// storage, whose lifetime is the contract instance's own TTL — there is no
+/// per-key TTL for instance entries. This is the instance-storage mirror of
+/// [`bump_entry`]: it applies the same threshold/extend policy
+/// (`BUMP_THRESHOLD`/`BUMP_AMOUNT`) to the instance entry so the marks
+/// enforcing one-vote-per-voter are guaranteed to outlive the proposal's
+/// managed persistent horizon (issue #170).
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(BUMP_THRESHOLD, BUMP_AMOUNT);
+}
+
 /// Instance and persistent storage keys.
 #[contracttype]
 enum DataKey {
     /// The proposal record for `u64` id (persistent storage).
     Proposal(u64),
     /// Marks that `voter` has already voted on `proposal_id`.
+    ///
+    /// Instance storage: the mark's lifetime is the contract instance's TTL,
+    /// which `vote` and `touch_ttl` extend to the same 30-day horizon as the
+    /// proposal record (issue #170).
     Vote(u64, Address),
     /// Monotonic proposal id counter.
     Count,
@@ -684,6 +705,12 @@ impl DaoGovernance {
         }
         let key = DataKey::Proposal(proposal_id);
         env.storage().instance().set(&vote_key, &true);
+        // The mark lives in instance storage, so its lifetime is the
+        // contract instance's TTL. Extend it to the same 30-day horizon the
+        // proposal record gets, so the mark outlives the proposal's managed
+        // horizon and `has_voted` cannot go stale while the proposal is
+        // still votable (issue #170).
+        bump_instance(&env);
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
         events::vote_cast(&env, proposal_id, &voter, support);
@@ -991,12 +1018,18 @@ impl DaoGovernance {
     /// Permissionless keeper: bump the proposal entry's TTL without changing
     /// any state. The existence check is deliberate — touching a missing
     /// id must fail loudly with `ForgeError::NotFound`.
+    ///
+    /// The proposal's vote marks live in instance storage, so the keeper
+    /// extends the contract instance's TTL alongside the proposal record:
+    /// keeping a proposal alive keeps the marks enforcing one-vote-per-voter
+    /// alive with it (issue #170).
     pub fn touch_ttl(env: Env, proposal_id: u64) -> Result<(), ForgeError> {
         let key = DataKey::Proposal(proposal_id);
         if !env.storage().persistent().has(&key) {
             return Err(ForgeError::NotFound);
-        }
-        TTLHelper::new(env.storage(), DEFAULT_TTL).touch(&[key])?;
+        }        bump_entry(&env, &key);
+        bump_instance(&env);
+
         Ok(())
     }
 }
@@ -1226,6 +1259,7 @@ mod tests {
     use super::*;
     use soroban_forge_test_utils::{MockTarget, MockTargetClient, RevertingTarget, TestAccounts};
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{Bytes, Env};
 
@@ -2578,6 +2612,122 @@ mod tests {
         let (_env, _token, _tc, _contract_id, client, _accounts, _target_id) = fresh_bond!();
         let err = client.try_touch_ttl(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
+    }
+
+    // -------------------------------------------------------------------
+    // Vote-mark TTL discipline (Issue 170)
+    // -------------------------------------------------------------------
+
+    /// The contract instance's current TTL, read from inside the contract
+    /// frame (instance entries have no per-key TTL).
+    fn instance_ttl(env: &Env, contract_id: &Address) -> u32 {
+        env.as_contract(contract_id, || env.storage().instance().get_ttl())
+    }
+
+    /// The proposal record's persistent TTL, read from inside the contract
+    /// frame.
+    fn proposal_ttl(env: &Env, contract_id: &Address, proposal_id: u64) -> u32 {
+        env.as_contract(contract_id, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Proposal(proposal_id))
+        })
+    }
+
+    /// A vote mark's lifetime is the instance TTL, and `vote` extends it to
+    /// the same 30-day horizon the proposal record gets — so the mark is
+    /// guaranteed to outlive the proposal's managed horizon.
+    #[test]
+    fn vote_extends_instance_ttl_to_the_proposal_horizon() {
+        let (env, _token, _tc, contract_id, client, accounts, target_id) = fresh_bond!();
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+
+        // Cross the bump threshold so the next write is decisive.
+        env.ledger()
+            .with_mut(|l| l.sequence_number += BUMP_THRESHOLD + 1);
+
+        client.vote(&proposal_id, &accounts.user2, &true);
+
+        // Both halves of the vote now share the same 30-day horizon.
+        assert_eq!(instance_ttl(&env, &contract_id), BUMP_AMOUNT);
+        assert_eq!(
+            proposal_ttl(&env, &contract_id, proposal_id),
+            BUMP_AMOUNT
+        );
+        assert!(client.has_voted(&proposal_id, &accounts.user2));
+    }
+
+    /// `touch_ttl` — the keeper entrypoint — extends the instance TTL
+    /// alongside the proposal record, so keeping a proposal alive keeps its
+    /// vote marks alive with it.
+    #[test]
+    fn touch_ttl_extends_instance_ttl_with_the_proposal() {
+        let (env, _token, _tc, contract_id, client, accounts, target_id) = fresh_bond!();
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        client.vote(&proposal_id, &accounts.user2, &true);
+
+        env.ledger()
+            .with_mut(|l| l.sequence_number += BUMP_THRESHOLD + 1);
+
+        client.touch_ttl(&proposal_id);
+
+        assert_eq!(instance_ttl(&env, &contract_id), BUMP_AMOUNT);
+        assert_eq!(
+            proposal_ttl(&env, &contract_id, proposal_id),
+            BUMP_AMOUNT
+        );
+        // The mark survived the extension and still reports truthfully.
+        assert!(client.has_voted(&proposal_id, &accounts.user2));
+    }
+
+    /// A double-vote attempt after `touch_ttl` extended a proposal's horizon
+    /// is still rejected with `ForgeError::InvalidInput`, and the mark stays
+    /// truthful.
+    #[test]
+    fn revote_after_touch_ttl_is_rejected() {
+        let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        client.vote(&proposal_id, &accounts.user2, &true);
+
+        // Extend the proposal's horizon well past the original deadline.
+        env.ledger()
+            .with_mut(|l| l.sequence_number += BUMP_THRESHOLD + 1);
+        client.touch_ttl(&proposal_id);
+
+        // Still inside the voting window: the second vote must be rejected.
+        assert!(env.ledger().timestamp() < client.get_proposal(&proposal_id).voting_ends);
+        assert_eq!(
+            client
+                .try_vote(&proposal_id, &accounts.user2, &false)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert!(client.has_voted(&proposal_id, &accounts.user2));
+        // The rejected vote did not move the tally.
+        assert_eq!(client.get_proposal(&proposal_id).for_votes, 1);
+        assert_eq!(client.get_proposal(&proposal_id).against_votes, 0);
+    }
+
+    /// `has_voted` is truthful before and after a `touch_ttl` extension: a
+    /// voter who has not voted still reports `false`, and a voter who has
+    /// still reports `true`.
+    #[test]
+    fn has_voted_is_truthful_across_ttl_extensions() {
+        let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+
+        assert!(!client.has_voted(&proposal_id, &accounts.user2));
+        assert!(!client.has_voted(&proposal_id, &accounts.user3));
+
+        client.vote(&proposal_id, &accounts.user2, &true);
+
+        env.ledger()
+            .with_mut(|l| l.sequence_number += BUMP_THRESHOLD + 1);
+        client.touch_ttl(&proposal_id);
+
+        assert!(client.has_voted(&proposal_id, &accounts.user2));
+        assert!(!client.has_voted(&proposal_id, &accounts.user3));
     }
 }
 
