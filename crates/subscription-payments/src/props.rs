@@ -6,6 +6,7 @@
 //! 2. No early bill: `charge` returns `0` and changes nothing before a full period
 //!    has elapsed.
 //! 3. Terminal safety: a `Cancelled` subscription never bills.
+//! 4. Refund conservation: `collected = earned + refunded` on cancellation.
 
 use crate::{
     SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus,
@@ -133,7 +134,7 @@ proptest! {
         let id = w.subscribe(amount, period);
 
         w.env.ledger().set_timestamp(START + cancel_delay);
-        w.client().cancel(&id);
+        w.client().cancel(&id, &true);
 
         let sub_after_cancel = w.client().get_subscription(&id);
         prop_assert_eq!(sub_after_cancel.status, SubscriptionStatus::Cancelled);
@@ -361,6 +362,7 @@ proptest! {
                     }
                     5 => {
                         client.cancel(&id);
+                        client.cancel(&id, &true);
                         refunds += balance;
                         balance = 0;
                         status = SubscriptionStatus::Cancelled;
@@ -377,5 +379,62 @@ proptest! {
             prop_assert_eq!(token.balance(&w.contract_id), balance);
             prop_assert_eq!(token.balance(&w.provider), debits);
         }
+    }
+
+    #[test]
+    fn prop_cancel_refund_conserves_collected_earned_and_refunded(
+        amount in 1i128..=100_000_i128,
+        period in 1u64..=MAX_PERIOD,
+        elapsed_delta in 0u64..=MAX_PERIOD,
+    ) {
+        let elapsed = elapsed_delta % period;
+        let w = setup_world(amount * 10);
+        let id = w.subscribe(amount, period);
+        let token_client = StellarAssetClient::new(&w.env, &w.token);
+
+        w.env.ledger().set_timestamp(START + period);
+        let billed = w.client().charge(&id);
+        prop_assert_eq!(billed, amount);
+
+        let collected = token_client.balance(&w.provider);
+        prop_assert_eq!(collected, amount);
+
+        w.env.ledger().set_timestamp(START + period + elapsed);
+        let refunded = w.client().cancel(&id, &true);
+
+        let expected_refund = amount * (period - elapsed) as i128 / period as i128;
+        prop_assert_eq!(refunded, expected_refund);
+
+        let earned = collected - refunded;
+        prop_assert_eq!(collected, earned + refunded);
+        prop_assert_eq!(token_client.balance(&w.provider), earned);
+
+        let sub = w.client().get_subscription(&id);
+        prop_assert_eq!(sub.status, SubscriptionStatus::Cancelled);
+        prop_assert_eq!(sub.refunded, refunded);
+    }
+
+    #[test]
+    fn prop_cancel_without_refund_transfers_nothing(
+        amount in 1i128..=100_000_i128,
+        period in 1u64..=MAX_PERIOD,
+        elapsed_delta in 0u64..=MAX_PERIOD,
+    ) {
+        let elapsed = elapsed_delta % period;
+        let w = setup_world(amount * 10);
+        let id = w.subscribe(amount, period);
+        let token_client = StellarAssetClient::new(&w.env, &w.token);
+
+        w.env.ledger().set_timestamp(START + period);
+        prop_assert_eq!(w.client().charge(&id), amount);
+
+        w.env.ledger().set_timestamp(START + period + elapsed);
+        let refunded = w.client().cancel(&id, &false);
+        prop_assert_eq!(refunded, 0);
+
+        prop_assert_eq!(token_client.balance(&w.provider), amount);
+        let sub = w.client().get_subscription(&id);
+        prop_assert_eq!(sub.status, SubscriptionStatus::Cancelled);
+        prop_assert_eq!(sub.refunded, 0);
     }
 }

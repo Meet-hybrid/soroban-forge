@@ -9,6 +9,9 @@ and settled atomically in real SEP-41 tokens by `settle_sale` (one sale) or
 
 ```rust
 fn set_royalty(collection, recipient, bps) -> Result<(), ForgeError>
+fn disable_royalty(collection) -> Result<(), ForgeError>
+fn enable_royalty(collection) -> Result<(), ForgeError>
+fn distribute(collection, seller, amount) -> Result<i128, ForgeError>
 fn distribute(collection, token, payer, seller, amount) -> Result<i128, ForgeError>
 fn settle_sale(collection, token, payer, seller, amount) -> Result<Settlement, ForgeError>
 fn settle_sales(collection, token, payer, sales: Vec<(seller, amount)>) -> Result<Vec<Settlement>, ForgeError>

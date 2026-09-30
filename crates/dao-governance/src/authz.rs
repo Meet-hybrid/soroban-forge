@@ -83,6 +83,8 @@ macro_rules! setup {
         ] {
             token_admin.mint(who, &FUNDS);
         }
+        client.configure_category_rules(&crate::test_category_rules(&env, DURATION));
+        token_admin.mint(&accounts.user1, &FUNDS);
         let target_id = env.register(MockTarget, ());
 
         (
