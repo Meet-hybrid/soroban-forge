@@ -91,6 +91,7 @@
 #[cfg(test)]
 extern crate std;
 
+use soroban_forge_shared_utils::ttl::TTLHelper;
 use soroban_forge_shared_utils::{transfer_from_contract, ForgeError};
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, Address, Env, Vec,
@@ -143,6 +144,14 @@ mod events {
 /// rather than truncating it. The cap is deliberately generous relative to
 /// real agreements; raise it only with a reason.
 pub const MAX_TRANCHES: u32 = 32;
+
+/// Minimum TTL (in ledgers) applied to persistent entries when they are
+/// written or bumped. Roughly 30 days at 5s per ledger.
+pub const MIN_TTL: u32 = 518_400;
+
+/// TTL (in ledgers) requested when bumping a persistent entry. Roughly 60
+/// days at 5s per ledger.
+pub const BUMP_TTL: u32 = 1_036_800;
 
 /// Public interface for the Soroban Forge vesting contract.
 ///
@@ -260,6 +269,13 @@ pub trait SorobanForgeVesting {
 
     /// Read the total number of schedules ever created (read-only).
     fn schedule_count(env: Env) -> u64;
+
+    /// Permissionless TTL keeper: bump the TTL of the persistent entries for
+    /// `schedule_id`. Mirrors the escrow contract's `touch_ttl`.
+    fn touch_ttl(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Events emitted by the vesting contract.
@@ -591,6 +607,13 @@ impl Vesting {
             Stored::Linear(schedule) => Self::current_status(&schedule, now),
             Stored::Tranche(schedule) => Self::tranche_status(&schedule, now),
         }
+    }
+
+    /// Permissionless TTL keeper: bump the TTL of the persistent entries for
+    /// `schedule_id`. Mirrors the escrow contract's `touch_ttl`.
+    pub fn touch_ttl(env: Env, schedule_id: u64) -> Result<(), ForgeError> {
+        let helper = TTLHelper::new(env.storage(), MIN_TTL);
+        helper.touch(&env, &[DataKey::Schedule(schedule_id), DataKey::TrancheSchedule(schedule_id)])
     }
 
     /// Load a schedule of either kind by id.

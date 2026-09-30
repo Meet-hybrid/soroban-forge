@@ -473,6 +473,15 @@ pub trait SorobanForgeSubscriptionPayments {
     /// * [`ForgeError::NotFound`] — no plan with `plan_id` exists.
     fn get_plan(env: Env, plan_id: u64) -> Result<Plan, soroban_forge_shared_utils::ForgeError>;
 
+    /// Permissionless TTL keeper: bump the TTL of every persistent entry
+    /// associated with `subscription_id` (and the global counters/indexes).
+    ///
+    /// Requires no authorization.
+    fn touch_ttl(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
     /// Total number of plans created so far (read-only view).
     ///
     /// This is the monotonic plan id counter. It never decreases and equals
@@ -484,6 +493,7 @@ mod ttl {
     pub const DAY_IN_LEDGERS: u32 = 17_280;
     pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
     pub const BUMP_THRESHOLD: u32 = BUMP_AMOUNT - DAY_IN_LEDGERS;
+
 }
 
 /// Lifecycle state of a subscription.
@@ -637,6 +647,10 @@ enum DataKey {
     /// namespaces cannot be confused).
     PlanCount,
 }
+
+/// Default TTL threshold (in ledgers) used when bumping persistent entries.
+/// ~2 months at 5s per ledger.
+const DEFAULT_TTL: u32 = 5_356_800;
 
 /// The deployable subscription payments contract.
 #[contract]
@@ -1232,6 +1246,30 @@ impl SubscriptionPayments {
         }
         let ids = Self::index_ids(&env, &DataKey::ProviderSubscriptions(provider));
         Self::resolve_page(&env, &ids, offset, limit)
+    }
+
+    /// Permissionless TTL keeper: bump the TTL of every persistent entry
+    /// associated with `subscription_id` (and the global counters/indexes).
+    ///
+    /// Requires no authorization. Mirrors the escrow contract's `touch_ttl()`
+    /// entrypoint so keepers can use a uniform interface across contracts.
+    pub fn touch_ttl(env: Env, subscription_id: u64) -> Result<(), ForgeError> {
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        let ttl = soroban_forge_shared_utils::ttl::TTLHelper::new(DEFAULT_TTL);
+        ttl.bump(&env, &DataKey::Subscription(subscription_id))?;
+        ttl.bump(&env, &DataKey::Count)?;
+        ttl.bump(
+            &env,
+            &DataKey::SubscriberSubscriptions(subscription.subscriber.clone()),
+        )?;
+        ttl.bump(
+            &env,
+            &DataKey::ProviderSubscriptions(subscription.provider.clone()),
+        )?;
+        for quota in subscription.quotas.iter() {
+            ttl.bump(&env, &DataKey::Usage(subscription_id, quota.metric.clone()))?;
+        }
+        Ok(())
     }
 
     /// Create a new subscription through the single shared creation path used

@@ -66,7 +66,9 @@
 #[cfg(test)]
 extern crate std;
 
-use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, transfer_tokens, ForgeError};
+use soroban_forge_shared_utils::{
+    bump_entry as shared_bump_entry, transfer_tokens, ForgeError, TTLHelper,
+};
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, Address, Env,
 };
@@ -243,6 +245,9 @@ pub trait SorobanForgeMarketplaceRoyalties {
         env: Env,
         collection: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the TTL helper's configured minimum TTL threshold (read-only view).
+    fn get_ttl_min(env: Env) -> u32;
 }
 
 /// Lifecycle state of a registered royalty configuration.

@@ -202,7 +202,7 @@ use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env, Vec,
 };
 
-use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
+use soroban_forge_shared_utils::{ttl::TTLHelper, ForgeError};
 
 /// Ledger-time constants for TTL bumps.
 ///
@@ -231,6 +231,13 @@ const MAX_BASKET_ASSETS: u32 = 8;
 /// Public interface for the Soroban Forge escrow contract.
 #[contractclient(name = "SorobanForgeEscrowClient")]
 pub trait SorobanForgeEscrow {
+    /// Minimum TTL (in ledgers) below which a persistent entry is bumped.
+    ///
+    /// Re-exported from [`soroban_forge_shared_utils::ttl::BUMP_THRESHOLD`]
+    /// so clients can reason about the keeper policy without importing the
+    /// shared crate directly.
+    const TTL_THRESHOLD: u32 = soroban_forge_shared_utils::ttl::BUMP_THRESHOLD;
+
     /// Create a new escrow and return its stable id.
     ///
     /// Requires `amount > 0`, `timeout > 0`. Only the buyer authorizes
@@ -1902,6 +1909,16 @@ fn bump_entry(env: &Env, key: &DataKey) {
             crate::ttl::BUMP_AMOUNT,
         );
     }
+    // Route through the shared `TTLHelper` so every contract in the
+    // workspace uses the exact same threshold/extend-to policy. The
+    // helper is constructed per call because `Storage` is a cheap handle
+    // and the threshold is a compile-time constant.
+    let helper = TTLHelper::new(env.storage(), soroban_forge_shared_utils::ttl::BUMP_THRESHOLD);
+    // `bump` is infallible for a well-formed key; the escrow contract
+    // never constructs a malformed `DataKey`, so the `Result` is
+    // discarded here. Callers that need the error surface (e.g. the
+    // keeper entrypoint) can use `TTLHelper::touch` directly.
+    let _ = helper.bump(key);
 }
 
 /// Lifecycle events. The escrow id is a **topic** so indexers can filter

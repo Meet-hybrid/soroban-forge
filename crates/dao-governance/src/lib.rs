@@ -104,7 +104,7 @@
 #[cfg(test)]
 extern crate std;
 
-use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
+use soroban_forge_shared_utils::{ForgeError, TTLHelper, DEFAULT_TTL};
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Bytes,
     Env, IntoVal, Symbol, Val,
@@ -404,10 +404,10 @@ pub struct Proposal {
 /// when it falls inside its one-day threshold — see
 /// `soroban_forge_shared_utils::ttl`.
 ///
-/// Thin wrapper over [`soroban_forge_shared_utils::bump_entry`] — the
-/// canonical helper (issue #127); the policy lives there.
+/// Thin wrapper over [`TTLHelper::bump`] — the canonical helper (issue
+/// #127); the policy lives there.
 fn bump_entry(env: &Env, key: &DataKey) {
-    shared_bump_entry(env, key);
+    TTLHelper::new(env.storage(), DEFAULT_TTL).bump(key);
 }
 
 /// Instance and persistent storage keys.
@@ -996,7 +996,7 @@ impl DaoGovernance {
         if !env.storage().persistent().has(&key) {
             return Err(ForgeError::NotFound);
         }
-        bump_entry(&env, &key);
+        TTLHelper::new(env.storage(), DEFAULT_TTL).touch(&[key])?;
         Ok(())
     }
 }
