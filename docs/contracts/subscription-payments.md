@@ -12,6 +12,8 @@ fn authorize_provider(subscriber, provider) -> Result<(), ForgeError>
 fn revoke_provider(subscriber, provider) -> Result<(), ForgeError>
 fn is_provider_authorized(subscriber, provider) -> bool
 fn charge(subscription_id) -> Result<i128, ForgeError>
+fn deposit(subscription_id, amount) -> Result<i128, ForgeError>
+fn withdraw_balance(subscription_id, amount) -> Result<i128, ForgeError>
 fn charge_catchup(subscription_id, max_periods: u32) -> Result<i128, ForgeError>
 fn set_quotas(subscription_id, quotas: Vec<MetricQuota>) -> Result<(), ForgeError>
 fn record_usage(subscription_id, metric: Symbol, units: u64) -> Result<(), ForgeError>
@@ -31,6 +33,21 @@ fn plan_count() -> u64
 
 - `subscribe` requires the subscriber and returns a stable, monotonic id.
 - `charge` requires the provider and settles at most one full period per call.
+- `deposit` requires the subscriber. The first successful deposit opts that
+  subscription into prepaid mode; deposits pull the exact amount into contract
+  custody before writing the new balance. `get_subscription` exposes
+  `prepaid_balance`: `None` is pull mode, while `Some(0)` remains opted in.
+- In prepaid mode, `charge` still requires the provider and transfers exactly
+  one derived period amount from contract custody to the provider. If the
+  balance cannot cover it, no partial transfer occurs and the existing retry
+  policy moves the subscription to `PastDue` (and auto-cancels after three
+  failed attempts). Depositing while `PastDue` allows the next `charge` retry
+  to recover it. `charge_catchup` rejects prepaid subscriptions so it cannot
+  bypass this one-period lapse policy by pulling from the subscriber.
+- `withdraw_balance` requires the subscriber and returns a requested amount
+  before cancellation. It does not turn prepaid mode off. `cancel` returns the
+  exact remaining balance to the subscriber before recording cancellation;
+  retry-limit auto-cancellation also returns the remainder.
 - `charge_catchup` requires the provider and settles `min(max_periods,
 elapsed_periods)` periods in one atomic invocation. `max_periods == 0` is a
   no-op; values above the hard cap of 32 are rejected. The cap bounds Soroban
@@ -52,9 +69,9 @@ without this feature.
 ```rust
 struct MetricQuota {
     metric: Symbol,             // e.g. api_calls
-    included_units: u64,        // covered by the base `amount`
+    included_units: u64,         // covered by the base `amount`
     overage_price: i128,        // per started bucket
-    bucket_units: u64,          // units per bucket, must be > 0
+    bucket_units: u64,             // units per bucket, must be > 0
     max_overage_units: Option<u64>, // cap on billable overage units
 }
 ```
@@ -78,12 +95,12 @@ with the `min` skipped for an uncapped quota.
   rejects a metric the subscription does not declare, so usage the subscriber
   has not been asked to pay for can never be billed.
 - `record_usage` accumulates **raw units** for the open period only, so each
-  period's amount is a pure function of that period's units: charging `N`
+  period's amount is a pure function of that period's units: charging `N
   periods bills exactly `N` times the per-period derivation, and no rounding can
   compound across periods. A bucket is billed once started (rounded up), and the
   price is per bucket, never per unit.
-- Meters are dropped atomically with the charge that closes the period, in the
-  same frame that advances `last_charged`. A failed transfer returns before that
+- Meters are dropped atomically with the charge that closes the period, in
+  the same frame that advances `last_charged`. A failed transfer returns before that
   point, so every meter survives and the arrears retry re-derives an identical
   amount.
 - `charge_catchup` settles the open period **last**: usage can only be metered
@@ -102,6 +119,33 @@ with the `min` skipped for an uncapped quota.
 - `Active` — chargeable
 - `Cancelled` — no further charges
 - `PastDue` — a failed single-period payment requiring `charge` retry semantics
+
+## Prepaid money flow
+
+Only a successful `deposit` opts in. Subscriptions that never deposit retain
+the existing pull flow and `prepaid_balance == None`.
+
+| State / operation | Token movement | Balance effect |
+|---|---|---|
+| Pull mode `charge` | subscriber → provider, exact derived period amount | no prepaid balance |
+| Prepaid `deposit` | subscriber → contract, exact requested amount | add amount after transfer succeeds |
+| Prepaid `charge`, sufficient balance | contract → provider, exact derived period amount | subtract amount after transfer succeeds |
+| Prepaid `charge`, insufficient balance | none | unchanged; retry state advances to `PastDue` or retry-limit cancellation |
+| `withdraw_balance` | contract → subscriber, exact requested amount | subtract amount after transfer succeeds |
+| `cancel` / retry-limit auto-cancel | contract → subscriber, full remaining balance | set to `Some(0)` after refund succeeds |
+
+The conservation invariant is `Σdeposits − Σperiod debits ‒ Σwithdrawals ‒
+Σcancellation refunds == prepaid_balance` after every successful operation.
+The randomized lifecycle property test compares each operation with an
+independent balance/state mirror and also checks the SEP-41 contract balance.
+Every successful deposit, period debit, and refund emits `Deposited`,
+`BalanceDebited`, or `BalanceRefunded` with `amount` and `balance_after`.
+
+Prepaid mode introduces a custody trust surface: deposited tokens stay in the
+contract until periods are charged or the subscriber withdraws/cancels. The
+pull mode remains direct subscriber-to-provider settlement. The subscription
+record gains an optional `prepaid_balance` field; ABI clients must be regenerated
+for this record shape change.
 
 ## Secondary Indices
 
@@ -154,6 +198,13 @@ before the transfer, so an unrepresentable bill never moves funds.
 The contract emits typed on-chain lifecycle events for indexers and off-chain monitoring:
 
 - `Subscribed` (topic: `subscription_id: u64`) — emitted when a subscription is created via `subscribe`. Contains `subscriber`, `provider`, `token`, `amount`, and `period`.
+- `Charged` (topic: `subscription_id: u64`) — emitted on successful billing via `charge` (one event) or `charge_catchup` (one event per settled period). Contains `amount`, `last_charged`, and `next_charge_at`. For a metered subscription `amount` is the derived `base + overage` amount, not the base alone.
+- `UsageRecorded` (topics: `subscription_id: u64`, `metric: Symbol`) — emitted per `record_usage` call. Contains the `units` added, the running `period_units` for the open period, and the `period_start` window those units belong to, so an indexer can rebuild each settled period's overage.
+- `QuotasSet` (topic: `subscription_id: u64`) — emitted when `set_quotas` replaces the declared terms. Contains the full `quotas` list, so the pricing an indexer needs travels with the event.
+- `Deposited` (topic: `subscription_id: u64`) — successful prepaid deposit; contains `amount` and `balance_after`.
+- `BalanceDebited` (topic: `subscription_id: u64`) — successful prepaid period settlement; contains the exact `amount` and `balance_after`.
+- `BalanceRefunded` (topic: `subscription_id: u64`) — successful subscriber withdrawal or cancellation refund; contains `amount` and `balance_after`.
+- `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
 - `Charged` (topic: `subscription_id: u64`) — emitted on successful billing via `charge` (one event) or `charge_catchup` (one event per settled period). Contains `amount`, `last_charged`, and `next_charge_at`.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
 

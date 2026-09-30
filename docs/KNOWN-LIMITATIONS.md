@@ -10,8 +10,8 @@ decision — not an oversight.
 
 ## Resolved in the SDK 27 / Phase 1 migration
 
-These were the headline gaps in v0.1.0; all are closed **for the escrow
-contract** and remain open for the other four:
+These were the headline gaps in v0.1.0; SEP-41 settlement now covers escrow,
+royalties, vesting, DAO bonds, and both subscription payment modes:
 
 1. **No token settlement** — escrow now performs real SEP-41 transfers
    (`deposit` pulls from the buyer, `release`/`refund`/`resolve` pay out)
@@ -19,6 +19,11 @@ contract** and remain open for the other four:
    partial state. Marketplace royalties, vesting, and DAO governance
    (proposal bonds) have since gained settlement the same way — including
    `distribute`'s real royalty payout — and multi-sig `execute` performs
+   real cross-contract invocations; subscriptions transfer pull-mode charges
+   directly from subscriber to provider and custody prepaid deposits for exact
+   period debits and refunds.
+2. **Instance-only storage** — escrow, multi-sig wallet, DAO governance, and marketplace royalties now use **persistent** entries with TTL bumps on every write and permissionless `touch_ttl` keeper entrypoints. Vesting and subscriptions still use instance storage.
+3. **No events** — escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit lifecycle events; only vesting remains silent.
    real cross-contract invocations;
    subscriptions still move nothing.
 2. **Instance-only storage** — escrow, multi-sig wallet, DAO governance, marketplace royalties, and subscription records use **persistent** entries with TTL bumps and permissionless `touch_ttl` keeper entrypoints. Vesting records remain in instance storage; subscription counters and enumeration indexes remain instance-scoped.
@@ -32,21 +37,17 @@ contract** and remain open for the other four:
 
 ## Still open
 
-### 1. Token settlement for subscription payments
+### 1. Subscription prepaid custody
 
-Subscriptions remain state machines: amounts are validated and stored, never
-moved. (Marketplace royalties moved off this list: `settle_sale` transfers
-real SEP-41 tokens with the escrow pattern. Multi-sig wallet also
-moved off this list: `execute` performs real cross-contract
-invocations via `try_invoke_contract`. Vesting also moved off this
-list: `claim` transfers the vested amount to the beneficiary with
-transfer-before-state ordering. DAO governance also moved off this list:
-`propose` pulls a SEP-41 proposal bond into contract custody and the bond is
-refunded to the proposer (`Executed`, `Cancelled`) or forfeited to the
-configured treasury (`Defeated`) in the same frame as the terminal
-transition.) The remaining contract gets its own tranche using the escrow
-pattern (see
-[RESUBMISSION.md](RESUBMISSION.md#phase-1--flagship-escrow-primitive-3-weeks)).
+Prepaid mode is opt-in per subscription. Deposits are held by the subscription
+contract and paid to the provider per period, or returned to the subscriber on
+withdrawal or cancellation. This creates a custody trust surface: correctness
+of stored balances, token behavior, and successful refund execution matter
+while funds are held. Pull mode remains direct subscriber-to-provider transfer
+and does not custody subscription funds. There is no administrator recovery
+path for prepaid funds; subscribers can withdraw surplus or cancel to receive
+the remainder. Prepaid `charge_catchup` is rejected; subscribers use the
+single-period retry path so insufficient balance follows `PastDue` semantics.
 
 ### 2. Instance-only storage outside escrow, multi-sig wallet, DAO governance, marketplace royalties, and subscriptions
 
@@ -93,8 +94,9 @@ They also document the verified mechanics: contract self-authorization is implic
 (the host auto-approves `require_auth` from the executing contract), which is why
 a party signature alone legitimately completes a payout.
 
-Still open: the other three contracts' entrypoints are proven at call-graph
-level only; subscriptions still move nothing.
+Still open: other contract entrypoints are proven at call-graph level only.
+Subscription `deposit` and `withdraw_balance` are subscriber-authorized; the
+existing provider-authorized `charge` moves due payments to the provider.
 
 ### 5. Vesting rounding residue
 
@@ -166,7 +168,13 @@ contributions have landed yet.
 
 ## Out of scope for the flagship phase (deliberate)
 
-- Settlement work for subscription payments (the last contract that never
-  moves tokens)
 - Weighted voting, plan management, multi-recipient royalties
 - Formal verification, external audit (planned before any mainnet use)
+
+## Subscription record compatibility
+
+`Subscription` now includes `prepaid_balance: Option<i128>` so callers can
+distinguish legacy pull mode (`None`) from prepaid mode (`Some`, including
+`Some(0)`). This changes the serialized record and generated contract spec;
+clients that decode the old record shape must regenerate their bindings before
+using the updated contract.
