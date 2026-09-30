@@ -8,6 +8,9 @@
 //! custodies the tokens until release, refund, or arbitration:
 //!
 //! ```text
+//! Pending --deposit--> Funded --release--> Completed (seller paid)
+//!                     |        --refund--> Refunded  (buyer back)
+//!                     |        --refund_expired--> Refunded (keeper-triggered after deadline)
 //! Pending --deposit--> Funded --release_partial (×n)--> Funded  (partial)
 //!                     |                                  |
 //!                     |                                  +--> Completed (final partial)
@@ -101,6 +104,8 @@
 //!   status) return `InvalidInput` without modifying storage.
 //! - `refund` — seller before the deadline; buyer may reclaim after the
 //!   deadline.
+//! - `refund_expired` — permissionless after the deadline; pays the buyer
+//!   and cannot settle a disputed escrow.
 //! - `dispute` — the **claimant** (buyer or seller) is passed explicitly
 //!   and must be one of the two parties; their `require_auth` proves the
 //!   claim. Soroban has no "auth by A-or-B" primitive, so an explicit
@@ -143,22 +148,7 @@ use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env, Vec,
 };
 
-use soroban_forge_shared_utils::ForgeError;
-
-/// Ledger-time constants for TTL bumps.
-///
-/// One ledger closes roughly every 5 seconds, so 17,280 ledgers ≈ 1 day.
-/// `BUMP_AMOUNT` is the lifetime written on every touch; `BUMP_THRESHOLD`
-/// is how close to expiry an entry must be before a bump applies. The
-/// 30-day horizon comfortably covers a funded escrow between keeper
-/// touches.
-mod ttl {
-    pub const DAY_IN_LEDGERS: u32 = 17_280;
-    /// Lifetime applied on every TTL touch.
-    pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
-    /// Bump only when the entry is within this window of expiring.
-    pub const BUMP_THRESHOLD: u32 = BUMP_AMOUNT - DAY_IN_LEDGERS;
-}
+use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
 
 /// Public interface for the Soroban Forge escrow contract.
 #[contractclient(name = "SorobanForgeEscrowClient")]
@@ -252,6 +242,21 @@ pub trait SorobanForgeEscrow {
     ///   the payout.
     fn refund(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
+    /// Permissionlessly refund the full escrow amount to the buyer strictly
+    /// after its deadline. Only valid while `Funded`; a disputed escrow stays
+    /// frozen. The existing party-authorized `refund` path is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Funded`.
+    /// * [`ForgeError::DeadlineReached`] — the deadline has not passed yet,
+    ///   including the exact deadline timestamp.
+    /// * [`ForgeError::ArithmeticOverflow`] — computing the deadline overflowed.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the payout.
+    fn refund_expired(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
     /// Raise a dispute. `claimant` must be the buyer or the seller and
     /// must authorize the call; only valid while `Funded`. Freezes the
     /// escrow until the arbiter resolves it. Only the **remaining** balance
@@ -340,8 +345,9 @@ pub trait SorobanForgeEscrow {
     ) -> ParticipantEscrowsPage;
 
     /// Permissionless TTL keeper: bumps the escrow entry's TTL to the
-    /// [`ttl::BUMP_AMOUNT`] horizon when it falls inside
-    /// [`ttl::BUMP_THRESHOLD`]. Call periodically for escrows that must
+    /// [`soroban_forge_shared_utils::ttl::BUMP_AMOUNT`] horizon when it
+    /// falls inside [`soroban_forge_shared_utils::ttl::BUMP_THRESHOLD`].
+    /// Call periodically for escrows that must
     /// outlive their entry's current TTL. Costs fees; changes nothing
     /// else.
     ///
@@ -743,6 +749,38 @@ impl Escrow {
         Ok(())
     }
 
+    /// Permissionlessly refund the buyer after the escrow deadline.
+    ///
+    /// The strict-after boundary leaves the exact deadline to the existing
+    /// party-authorized refund path. Disputed escrows remain frozen, and the
+    /// token transfer precedes the state update so a failed payout is atomic.
+    pub fn refund_expired(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
+        let escrow = Self::load_escrow(&env, escrow_id)?;
+        if escrow.status != EscrowStatus::Funded {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let now = env.ledger().timestamp();
+        let deadline = escrow
+            .created_at
+            .checked_add(escrow.timeout)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        if now <= deadline {
+            return Err(ForgeError::DeadlineReached);
+        }
+
+        transfer_from_contract(&env, &escrow.token, &escrow.buyer, escrow.amount)?;
+
+        let mut refunded = escrow;
+        refunded.status = EscrowStatus::Refunded;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &refunded);
+        bump_entry(&env, &DataKey::Escrow(escrow_id));
+        events::refund_expired(&env, escrow_id, refunded.amount, now);
+        Ok(())
+    }
+
     /// Raise a dispute: the claimant (buyer or seller) authorizes, while
     /// `Funded`. Freezes the remaining balance until the arbiter resolves.
     pub fn dispute(env: Env, escrow_id: u64, claimant: Address) -> Result<(), ForgeError> {
@@ -1097,13 +1135,14 @@ fn split_amount(amount: i128, seller_bps: u32) -> Result<(i128, i128), ForgeErro
     Ok((seller_share, buyer_share))
 }
 
-/// Bump a persistent entry's TTL to the [`ttl::BUMP_AMOUNT`] horizon when
-/// it falls inside [`ttl::BUMP_THRESHOLD`]. The standard threshold/extend
-/// pattern: cheap no-op while the entry is fresh, decisive near expiry.
+/// Bump a persistent entry's TTL to the workspace policy's 30-day horizon
+/// when it falls inside its one-day threshold — see
+/// `soroban_forge_shared_utils::ttl`.
+///
+/// Thin wrapper over [`soroban_forge_shared_utils::bump_entry`] — the
+/// canonical helper (issue #127); the policy lives there.
 fn bump_entry(env: &Env, key: &DataKey) {
-    env.storage()
-        .persistent()
-        .extend_ttl(key, ttl::BUMP_THRESHOLD, ttl::BUMP_AMOUNT);
+    shared_bump_entry(env, key);
 }
 
 /// Lifecycle events. The escrow id is a **topic** so indexers can filter
@@ -1171,6 +1210,14 @@ mod events {
         #[topic]
         pub escrow_id: u64,
         pub data: EscrowData,
+    }
+
+    #[contractevent]
+    pub struct RefundExpired {
+        #[topic]
+        pub escrow_id: u64,
+        pub refunded_amount: i128,
+        pub timestamp: u64,
     }
 
     #[contractevent]
@@ -1248,6 +1295,15 @@ mod events {
         .publish(env);
     }
 
+    pub fn refund_expired(env: &Env, escrow_id: u64, refunded_amount: i128, timestamp: u64) {
+        RefundExpired {
+            escrow_id,
+            refunded_amount,
+            timestamp,
+        }
+        .publish(env);
+    }
+
     pub fn disputed(env: &Env, escrow: &EscrowData) {
         Disputed {
             escrow_id: escrow.escrow_id,
@@ -1299,6 +1355,12 @@ mod authz;
 
 #[cfg(test)]
 mod props;
+
+// TTL chaos harness demo: drives randomized ledger gaps through the
+// escrow lifecycle and asserts no persistent entry expires during a
+// legitimate flow.
+#[cfg(test)]
+mod ttl_chaos;
 
 // Generates and validates `indexer/fixtures/escrow-events.json`, the ground
 // truth consumed by the reference event indexer in `packages/typescript-sdk`

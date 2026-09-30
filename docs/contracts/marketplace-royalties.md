@@ -14,6 +14,7 @@ fn settle_sale(collection, token, payer, seller, amount) -> Result<Settlement, F
 fn settle_sales(collection, token, payer, sales: Vec<(seller, amount)>) -> Result<Vec<Settlement>, ForgeError>
 fn get_royalty(collection) -> Result<Royalty, ForgeError>
 fn get_settlement_summary(collection) -> Result<SettlementSummary, ForgeError>
+fn quote_sale(collection, amount) -> Result<SaleQuote, ForgeError>
 fn touch_ttl(collection) -> Result<(), ForgeError>
 ```
 
@@ -59,6 +60,24 @@ and only need the royalty leg settled; a `Disabled` or zero-bps
 configuration transfers nothing and returns the full `amount`. It requires
 the collection's and the payer's authorization, and emits the same
 `SaleSettled` event as the settlement entrypoints.
+
+### Sale quotes
+
+`quote_sale(collection, amount)` is a read-only view returning the exact
+split a settlement of `amount` would apply, as a `SaleQuote { gross,
+royalty_bps, royalty_amount, seller_net }`. Settle-parity guarantee: the
+quote runs the same validation order and the same derivation as the
+settlement entrypoints — configuration load (`NotFound` for an unregistered
+collection), `amount > 0` (`InvalidInput`, mirroring `distribute` and
+`settle_sale`), then the same `effective_bps` + `split` resolution — so the
+returned numbers are the settlement's own, floor rounding included, and
+`royalty_amount + seller_net == gross` exactly. A `Disabled` configuration
+quotes at zero bps, matching `settle_sale`'s settle-in-full behavior. The
+quote never mutates storage, requires no authorization, and emits no events.
+It is the per-sale counterpart of `get_settlement_summary` and exists so a
+marketplace UI can display "you will pay X, royalty is Y, seller receives
+Z" from the contract's own math instead of a parallel off-chain
+implementation.
 
 ### Batch settlement
 
@@ -119,5 +138,4 @@ A permissionless public keeper entrypoint `touch_ttl(collection)` allows anyone 
 The contract emits typed on-chain lifecycle events for indexers and off-chain monitoring:
 
 - `RoyaltyConfigured` (topic: `collection: Address`) — emitted when a royalty configuration is registered or updated via `set_royalty`. Contains `recipient` and `bps`.
-- `SaleSettled` (topic: `collection: Address`) — emitted on sale settlement via `settle_sale` or `settle_sales`. Contains `token`, `payer`, `seller`, `royalty_recipient`, `gross_amount`, `seller_net`, and `royalty_share`.
-
+- `SaleSettled` (topic: `collection: Address`) — emitted once per settled sale via `settle_sale` or normal-size `settle_sales` batches (including zero-share and disabled-royalty sales). A batch larger than ten sales emits one aggregate event to remain within Soroban's event-size budget; its `seller` is the collection sentinel and its amount fields are batch totals, while the return value retains per-sale details. A failed batch emits no contract events because the invocation rolls back. Contains `token`, `payer`, `seller`, `royalty_recipient`, `gross_amount`, `seller_net`, and `royalty_share`.
