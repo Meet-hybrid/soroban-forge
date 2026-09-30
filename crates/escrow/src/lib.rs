@@ -8,6 +8,9 @@
 //! custodies the tokens until release, refund, or arbitration:
 //!
 //! ```text
+//! Pending --deposit--> Funded --release--> Completed (seller paid)
+//!                     |        --refund--> Refunded  (buyer back)
+//!                     |        --refund_expired--> Refunded (keeper-triggered after deadline)
 //! Pending --deposit--> Funded --release_partial (×n)--> Funded  (partial)
 //!                     |                                  |
 //!                     |                                  +--> Completed (final partial)
@@ -242,12 +245,13 @@ pub trait SorobanForgeEscrow {
     ///   the payout.
     fn refund(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
-    /// Permissionless expiry refund keeper: settles the full remaining balance
+/// Permissionless expiry refund keeper: settles the full remaining balance
     /// to the buyer when called strictly after the deadline (`now > deadline`).
     ///
     /// Valid only while `Funded` and strictly after the deadline. Does not require
     /// party authorization — any account or automated keeper bot may trigger it
     /// to sweep expired escrows and return unfulfilled funds to the buyer.
+    /// The existing party-authorized `refund` path is unchanged.
     ///
     /// If the escrow is in `Disputed`, calls fail with [`ForgeError::InvalidInput`]
     /// so the dispute freeze integrity holds against third parties.
@@ -255,9 +259,12 @@ pub trait SorobanForgeEscrow {
     /// # Errors
     ///
     /// * [`ForgeError::NotFound`] — no escrow with this id.
-    /// * [`ForgeError::InvalidInput`] — escrow is not `Funded` (or is in `Disputed`).
-    /// * [`ForgeError::DeadlineReached`] — deadline has not yet passed (`now <= deadline`).
-    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected the payout.
+/// * [`ForgeError::InvalidInput`] — escrow is not `Funded` (or is in `Disputed`).
+    /// * [`ForgeError::DeadlineReached`] — the deadline has not passed yet,
+    ///   including the exact deadline timestamp (`now <= deadline`).
+    /// * [`ForgeError::ArithmeticOverflow`] — computing the deadline overflowed.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the payout.
     fn refund_expired(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
     /// Raise a dispute. `claimant` must be the buyer or the seller and
@@ -752,11 +759,15 @@ impl Escrow {
         Ok(())
     }
 
-    /// Refund the buyer after the timeout has passed. Permissionless: can be called
+/// Permissionlessly refund the buyer after the timeout has passed. Can be called
     /// by any account (keeper, bot, indexer, or party) without authorization.
     ///
     /// Valid only while `Funded` and strictly after the deadline (`now > deadline`).
-    /// Settles the full remaining balance (`amount - released`) to the buyer.
+    /// The strict-after boundary leaves the exact deadline to the existing
+    /// party-authorized refund path.
+    ///
+    /// Settles the full remaining balance (`amount - released`) to the buyer. Token
+    /// transfer precedes the state update so a failed payout is atomic.
     /// Transitions state to `EscrowStatus::Refunded`.
     ///
     /// Escrows in `Disputed` return [`ForgeError::InvalidInput`] so the dispute freeze
@@ -774,12 +785,7 @@ impl Escrow {
             .created_at
             .checked_add(escrow.timeout)
             .ok_or(ForgeError::ArithmeticOverflow)?;
-
-        if now <= deadline {
-            return Err(ForgeError::DeadlineReached);
-        }
-
-        let remaining = escrow.remaining();
+let remaining = escrow.remaining();
         transfer_from_contract(&env, &escrow.token, &escrow.buyer, remaining)?;
 
         let mut refunded = escrow;
@@ -789,7 +795,7 @@ impl Escrow {
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &refunded);
         bump_entry(&env, &DataKey::Escrow(escrow_id));
-        events::refund_expired(&env, &refunded);
+events::refund_expired(&env, escrow_id, refunded.amount, now);
         Ok(())
     }
 
@@ -1233,6 +1239,14 @@ mod events {
     }
 
     #[contractevent]
+    pub struct RefundExpired {
+        #[topic]
+        pub escrow_id: u64,
+        pub refunded_amount: i128,
+        pub timestamp: u64,
+    }
+
+    #[contractevent]
     pub struct Disputed {
         #[topic]
         pub escrow_id: u64,
@@ -1307,10 +1321,11 @@ mod events {
         .publish(env);
     }
 
-    pub fn refund_expired(env: &Env, escrow: &EscrowData) {
+pub fn refund_expired(env: &Env, escrow_id: u64, refunded_amount: i128, timestamp: u64) {
         RefundExpired {
-            escrow_id: escrow.escrow_id,
-            data: escrow.clone(),
+            escrow_id,
+            refunded_amount,
+            timestamp,
         }
         .publish(env);
     }
@@ -1366,6 +1381,12 @@ mod authz;
 
 #[cfg(test)]
 mod props;
+
+// TTL chaos harness demo: drives randomized ledger gaps through the
+// escrow lifecycle and asserts no persistent entry expires during a
+// legitimate flow.
+#[cfg(test)]
+mod ttl_chaos;
 
 // Generates and validates `indexer/fixtures/escrow-events.json`, the ground
 // truth consumed by the reference event indexer in `packages/typescript-sdk`
