@@ -1142,6 +1142,7 @@ impl MultiSigWallet {
             }
             TxKind::AddOwner(new_owner) => {
                 Self::apply_add_owner(&env, new_owner)?;
+                events::owner_added(&env, tx_id, new_owner, Self::owner_count(&env));
             }
             TxKind::RemoveOwner(existing_owner) => {
                 Self::apply_remove_owner(&env, existing_owner)?;
@@ -1149,9 +1150,16 @@ impl MultiSigWallet {
                 // threshold they can no longer be bound by, so every pending
                 // tx's confirmation list is scrubbed of the removed owner.
                 Self::clear_confirmations_of(&env, existing_owner);
+                events::owner_removed(&env, tx_id, existing_owner, Self::owner_count(&env));
             }
             TxKind::SetThreshold(new_threshold) => {
+                let old_threshold: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Threshold)
+                    .ok_or(ForgeError::NotInitialized)?;
                 Self::apply_set_threshold(&env, *new_threshold)?;
+                events::threshold_changed(&env, tx_id, old_threshold, *new_threshold);
             }
             TxKind::Opaque => {
                 // Opaque-payload txs perform a real cross-contract
@@ -2116,6 +2124,30 @@ mod events {
         pub expired_at: u64,
     }
 
+    #[contractevent]
+    pub struct OwnerAdded {
+        #[topic]
+        pub tx_id: u64,
+        pub owner: Address,
+        pub total_owners: u32,
+    }
+
+    #[contractevent]
+    pub struct OwnerRemoved {
+        #[topic]
+        pub tx_id: u64,
+        pub owner: Address,
+        pub total_owners: u32,
+    }
+
+    #[contractevent]
+    pub struct ThresholdChanged {
+        #[topic]
+        pub tx_id: u64,
+        pub old_threshold: u32,
+        pub new_threshold: u32,
+    }
+
     pub fn submitted(env: &Env, tx: &WalletTx) {
         TxSubmitted {
             tx_id: tx.tx_id,
@@ -2146,6 +2178,33 @@ mod events {
     #[allow(dead_code)]
     pub fn expired(env: &Env, tx_id: u64, expired_at: u64) {
         TxExpired { tx_id, expired_at }.publish(env);
+    }
+
+    pub fn owner_added(env: &Env, tx_id: u64, owner: &Address, total_owners: u32) {
+        OwnerAdded {
+            tx_id,
+            owner: owner.clone(),
+            total_owners,
+        }
+        .publish(env);
+    }
+
+    pub fn owner_removed(env: &Env, tx_id: u64, owner: &Address, total_owners: u32) {
+        OwnerRemoved {
+            tx_id,
+            owner: owner.clone(),
+            total_owners,
+        }
+        .publish(env);
+    }
+
+    pub fn threshold_changed(env: &Env, tx_id: u64, old_threshold: u32, new_threshold: u32) {
+        ThresholdChanged {
+            tx_id,
+            old_threshold,
+            new_threshold,
+        }
+        .publish(env);
     }
 }
 
@@ -4282,6 +4341,238 @@ mod tests {
         client.confirm(&add_tx, &accounts.user3);
         client.execute(&add_tx);
         assert!(client.is_owner(&newbie));
+    }
+
+    #[test]
+    fn rotation_with_empty_queue_succeeds() {
+        let (_env, client, accounts) = setup!();
+        assert_eq!(client.get_owners().len(), 3);
+
+        // Remove user3 when no other pending tx exists
+        let tx = client.remove_owner(&accounts.user1, &accounts.user3);
+        assert_eq!(client.get_tx_count(), 1);
+        client.confirm(&tx, &accounts.user2);
+        client.confirm(&tx, &accounts.user1);
+        client.execute(&tx);
+
+        assert_eq!(client.get_owners().len(), 2);
+        assert!(!client.is_owner(&accounts.user3));
+        assert_eq!(client.get_tx(&tx).status, TxStatus::Executed);
+    }
+
+    #[test]
+    fn removal_drops_threshold_met_pending_tx_below_threshold() {
+        let (env, client, accounts) = setup!();
+        let mock_target = Address::generate(&env);
+        env.register_at(&mock_target, MockTarget, ());
+
+        // Proposal 1: submitted by user1, confirmed by user1 and user2 (2/2 threshold met)
+        let tx1 = client.submit(&accounts.user1, &mock_target, &payload(&env), &None);
+        client.confirm(&tx1, &accounts.user1);
+        client.confirm(&tx1, &accounts.user2);
+        assert_eq!(client.get_confirmations(&tx1).len(), 2);
+
+        // Proposal 2: remove user2, confirmed by user1 and user3, then executed
+        let tx2 = client.remove_owner(&accounts.user1, &accounts.user2);
+        client.confirm(&tx2, &accounts.user3);
+        client.confirm(&tx2, &accounts.user1);
+        client.execute(&tx2);
+
+        assert!(!client.is_owner(&accounts.user2));
+        assert_eq!(client.get_owners().len(), 2);
+
+        // Tx1 had user2 removed from confirmations; count is now 1 (< threshold 2)
+        assert_eq!(client.get_confirmations(&tx1).len(), 1);
+        assert_eq!(
+            client.get_confirmations(&tx1).get_unchecked(0),
+            accounts.user1
+        );
+
+        // Execution of tx1 must now be rejected
+        let err = client.try_execute(&tx1).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(client.get_tx(&tx1).status, TxStatus::Pending);
+
+        // user3 confirms tx1 -> now 2/2 -> executes successfully
+        client.confirm(&tx1, &accounts.user3);
+        assert_eq!(client.get_confirmations(&tx1).len(), 2);
+        client.execute(&tx1);
+        assert_eq!(client.get_tx(&tx1).status, TxStatus::Executed);
+    }
+
+    #[test]
+    fn removal_keeps_threshold_met_pending_tx_executable_if_confirmers_remain() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(MultiSigWallet, ());
+        let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        let user4 = Address::generate(&env);
+        let owners = soroban_sdk::vec![
+            &env,
+            accounts.user1.clone(),
+            accounts.user2.clone(),
+            accounts.user3.clone(),
+            user4.clone()
+        ];
+        client.initialize(&owners, &2_u32);
+
+        let mock_target = Address::generate(&env);
+        env.register_at(&mock_target, MockTarget, ());
+
+        // Tx 1: confirmed by user1 and user2 (both remain owners)
+        let tx1 = client.submit(&accounts.user1, &mock_target, &payload(&env), &None);
+        client.confirm(&tx1, &accounts.user1);
+        client.confirm(&tx1, &accounts.user2);
+        assert_eq!(client.get_confirmations(&tx1).len(), 2);
+
+        // Tx 2: remove user4 (who did not confirm tx1)
+        let tx2 = client.remove_owner(&accounts.user1, &user4);
+        client.confirm(&tx2, &accounts.user3);
+        client.confirm(&tx2, &accounts.user1);
+        client.execute(&tx2);
+
+        assert!(!client.is_owner(&user4));
+        assert_eq!(client.get_owners().len(), 3);
+
+        // Tx 1 still has 2 confirmations from remaining owners -> executes cleanly
+        assert_eq!(client.get_confirmations(&tx1).len(), 2);
+        client.execute(&tx1);
+        assert_eq!(client.get_tx(&tx1).status, TxStatus::Executed);
+    }
+
+    #[test]
+    fn new_owner_can_confirm_preexisting_pending_tx() {
+        let (env, client, accounts) = setup!();
+        let mock_target = Address::generate(&env);
+        env.register_at(&mock_target, MockTarget, ());
+
+        // Pre-existing pending tx: only confirmed by user1 (1/2)
+        let tx1 = client.submit(&accounts.user1, &mock_target, &payload(&env), &None);
+        client.confirm(&tx1, &accounts.user1);
+        assert_eq!(client.get_confirmations(&tx1).len(), 1);
+
+        // Rotate in a new owner
+        let newbie = Address::generate(&env);
+        let add_tx = client.add_owner(&accounts.user1, &newbie);
+        client.confirm(&add_tx, &accounts.user2);
+        client.confirm(&add_tx, &accounts.user3);
+        client.execute(&add_tx);
+        assert!(client.is_owner(&newbie));
+
+        // Newbie can immediately confirm pre-existing tx1
+        client.confirm(&tx1, &newbie);
+        assert_eq!(client.get_confirmations(&tx1).len(), 2);
+        assert!(client.get_confirmations(&tx1).contains(&newbie));
+
+        // Tx 1 executes successfully
+        client.execute(&tx1);
+        assert_eq!(client.get_tx(&tx1).status, TxStatus::Executed);
+    }
+
+    #[test]
+    fn rotation_events_payload_parity() {
+        let (env, client, accounts) = setup!();
+        let newbie = Address::generate(&env);
+
+        // 1. Add owner
+        let add_tx = client.add_owner(&accounts.user1, &newbie);
+        client.confirm(&add_tx, &accounts.user2);
+        client.confirm(&add_tx, &accounts.user3);
+        client.execute(&add_tx);
+
+        let all = env.events().all();
+        let all_events = all.events();
+        // The last 2 events are OwnerAdded and TxExecuted
+        let add_event = &all_events[all_events.len() - 2];
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &add_event.body;
+        let topics: soroban_sdk::Vec<Val> = body.topics.clone().try_into_val(&env).unwrap();
+        let data: Val = body.data.clone().try_into_val(&env).unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "owner_added")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), add_tx);
+        let data_map: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data_map.get(Symbol::new(&env, "owner")).unwrap()),
+            newbie
+        );
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data_map.get(Symbol::new(&env, "total_owners")).unwrap()
+            ),
+            4
+        );
+        assert_eq!(client.get_owners().len(), 4);
+
+        // 2. Set threshold
+        let thresh_tx = client.set_threshold(&accounts.user1, &3_u32);
+        client.confirm(&thresh_tx, &accounts.user2);
+        client.confirm(&thresh_tx, &accounts.user3);
+        client.execute(&thresh_tx);
+
+        let all = env.events().all();
+        let all_events = all.events();
+        let thresh_event = &all_events[all_events.len() - 2];
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &thresh_event.body;
+        let topics: soroban_sdk::Vec<Val> = body.topics.clone().try_into_val(&env).unwrap();
+        let data: Val = body.data.clone().try_into_val(&env).unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "threshold_changed")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), thresh_tx);
+        let data_map: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data_map.get(Symbol::new(&env, "old_threshold")).unwrap()
+            ),
+            2
+        );
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data_map.get(Symbol::new(&env, "new_threshold")).unwrap()
+            ),
+            3
+        );
+        assert_eq!(client.get_threshold(), 3_u32);
+
+        // 3. Remove owner
+        let rem_tx = client.remove_owner(&accounts.user1, &newbie);
+        client.confirm(&rem_tx, &accounts.user2);
+        client.confirm(&rem_tx, &accounts.user3);
+        client.confirm(&rem_tx, &accounts.user1);
+        client.execute(&rem_tx);
+
+        let all = env.events().all();
+        let all_events = all.events();
+        let rem_event = &all_events[all_events.len() - 2];
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &rem_event.body;
+        let topics: soroban_sdk::Vec<Val> = body.topics.clone().try_into_val(&env).unwrap();
+        let data: Val = body.data.clone().try_into_val(&env).unwrap();
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "owner_removed")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), rem_tx);
+        let data_map: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data_map.get(Symbol::new(&env, "owner")).unwrap()),
+            newbie
+        );
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data_map.get(Symbol::new(&env, "total_owners")).unwrap()
+            ),
+            3
+        );
+        assert_eq!(client.get_owners().len(), 3);
+        assert!(!client.is_owner(&newbie));
     }
 
     #[test]

@@ -53,6 +53,7 @@ use crate::{MultiSigWallet, SorobanForgeMultiSigWalletClient, TxStatus};
 use proptest::prelude::*;
 use soroban_forge_shared_utils::ForgeError;
 use soroban_forge_test_utils::TestAccounts;
+use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{contract, contractimpl, contracttype, Bytes, Env};
 
 // The fixed pool of owner slots available for property tests. A signer is
@@ -425,6 +426,153 @@ proptest! {
                     "stored confirmation from owner slot {pos} was never successfully confirmed"
                 );
             }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// P4 — Safe owner rotation preserves threshold and owner invariants
+// -----------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+enum RotationOp {
+    Add(usize),
+    Remove(usize),
+    SetThreshold(u32),
+}
+
+fn rotation_op() -> impl Strategy<Value = RotationOp> {
+    prop_oneof![
+        (0usize..10).prop_map(RotationOp::Add),
+        (0usize..10).prop_map(RotationOp::Remove),
+        (0u32..10).prop_map(RotationOp::SetThreshold),
+    ]
+}
+
+fn rotation_sequence() -> impl Strategy<Value = std::vec::Vec<RotationOp>> {
+    prop::collection::vec(rotation_op(), 1..8)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// For any arbitrary sequence of AddOwner, RemoveOwner, and SetThreshold
+    /// proposals (including invalid inputs and interleavings):
+    ///
+    /// 1. Invariant: 1 <= threshold <= owners.len() holds at every step.
+    /// 2. Removals that would break `threshold <= remaining_owners` are rejected.
+    /// 3. Setting threshold to 0 or > owners.len() is rejected.
+    /// 4. Pending transactions never count a removed owner's confirmation.
+    #[test]
+    fn p4_rotation_preserves_threshold_and_owner_invariants(
+        ops in rotation_sequence(),
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(MultiSigWallet, ());
+        let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+
+        let initial_owners = soroban_sdk::vec![
+            &env,
+            accounts.user1.clone(),
+            accounts.user2.clone(),
+            accounts.user3.clone()
+        ];
+        client.initialize(&initial_owners, &2_u32);
+
+        let candidate_pool: std::vec::Vec<soroban_sdk::Address> =
+            (0..10).map(|_| soroban_sdk::Address::generate(&env)).collect();
+
+        // Maintain a pending transaction to verify queue scrubbing on removal
+        let target = env.register(CountingTarget, ());
+        let dummy_payload = Bytes::from_array(&env, &[0xAA, 0xBB]);
+        let pending_tx = client.submit(&accounts.user1, &target, &dummy_payload, &None);
+
+        for op in ops {
+            let current_owners = client.get_owners();
+            let current_threshold = client.get_threshold();
+            let proposer = current_owners.get_unchecked(0);
+
+            match op {
+                RotationOp::Add(id) => {
+                    let candidate = &candidate_pool[id % candidate_pool.len()];
+                    let res = client.try_add_owner(&proposer, candidate);
+                    if current_owners.contains(candidate) {
+                        prop_assert!(
+                            matches!(res, Err(Ok(ForgeError::InvalidInput))),
+                            "duplicate add_owner must be rejected"
+                        );
+                    } else if let Ok(Ok(tx_id)) = res {
+                        for i in 0..current_threshold {
+                            let signer = current_owners.get_unchecked(i);
+                            let _ = client.try_confirm(&tx_id, &signer);
+                        }
+                        let _ = client.try_execute(&tx_id);
+                    }
+                }
+                RotationOp::Remove(slot) => {
+                    if !current_owners.is_empty() {
+                        let target_owner = current_owners.get_unchecked(
+                            (slot % (current_owners.len() as usize)) as u32,
+                        );
+                        // Also record confirmation on pending_tx for target_owner if possible
+                        let _ = client.try_confirm(&pending_tx, &target_owner);
+
+                        let res = client.try_remove_owner(&proposer, &target_owner);
+                        if current_owners.len() <= 1 {
+                            prop_assert!(
+                                matches!(res, Err(Ok(ForgeError::InvalidInput))),
+                                "removing final owner must be rejected at submit"
+                            );
+                        } else if let Ok(Ok(tx_id)) = res {
+                            for i in 0..current_threshold {
+                                let signer = current_owners.get_unchecked(i);
+                                let _ = client.try_confirm(&tx_id, &signer);
+                            }
+                            let exec_res = client.try_execute(&tx_id);
+                            if current_threshold > current_owners.len() - 1 {
+                                prop_assert!(
+                                    matches!(exec_res, Err(Ok(ForgeError::InvalidInput))),
+                                    "removal breaking threshold must fail execution"
+                                );
+                            } else if exec_res.is_ok() {
+                                let confs = client.get_confirmations(&pending_tx);
+                                prop_assert!(
+                                    !confs.contains(&target_owner),
+                                    "removed owner must not remain in pending tx confirmations"
+                                );
+                            }
+                        }
+                    }
+                }
+                RotationOp::SetThreshold(new_t) => {
+                    let res = client.try_set_threshold(&proposer, &new_t);
+                    if new_t == 0 || new_t > current_owners.len() {
+                        prop_assert!(
+                            matches!(res, Err(Ok(ForgeError::InvalidInput))),
+                            "invalid threshold must be rejected at submit"
+                        );
+                    } else if let Ok(Ok(tx_id)) = res {
+                        for i in 0..current_threshold {
+                            let signer = current_owners.get_unchecked(i);
+                            let _ = client.try_confirm(&tx_id, &signer);
+                        }
+                        let _ = client.try_execute(&tx_id);
+                    }
+                }
+            }
+
+            // Invariant check at every single step:
+            let owners = client.get_owners();
+            let threshold = client.get_threshold();
+            prop_assert!(threshold >= 1, "threshold must be >= 1, got {threshold}");
+            prop_assert!(
+                threshold <= owners.len(),
+                "threshold must not exceed owners count (threshold={}, owners={})",
+                threshold,
+                owners.len()
+            );
         }
     }
 }

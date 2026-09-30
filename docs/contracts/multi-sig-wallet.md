@@ -141,6 +141,37 @@ Transactions can optionally specify an `expiry: Option<u64>` (ledger timestamp) 
 | `Pending` (threshold met before expiry) | `Pending`, executable | `Pending`, executable | `Pending`, executable |
 | `execute` (threshold met before expiry) | Succeeds -> `Executed` | Succeeds -> `Executed` | Succeeds -> `Executed` |
 
+## Safe Owner Rotation & Threshold Governance
+
+The signer set and approval threshold are governed through the wallet's typed governance transaction queue (`TxKind::AddOwner`, `TxKind::RemoveOwner`, `TxKind::SetThreshold`):
+
+- **Self-referential multi-sig approval**: Rotations require threshold-of-owners approval. Any existing owner proposes via `add_owner`, `remove_owner`, or `set_threshold` (`require_auth`'d by submitter), which records a pending transaction with distinct `tx_id`. Owners confirm through `confirm(tx_id, signer)`. Once threshold is reached, permissionless `execute(tx_id)` applies the mutation.
+- **`add_owner(proposer, new_owner)`**: Validates that `new_owner` is not already a member (`ForgeError::InvalidInput`). When executed, appends `new_owner` to the owner set in instance storage and emits `OwnerAdded`. Newly added owners can immediately participate and confirm pre-existing pending transactions.
+- **`remove_owner(proposer, owner)`**: Removing the final owner (`owners.len() <= 1`) or an address that is not an owner is rejected at submission (`ForgeError::InvalidInput`). At execution, if `threshold > remaining_owners`, execution fails with `ForgeError::InvalidInput` and leaves the state untouched.
+- **Pending-Queue Revalidation**: Upon successful execution of `remove_owner`, the wallet automatically scrubs all confirmations made by the removed owner across every active `Pending` transaction in persistent storage (`clear_confirmations_of`). A transaction whose confirmation count drops below threshold becomes non-executable until additional active owners confirm it. Transactions whose confirmations remain `>= threshold` remain executable. Emits `OwnerRemoved`.
+- **`set_threshold(proposer, new_threshold)`**: Enforces `1 <= new_threshold <= owners.len()` both at submission time and execution time. The threshold change is authorized under the old threshold. Emits `ThresholdChanged`.
+- **Invariants**: `1 <= threshold <= owners.len()` is strictly enforced at every step and verified via comprehensive randomized property tests (`props::p4_rotation_preserves_threshold_and_owner_invariants`).
+
+### Rotation State Table
+
+| Operation | Condition | Submission | Execution Effect | Pending Queue Effect |
+|---|---|---|---|---|
+| `add_owner(N)` | `N` is not an owner | Pending `TxKind::AddOwner` | `owners = owners ∪ {N}` | `N` can confirm existing & new pending txs |
+| `add_owner(N)` | `N` already an owner | Fails (`InvalidInput`) | — | None |
+| `remove_owner(O)` | `O` is sole owner (`len <= 1`) | Fails (`InvalidInput`) | — | None |
+| `remove_owner(O)` | `remaining < threshold` | Pending `TxKind::RemoveOwner` | Fails (`InvalidInput`) | State untouched; tx stays `Pending` |
+| `remove_owner(O)` | `remaining >= threshold` | Pending `TxKind::RemoveOwner` | `owners = owners \ {O}` | `O` removed from all `Pending` confirmations; sub-threshold txs blocked |
+| `set_threshold(T)` | `T == 0` or `T > owners.len()` | Fails (`InvalidInput`) | — | None |
+| `set_threshold(T)` | `1 <= T <= owners.len()` | Pending `TxKind::SetThreshold` | `threshold = T` | New proposals and unexecuted txs evaluated against `T` |
+
+### Rotation Events
+
+| Event | Topics | Data Payload | Emitted When |
+|---|---|---|---|
+| `OwnerAdded` | `("owner_added", tx_id)` | `{ owner: Address, total_owners: u32 }` | `add_owner` tx executes |
+| `OwnerRemoved` | `("owner_removed", tx_id)` | `{ owner: Address, total_owners: u32 }` | `remove_owner` tx executes |
+| `ThresholdChanged` | `("threshold_changed", tx_id)` | `{ old_threshold: u32, new_threshold: u32 }` | `set_threshold` tx executes |
+
 ## Storage & TWL Maintenance
 
 Transaction records (`DataKey::Tx(u64)`) are stored in **persistent

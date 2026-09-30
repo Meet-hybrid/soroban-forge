@@ -1078,3 +1078,312 @@ fn blank_envelope_aborts_remove_withdrawal_limit_without_writing_tx() {
     assert_eq!(client.get_tx_count(), count_before);
     assert_eq!(client.get_withdrawal_limit(&token), active_limit);
 }
+
+// -----------------------------------------------------------------------
+// add_owner / remove_owner / set_threshold — owner-only governance txs
+// -----------------------------------------------------------------------
+
+#[test]
+fn add_owner_accepts_owner_signature() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let newbie = Address::generate(&env);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_owner",
+            args: (&accounts.user1, &newbie).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let tx_id = client
+        .try_add_owner(&accounts.user1, &newbie)
+        .expect("outer ok")
+        .expect("contract ok");
+    assert_eq!(client.get_tx(&tx_id).submitter, accounts.user1);
+    assert_eq!(client.get_tx_count(), 1);
+    assert_eq!(client.get_tx(&tx_id).kind, TxKind::AddOwner(newbie.clone()));
+    assert!(!client.is_owner(&newbie));
+}
+
+#[test]
+fn add_owner_rejects_wrong_owner_signature() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let newbie = Address::generate(&env);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.deployer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_owner",
+            args: (&accounts.user1, &newbie).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_add_owner(&accounts.user1, &newbie));
+    assert_eq!(client.get_tx_count(), 0);
+    assert!(!client.is_owner(&newbie));
+}
+
+#[test]
+fn add_owner_rejects_signature_replayed_for_another_candidate() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let newbie1 = Address::generate(&env);
+    let newbie2 = Address::generate(&env);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_owner",
+            args: (&accounts.user1, &newbie1).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_add_owner(&accounts.user1, &newbie2));
+    assert_eq!(client.get_tx_count(), 0);
+    assert!(!client.is_owner(&newbie1));
+    assert!(!client.is_owner(&newbie2));
+}
+
+#[test]
+fn blank_envelope_aborts_add_owner_without_writing_tx() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let newbie = Address::generate(&env);
+    env.set_auths(&[]);
+
+    assert_auth_abort!(client.try_add_owner(&accounts.user1, &newbie));
+    assert_eq!(client.get_tx_count(), 0);
+    assert!(!client.is_owner(&newbie));
+}
+
+#[test]
+fn add_owner_authorization_tree_is_the_owner_entrypoint_frame() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let newbie = Address::generate(&env);
+
+    client.add_owner(&accounts.user1, &newbie);
+    assert_eq!(
+        env.auths(),
+        [(
+            accounts.user1.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "add_owner"),
+                    (&accounts.user1, &newbie).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
+}
+
+#[test]
+fn remove_owner_accepts_owner_signature() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "remove_owner",
+            args: (&accounts.user1, &accounts.user3).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let tx_id = client
+        .try_remove_owner(&accounts.user1, &accounts.user3)
+        .expect("outer ok")
+        .expect("contract ok");
+    assert_eq!(client.get_tx(&tx_id).submitter, accounts.user1);
+    assert_eq!(client.get_tx_count(), 1);
+    assert_eq!(
+        client.get_tx(&tx_id).kind,
+        TxKind::RemoveOwner(accounts.user3.clone())
+    );
+    assert!(client.is_owner(&accounts.user3));
+}
+
+#[test]
+fn remove_owner_rejects_wrong_owner_signature() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.deployer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "remove_owner",
+            args: (&accounts.user1, &accounts.user3).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_remove_owner(&accounts.user1, &accounts.user3));
+    assert_eq!(client.get_tx_count(), 0);
+    assert!(client.is_owner(&accounts.user3));
+}
+
+#[test]
+fn remove_owner_rejects_signature_replayed_for_another_target() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "remove_owner",
+            args: (&accounts.user1, &accounts.user2).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_remove_owner(&accounts.user1, &accounts.user3));
+    assert_eq!(client.get_tx_count(), 0);
+    assert!(client.is_owner(&accounts.user2));
+    assert!(client.is_owner(&accounts.user3));
+}
+
+#[test]
+fn blank_envelope_aborts_remove_owner_without_writing_tx() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    env.set_auths(&[]);
+
+    assert_auth_abort!(client.try_remove_owner(&accounts.user1, &accounts.user3));
+    assert_eq!(client.get_tx_count(), 0);
+    assert!(client.is_owner(&accounts.user3));
+}
+
+#[test]
+fn remove_owner_authorization_tree_is_the_owner_entrypoint_frame() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+
+    client.remove_owner(&accounts.user1, &accounts.user3);
+    assert_eq!(
+        env.auths(),
+        [(
+            accounts.user1.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "remove_owner"),
+                    (&accounts.user1, &accounts.user3).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
+}
+
+#[test]
+fn set_threshold_accepts_owner_signature() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_threshold",
+            args: (&accounts.user1, 3_u32).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let tx_id = client
+        .try_set_threshold(&accounts.user1, &3_u32)
+        .expect("outer ok")
+        .expect("contract ok");
+    assert_eq!(client.get_tx(&tx_id).submitter, accounts.user1);
+    assert_eq!(client.get_tx_count(), 1);
+    assert_eq!(client.get_tx(&tx_id).kind, TxKind::SetThreshold(3));
+    assert_eq!(client.get_threshold(), 2_u32);
+}
+
+#[test]
+fn set_threshold_rejects_wrong_owner_signature() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.deployer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_threshold",
+            args: (&accounts.user1, 3_u32).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_set_threshold(&accounts.user1, &3_u32));
+    assert_eq!(client.get_tx_count(), 0);
+    assert_eq!(client.get_threshold(), 2_u32);
+}
+
+#[test]
+fn set_threshold_rejects_signature_replayed_for_another_threshold() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_threshold",
+            args: (&accounts.user1, 1_u32).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_set_threshold(&accounts.user1, &3_u32));
+    assert_eq!(client.get_tx_count(), 0);
+    assert_eq!(client.get_threshold(), 2_u32);
+}
+
+#[test]
+fn blank_envelope_aborts_set_threshold_without_writing_tx() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    env.set_auths(&[]);
+
+    assert_auth_abort!(client.try_set_threshold(&accounts.user1, &3_u32));
+    assert_eq!(client.get_tx_count(), 0);
+    assert_eq!(client.get_threshold(), 2_u32);
+}
+
+#[test]
+fn set_threshold_authorization_tree_is_the_owner_entrypoint_frame() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+
+    client.set_threshold(&accounts.user1, &3_u32);
+    assert_eq!(
+        env.auths(),
+        [(
+            accounts.user1.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "set_threshold"),
+                    (&accounts.user1, 3_u32).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
+}
