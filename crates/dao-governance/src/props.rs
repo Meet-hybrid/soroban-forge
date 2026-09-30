@@ -137,6 +137,7 @@ impl World {
             &self.target,
             &self.payload(),
             &DURATION,
+            None, // Use default quorum threshold
         )
     }
 

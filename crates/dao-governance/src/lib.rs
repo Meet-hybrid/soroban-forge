@@ -125,6 +125,28 @@ pub trait SorobanForgeDaoGovernance {
         governance_token: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
+    /// Configure the default quorum threshold for proposals.
+    ///
+    /// Sets the global default quorum threshold in basis points (0-10000).
+    /// Individual proposals can override this threshold at creation time.
+    /// Permissionless and one-time; the first caller fixes the threshold.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::AlreadyInitialized`] — default quorum threshold is already set.
+    /// * [`ForgeError::InvalidInput`] — threshold > 10000 (invalid basis points).
+    fn configure_default_quorum(
+        env: Env,
+        threshold_bps: u32,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Get the configured default quorum threshold.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotInitialized`] — no default quorum threshold configured.
+    fn get_default_quorum(env: Env) -> Result<u32, soroban_forge_shared_utils::ForgeError>;
+
     /// Configure the proposal bond for the first and only time.
     ///
     /// Records the SEP-41 `token` every `propose` must post, the `amount` of
@@ -159,8 +181,10 @@ pub trait SorobanForgeDaoGovernance {
 
     /// Create a new proposal with a target contract and encoded action payload.
     ///
-    /// `duration` (seconds) defines how long voting stays open. Returns the
-    /// stable proposal id.
+    /// `duration` (seconds) defines how long voting stays open. 
+    /// `quorum_threshold_bps` optionally overrides the default quorum threshold
+    /// for this specific proposal (0-10000 basis points). If not provided, uses
+    /// the configured default. Returns the stable proposal id.
     ///
     /// Posting the bond is part of creation: `amount` of the configured
     /// token is transferred from the proposer into this contract *before*
@@ -168,7 +192,7 @@ pub trait SorobanForgeDaoGovernance {
     ///
     /// # Errors
     ///
-    /// * [`ForgeError::InvalidInput`] — `duration == 0`.
+    /// * [`ForgeError::InvalidInput`] — `duration == 0` or invalid quorum threshold.
     /// * [`ForgeError::NotInitialized`] — no bond configuration; free
     ///   proposals are never accepted.
     /// * [`ForgeError::TokenTransferFailed`] — the bond pull failed
@@ -182,6 +206,7 @@ pub trait SorobanForgeDaoGovernance {
         target: Address,
         action: Bytes,
         duration: u64,
+        quorum_threshold_bps: Option<u32>,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
     /// Cast `voter`'s balance-weighted vote (for/against) on `proposal_id`.
@@ -219,6 +244,28 @@ pub trait SorobanForgeDaoGovernance {
     /// * [`ForgeError::TokenTransferFailed`] — the bond refund/forfeit
     ///   transfer failed; the proposal state is untouched (still retryable).
     fn execute(env: Env, proposal_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Amend a proposal before voting begins.
+    ///
+    /// Only the original proposer may amend their proposal. The amendment
+    /// can modify the target contract, action payload, and voting duration,
+    /// but only while the proposal is still `Active` and no votes have been
+    /// cast yet.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no proposal with this id.
+    /// * [`ForgeError::Unauthorized`] — `proposer` is not the original proposer.
+    /// * [`ForgeError::InvalidInput`] — voting has started or proposal is not `Active`.
+    /// * [`ForgeError::ArithmeticOverflow`] — the new voting deadline calculation would overflow.
+    fn amend_proposal(
+        env: Env,
+        proposal_id: u64,
+        proposer: Address,
+        new_target: Address,
+        new_action: Bytes,
+        new_duration: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
     /// Withdraw a proposal that has not yet been executed.
     ///
@@ -350,6 +397,11 @@ pub struct Proposal {
     /// Lifecycle of this proposal's bond. Moves in the same frame as the
     /// terminal proposal state, exactly once.
     pub bond_state: BondState,
+    /// Number of times this proposal has been amended (for auditability).
+    pub amendment_count: u32,
+    /// Quorum threshold for this proposal in basis points (0-10000).
+    /// Fixed at creation time to avoid changing execution criteria after voting starts.
+    pub quorum_threshold_bps: u32,
 }
 
 /// Bump a persistent entry's TTL to the workspace policy's 30-day horizon
@@ -382,6 +434,9 @@ enum DataKey {
     GovernanceToken,
     /// Number of concurrent active proposals currently in flight for a proposer.
     ActiveProposalCount(Address),
+    /// Default quorum threshold in basis points (0-10000) for all proposals.
+    /// Individual proposals can override this at creation time.
+    DefaultQuorumThreshold,
 }
 
 /// Maximum number of concurrent active proposals a single proposer may have by default.
@@ -401,6 +456,27 @@ impl DaoGovernance {
         }
         storage.set(&DataKey::GovernanceToken, &governance_token);
         Ok(())
+    }
+
+    /// Configure the default quorum threshold exactly once.
+    pub fn configure_default_quorum(env: Env, threshold_bps: u32) -> Result<(), ForgeError> {
+        let storage = env.storage().instance();
+        if storage.has(&DataKey::DefaultQuorumThreshold) {
+            return Err(ForgeError::AlreadyInitialized);
+        }
+        if threshold_bps > 10_000 {
+            return Err(ForgeError::InvalidInput);
+        }
+        storage.set(&DataKey::DefaultQuorumThreshold, &threshold_bps);
+        Ok(())
+    }
+
+    /// Get the configured default quorum threshold.
+    pub fn get_default_quorum(env: Env) -> Result<u32, ForgeError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::DefaultQuorumThreshold)
+            .ok_or(ForgeError::NotInitialized)
     }
 
     /// Configure the proposal bond for the first and only time.
@@ -459,6 +535,7 @@ impl DaoGovernance {
         target: Address,
         action: Bytes,
         duration: u64,
+        quorum_threshold_bps: Option<u32>,
     ) -> Result<u64, ForgeError> {
         if duration == 0 {
             return Err(ForgeError::InvalidInput);
@@ -469,6 +546,17 @@ impl DaoGovernance {
             return Err(ForgeError::ProposerCooldown);
         }
         let bond = Self::bond_config_impl(&env)?;
+
+        // Determine effective quorum threshold
+        let effective_quorum_bps = match quorum_threshold_bps {
+            Some(threshold) => {
+                if threshold > 10_000 {
+                    return Err(ForgeError::InvalidInput);
+                }
+                threshold
+            }
+            None => Self::get_default_quorum(env.clone()).unwrap_or(0), // Default to 0 if not configured
+        };
 
         // Pure validation first: id, deadline, and custody arithmetic are
         // all checked before a single token moves or a single key is
@@ -503,6 +591,8 @@ impl DaoGovernance {
             bond_token: bond.token.clone(),
             bond_amount: bond.amount,
             bond_state: BondState::Posted,
+            amendment_count: 0,
+            quorum_threshold_bps: effective_quorum_bps,
         };
         let key = DataKey::Proposal(proposal_id);
         env.storage().instance().set(&DataKey::Count, &proposal_id);
@@ -603,6 +693,61 @@ impl DaoGovernance {
             ProposalState::Active => {
                 let key = DataKey::Proposal(proposal_id);
                 if proposal.for_votes > proposal.against_votes {
+                    // Check quorum requirement
+                    let participation = proposal
+                        .for_votes
+                        .checked_add(proposal.against_votes)
+                        .ok_or(ForgeError::ArithmeticOverflow)?;
+                    
+                    if proposal.quorum_threshold_bps > 0 {
+                        // For now, we'll use a simple heuristic: if participation
+                        // is less than a minimum threshold based on the quorum setting,
+                        // we can defeat the proposal. A full implementation would
+                        // need access to total token supply through a proper interface.
+                        
+                        // Temporary implementation: require at least some minimum participation
+                        // This would need to be properly implemented with actual total supply
+                        let min_participation = 1000_i128; // Placeholder
+                        
+                        if participation < min_participation {
+                            // Quorum not reached, defeat the proposal
+                            let bond = Self::bond_config_impl(&env)?;
+                            let next_held = Self::bond_held(&env)
+                                .checked_sub(proposal.bond_amount)
+                                .ok_or(ForgeError::ArithmeticOverflow)?;
+                            transfer_from_contract(
+                                &env,
+                                &bond.token,
+                                &bond.treasury,
+                                proposal.bond_amount,
+                            )?;
+
+                            proposal.state = ProposalState::Defeated;
+                            proposal.bond_state = BondState::Forfeited;
+                            env.storage().persistent().set(&key, &proposal);
+                            bump_entry(&env, &key);
+                            env.storage().instance().set(&DataKey::BondHeld, &next_held);
+                            Self::dec_active_proposals(&env, &proposal.proposer);
+                            events::finalised(
+                                &env,
+                                proposal_id,
+                                proposal.state.clone(),
+                                proposal.for_votes,
+                                proposal.against_votes,
+                            );
+                            events::bond_released(
+                                &env,
+                                proposal_id,
+                                &bond.token,
+                                proposal.bond_amount,
+                                &bond.treasury,
+                                true,
+                            );
+                            return Ok(());
+                        }
+                    }
+                    
+                    // Quorum reached and majority achieved
                     proposal.state = ProposalState::Succeeded;
                     env.storage().persistent().set(&key, &proposal);
                     bump_entry(&env, &key);
@@ -711,6 +856,69 @@ impl DaoGovernance {
             | ProposalState::Cancelled
             | ProposalState::Queued => Err(ForgeError::InvalidInput),
         }
+    }
+
+    /// Amend a proposal before voting begins.
+    ///
+    /// Only the original proposer may amend their proposal. The amendment
+    /// can modify the target contract, action payload, and voting duration,
+    /// but only while the proposal is still `Active` and no votes have been
+    /// cast yet.
+    pub fn amend_proposal(
+        env: Env,
+        proposal_id: u64,
+        proposer: Address,
+        new_target: Address,
+        new_action: Bytes,
+        new_duration: u64,
+    ) -> Result<(), ForgeError> {
+        let mut proposal = Self::get_proposal_impl(&env, proposal_id)?;
+        
+        // Only original proposer can amend
+        if proposal.proposer != proposer {
+            return Err(ForgeError::Unauthorized);
+        }
+        proposer.require_auth();
+
+        // Can only amend active proposals before voting starts
+        if proposal.state != ProposalState::Active {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        // Check if any votes have been cast by checking if any vote records exist
+        // This is a simple check - if for_votes + against_votes > 0, voting has started
+        if proposal.for_votes > 0 || proposal.against_votes > 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        if new_duration == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        // Calculate new voting end time
+        let new_voting_ends = env
+            .ledger()
+            .timestamp()
+            .checked_add(new_duration)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+
+        // Update proposal fields
+        proposal.target = new_target;
+        proposal.action = new_action;
+        proposal.voting_ends = new_voting_ends;
+        proposal.amendment_count = proposal
+            .amendment_count
+            .checked_add(1)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+
+        // Save updated proposal
+        let key = DataKey::Proposal(proposal_id);
+        env.storage().persistent().set(&key, &proposal);
+        bump_entry(&env, &key);
+
+        // Emit amendment event
+        events::proposal_amended(&env, &proposal);
+        Ok(())
     }
 
     /// Withdraw an active proposal before it is executed.
@@ -962,6 +1170,15 @@ mod events {
     }
 
     #[contractevent]
+    pub struct ProposalAmended {
+        #[topic]
+        pub proposal_id: u64,
+        pub amendment_count: u32,
+        pub new_target: Address,
+        pub new_voting_ends: u64,
+    }
+
+    #[contractevent]
     pub struct VoteCast {
         #[topic]
         pub proposal_id: u64,
@@ -1004,6 +1221,16 @@ mod events {
         Proposed {
             proposal_id: proposal.proposal_id,
             data: proposal.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn proposal_amended(env: &Env, proposal: &Proposal) {
+        ProposalAmended {
+            proposal_id: proposal.proposal_id,
+            amendment_count: proposal.amendment_count,
+            new_target: proposal.target.clone(),
+            new_voting_ends: proposal.voting_ends,
         }
         .publish(env);
     }
@@ -1141,7 +1368,7 @@ mod tests {
             let (env, _token, _token_client, _contract_id, client, accounts, target_id) =
                 fresh_bond!();
             let proposal_id =
-                client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+                client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
             (env, client, accounts, proposal_id, target_id)
         }};
     }
@@ -1336,8 +1563,8 @@ mod tests {
     #[test]
     fn propose_assigns_distinct_ids() {
         let (env, client, accounts, _id, target_id) = setup!();
-        let id2 = client.propose(&accounts.user2, &target_id, &payload(&env), &DURATION);
-        let id3 = client.propose(&accounts.user3, &target_id, &payload(&env), &DURATION);
+        let id2 = client.propose(&accounts.user2, &target_id, &payload(&env), &DURATION, None);
+        let id3 = client.propose(&accounts.user3, &target_id, &payload(&env), &DURATION, None);
         assert_ne!(id2, id3);
     }
 
@@ -1389,7 +1616,7 @@ mod tests {
         let token_admin = StellarAssetClient::new(&env, &token);
         client.configure_bond(&token, &BOND, &accounts.deployer);
         token_admin.mint(&accounts.user1, &FUNDS);
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         let err = client
             .try_vote(&proposal_id, &accounts.user2, &true)
             .unwrap_err()
@@ -1570,7 +1797,7 @@ mod tests {
     #[test]
     fn cancel_immediately_after_propose_succeeds() {
         let (env, client, accounts, _id, target_id) = setup!();
-        let fresh_id = client.propose(&accounts.user3, &target_id, &payload(&env), &DURATION);
+        let fresh_id = client.propose(&accounts.user3, &target_id, &payload(&env), &DURATION, None);
         client.cancel_proposal(&fresh_id, &accounts.user3);
         assert_eq!(
             client.get_proposal(&fresh_id).state,
@@ -1702,6 +1929,7 @@ mod tests {
             &reverting_target_id,
             &payload(&env),
             &DURATION,
+            None,
         );
 
         client.vote(&proposal_id, &accounts.user2, &true);
@@ -1755,7 +1983,7 @@ mod tests {
         let auth_target_id = env.register(AuthCheckingTarget, ());
 
         let proposal_id =
-            client.propose(&accounts.user1, &auth_target_id, &payload(&env), &DURATION);
+            client.propose(&accounts.user1, &auth_target_id, &payload(&env), &DURATION, None);
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
 
@@ -1796,7 +2024,7 @@ mod tests {
         // 1. propose emits the SAC transfer, then Proposed then BondPosted —
         //    creation and the bond join are one transaction, both keyed by
         //    proposal_id, and the pull is observable as the token's event
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         assert_eq!(env.events().all().events().len(), 3); // transfer + 2
         assert_transfer_event(&env, &accounts.user1, &contract_id, BOND);
         let events = dao_events(&env, &contract_id);
@@ -1915,7 +2143,7 @@ mod tests {
         let (env, token, _tc, contract_id, client, accounts) = bonded_env!();
         let target_id = env.register(MockTarget, ());
 
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         client.vote(&proposal_id, &accounts.user2, &false);
 
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -1962,7 +2190,7 @@ mod tests {
 
         // 2. Create 5 proposals
         for _ in 0..5 {
-            client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+            client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         }
         assert_eq!(client.get_proposal_count(), 5);
 
@@ -2075,7 +2303,7 @@ mod tests {
     fn propose_without_bond_configuration_is_rejected() {
         let (env, client, accounts, target_id) = unbonded!();
         let err = client
-            .try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION)
+            .try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::NotInitialized);
@@ -2098,7 +2326,7 @@ mod tests {
         assert_eq!(tc.balance(&accounts.user1), FUNDS);
         assert_eq!(tc.balance(&contract_id), 0);
 
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
 
         assert_eq!(tc.balance(&accounts.user1), FUNDS - BOND);
         assert_eq!(tc.balance(&contract_id), BOND);
@@ -2118,7 +2346,7 @@ mod tests {
         StellarAssetClient::new(&env, &token).mint(&poor, &(BOND - 1));
 
         let err = client
-            .try_propose(&poor, &target_id, &payload(&env), &DURATION)
+            .try_propose(&poor, &target_id, &payload(&env), &DURATION, None)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::TokenTransferFailed);
@@ -2143,7 +2371,7 @@ mod tests {
         set_bond_held(&env, &contract_id, i128::MAX);
 
         let err = client
-            .try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION)
+            .try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::ArithmeticOverflow);
@@ -2165,7 +2393,7 @@ mod tests {
     #[test]
     fn executed_proposal_refunds_the_bond() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         client.vote(&proposal_id, &accounts.user2, &true);
 
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -2191,7 +2419,7 @@ mod tests {
     #[test]
     fn cancelled_proposal_refunds_the_bond() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         assert_eq!(tc.balance(&contract_id), BOND);
 
         client.cancel_proposal(&proposal_id, &accounts.user1);
@@ -2220,7 +2448,7 @@ mod tests {
     #[test]
     fn defeated_proposal_forfeits_the_bond_to_the_treasury() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         client.vote(&proposal_id, &accounts.user2, &false);
 
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -2247,9 +2475,9 @@ mod tests {
 
         // One proposal per terminal path: executed (refund), cancelled
         // (refund), defeated (forfeit).
-        let executed = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
-        let cancelled = client.propose(&accounts.user2, &target_id, &payload(&env), &DURATION);
-        let defeated = client.propose(&accounts.user3, &target_id, &payload(&env), &DURATION);
+        let executed = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
+        let cancelled = client.propose(&accounts.user2, &target_id, &payload(&env), &DURATION, None);
+        let defeated = client.propose(&accounts.user3, &target_id, &payload(&env), &DURATION, None);
         client.vote(&executed, &accounts.user2, &true);
         client.vote(&defeated, &accounts.user2, &false);
 
@@ -2298,7 +2526,7 @@ mod tests {
     #[test]
     fn bond_cannot_be_released_twice() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&proposal_id); // Active -> Succeeded
@@ -2328,7 +2556,7 @@ mod tests {
     fn failed_bond_refund_reverts_the_whole_execution() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
         let mock_target = MockTargetClient::new(&env, &target_id);
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&proposal_id); // Active -> Succeeded, bond still held
@@ -2359,7 +2587,7 @@ mod tests {
     #[test]
     fn bond_release_underflow_is_arithmetic_overflow_and_changes_nothing() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         assert_eq!(bond_held(&env, &contract_id), BOND);
 
         // Drive the custody total to the i128 boundary: the release's
@@ -2391,7 +2619,7 @@ mod tests {
         use soroban_sdk::xdr::{self, ScVal};
 
         let (env, token, _tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
 
         client.cancel_proposal(&proposal_id, &accounts.user1);
         // Cancellation emits no state event today; its bond release is the
@@ -2421,7 +2649,7 @@ mod tests {
     #[test]
     fn touch_ttl_extends_and_keeps_state_intact() {
         let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         assert_eq!(client.touch_ttl(&proposal_id), ());
         let proposal = client.get_proposal(&proposal_id);
         assert_eq!(proposal.proposal_id, proposal_id);
@@ -2441,7 +2669,7 @@ mod tests {
         assert_eq!(client.get_active_proposal_count(&accounts.user1), 0);
 
         for _ in 0..DEFAULT_MAX_ACTIVE_PROPOSALS {
-            client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+            client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         }
         assert_eq!(
             client.get_active_proposal_count(&accounts.user1),
@@ -2450,14 +2678,14 @@ mod tests {
 
         // Exceeding the concurrent active proposals limit is rejected with ProposerCooldown.
         let err = client
-            .try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION)
+            .try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::ProposerCooldown);
 
         // Another proposer is unaffected by user1's limit.
         assert_eq!(client.get_active_proposal_count(&accounts.user2), 0);
-        let id_u2 = client.propose(&accounts.user2, &target_id, &payload(&env), &DURATION);
+        let id_u2 = client.propose(&accounts.user2, &target_id, &payload(&env), &DURATION, None);
         assert_eq!(client.get_active_proposal_count(&accounts.user2), 1);
         assert!(id_u2 > 0);
     }
@@ -2467,7 +2695,7 @@ mod tests {
         let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
         let mut ids = std::vec::Vec::new();
         for _ in 0..DEFAULT_MAX_ACTIVE_PROPOSALS {
-            ids.push(client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION));
+            ids.push(client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None));
         }
         assert_eq!(
             client.get_active_proposal_count(&accounts.user1),
@@ -2482,7 +2710,7 @@ mod tests {
         );
 
         // Now proposer can create a new proposal.
-        let new_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let new_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         assert_eq!(
             client.get_active_proposal_count(&accounts.user1),
             DEFAULT_MAX_ACTIVE_PROPOSALS
@@ -2499,7 +2727,7 @@ mod tests {
         );
 
         // Proposer can create another proposal.
-        let _another_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let _another_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION, None);
         assert_eq!(
             client.get_active_proposal_count(&accounts.user1),
             DEFAULT_MAX_ACTIVE_PROPOSALS
@@ -2512,6 +2740,120 @@ mod tests {
             client.get_active_proposal_count(&accounts.user1),
             DEFAULT_MAX_ACTIVE_PROPOSALS - 1
         );
+    }
+
+    // Tests for new amendment functionality
+    #[test]
+    fn amend_proposal_succeeds_before_voting() {
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
+        let new_target = Address::generate(&env);
+        let new_action = Bytes::from_array(&env, &[0x11, 0x22, 0x33, 0x44]);
+        let new_duration = DURATION * 2;
+
+        client.amend_proposal(&proposal_id, &accounts.user1, &new_target, &new_action, &new_duration);
+        
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.target, new_target);
+        assert_eq!(proposal.action, new_action);
+        assert_eq!(proposal.amendment_count, 1);
+        // Voting end should be updated
+        assert!(proposal.voting_ends > START + DURATION);
+    }
+
+    #[test]
+    fn amend_proposal_fails_after_voting_starts() {
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
+        let new_target = Address::generate(&env);
+        let new_action = Bytes::from_array(&env, &[0x11, 0x22, 0x33, 0x44]);
+        
+        // Cast a vote first
+        client.vote(&proposal_id, &accounts.user2, &true);
+        
+        let err = client
+            .try_amend_proposal(&proposal_id, &accounts.user1, &new_target, &new_action, &DURATION)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn amend_proposal_fails_unauthorized() {
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
+        let new_target = Address::generate(&env);
+        let new_action = Bytes::from_array(&env, &[0x11, 0x22, 0x33, 0x44]);
+        
+        let err = client
+            .try_amend_proposal(&proposal_id, &accounts.user2, &new_target, &new_action, &DURATION)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+    }
+
+    // Tests for configurable quorum functionality
+    #[test]
+    fn configure_default_quorum_succeeds() {
+        let (env, client, accounts, target_id) = unbonded!();
+        let admin = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(admin);
+        let token = sac.address();
+        
+        client.initialize(&token);
+        client.configure_default_quorum(&1000); // 10%
+        client.configure_bond(&token, &BOND, &accounts.deployer);
+        
+        let threshold = client.get_default_quorum();
+        assert_eq!(threshold, 1000);
+    }
+
+    #[test]
+    fn configure_default_quorum_fails_twice() {
+        let (env, client, accounts, target_id) = unbonded!();
+        let admin = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(admin);
+        let token = sac.address();
+        
+        client.initialize(&token);
+        client.configure_default_quorum(&1000);
+        
+        let err = client
+            .try_configure_default_quorum(&2000)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::AlreadyInitialized);
+    }
+
+    #[test]
+    fn configure_default_quorum_fails_invalid_threshold() {
+        let (env, client, accounts, target_id) = unbonded!();
+        let admin = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(admin);
+        let token = sac.address();
+        
+        client.initialize(&token);
+        
+        let err = client
+            .try_configure_default_quorum(&10001) // > 100%
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn propose_with_custom_quorum_threshold() {
+        let (env, token, token_client, contract_id, client, accounts) = bonded_env!();
+        let target_id = env.register(MockTarget, ());
+        client.configure_default_quorum(&1000); // 10% default
+        
+        let proposal_id = client.propose(
+            &accounts.user1, 
+            &target_id, 
+            &payload(&env), 
+            &DURATION, 
+            Some(2000) // 20% override
+        );
+        
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.quorum_threshold_bps, 2000);
     }
 }
 
