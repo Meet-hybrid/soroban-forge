@@ -65,7 +65,11 @@ Persistent entries have their own TTL cost: a multi-sig transaction or DAO
 proposal that sits below threshold / waiting for votes still needs its TTL
 extended. The permissionless keepers (`touch_tx_ttl`, `touch_ttl`) cover
 this, but who runs them is an operational question — off-chain keepers must
-visit live transactions and proposals within the 30-day horizon.
+visit live transactions and proposals within the 30-day horizon. (Multi-sig
+transactions now support optional per-tx expiry deadlines which lazily evaluate
+to `Expired`, self-cleaning stale pending proposals without external keepers, and
+DAO governance limits concurrent proposals to at most 5 active proposals per
+proposer.)
 
 ### 4. No events in vesting contract
 

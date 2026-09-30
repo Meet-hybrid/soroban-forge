@@ -266,6 +266,9 @@ pub trait SorobanForgeDaoGovernance {
     ///
     /// * [`ForgeError::NotFound`] — no proposal with this id.
     fn touch_ttl(env: Env, proposal_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read how many active proposals `proposer` currently has in flight (read-only view).
+    fn get_active_proposal_count(env: Env, proposer: Address) -> u32;
 }
 
 /// Lifecycle state of a governance proposal.
@@ -377,7 +380,12 @@ enum DataKey {
     BondHeld,
     /// Immutable SEP-41 governance token used to weight votes (instance storage).
     GovernanceToken,
+    /// Number of concurrent active proposals currently in flight for a proposer.
+    ActiveProposalCount(Address),
 }
+
+/// Maximum number of concurrent active proposals a single proposer may have by default.
+pub const DEFAULT_MAX_ACTIVE_PROPOSALS: u32 = 5;
 
 /// The deployable DAO governance contract.
 #[contract]
@@ -456,6 +464,10 @@ impl DaoGovernance {
             return Err(ForgeError::InvalidInput);
         }
         proposer.require_auth();
+        let active_count = Self::active_proposal_count(&env, &proposer);
+        if active_count >= DEFAULT_MAX_ACTIVE_PROPOSALS {
+            return Err(ForgeError::ProposerCooldown);
+        }
         let bond = Self::bond_config_impl(&env)?;
 
         // Pure validation first: id, deadline, and custody arithmetic are
@@ -481,7 +493,7 @@ impl DaoGovernance {
 
         let proposal = Proposal {
             proposal_id,
-            proposer,
+            proposer: proposer.clone(),
             target,
             action,
             for_votes: 0,
@@ -497,6 +509,7 @@ impl DaoGovernance {
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
         env.storage().instance().set(&DataKey::BondHeld, &next_held);
+        Self::inc_active_proposals(&env, &proposer)?;
         events::proposed(&env, &proposal);
         events::bond_posted(&env, proposal_id, &bond.token, bond.amount);
         Ok(proposal_id)
@@ -621,6 +634,7 @@ impl DaoGovernance {
                     env.storage().persistent().set(&key, &proposal);
                     bump_entry(&env, &key);
                     env.storage().instance().set(&DataKey::BondHeld, &next_held);
+                    Self::dec_active_proposals(&env, &proposal.proposer);
                     events::finalised(
                         &env,
                         proposal_id,
@@ -674,6 +688,7 @@ impl DaoGovernance {
                 env.storage().persistent().set(&key, &proposal);
                 bump_entry(&env, &key);
                 env.storage().instance().set(&DataKey::BondHeld, &next_held);
+                Self::dec_active_proposals(&env, &proposal.proposer);
                 events::finalised(
                     &env,
                     proposal_id,
@@ -740,6 +755,7 @@ impl DaoGovernance {
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
         env.storage().instance().set(&DataKey::BondHeld, &next_held);
+        Self::dec_active_proposals(&env, &proposal.proposer);
         events::bond_released(
             &env,
             proposal_id,
@@ -844,6 +860,43 @@ impl DaoGovernance {
         }
         bump_entry(&env, &key);
         Ok(())
+    }
+
+    /// Read how many active proposals `proposer` currently has in flight (read-only view).
+    pub fn get_active_proposal_count(env: Env, proposer: Address) -> u32 {
+        Self::active_proposal_count(&env, &proposer)
+    }
+
+    fn active_proposal_count(env: &Env, proposer: &Address) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ActiveProposalCount(proposer.clone()))
+            .unwrap_or(0)
+    }
+
+    fn inc_active_proposals(env: &Env, proposer: &Address) -> Result<(), ForgeError> {
+        let current = Self::active_proposal_count(env, proposer);
+        let next = current
+            .checked_add(1)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveProposalCount(proposer.clone()), &next);
+        Ok(())
+    }
+
+    fn dec_active_proposals(env: &Env, proposer: &Address) {
+        let current = Self::active_proposal_count(env, proposer);
+        let next = current.saturating_sub(1);
+        if next == 0 {
+            env.storage()
+                .instance()
+                .remove(&DataKey::ActiveProposalCount(proposer.clone()));
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::ActiveProposalCount(proposer.clone()), &next);
+        }
     }
 }
 
@@ -2380,6 +2433,85 @@ mod tests {
         let (_env, _token, _tc, _contract_id, client, _accounts, _target_id) = fresh_bond!();
         let err = client.try_touch_ttl(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn proposer_cooldown_enforced_at_boundary() {
+        let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+        assert_eq!(client.get_active_proposal_count(&accounts.user1), 0);
+
+        for _ in 0..DEFAULT_MAX_ACTIVE_PROPOSALS {
+            client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        }
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS
+        );
+
+        // Exceeding the concurrent active proposals limit is rejected with ProposerCooldown.
+        let err = client
+            .try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::ProposerCooldown);
+
+        // Another proposer is unaffected by user1's limit.
+        assert_eq!(client.get_active_proposal_count(&accounts.user2), 0);
+        let id_u2 = client.propose(&accounts.user2, &target_id, &payload(&env), &DURATION);
+        assert_eq!(client.get_active_proposal_count(&accounts.user2), 1);
+        assert!(id_u2 > 0);
+    }
+
+    #[test]
+    fn proposer_cooldown_decrements_on_cancel_and_execute() {
+        let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+        let mut ids = std::vec::Vec::new();
+        for _ in 0..DEFAULT_MAX_ACTIVE_PROPOSALS {
+            ids.push(client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION));
+        }
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS
+        );
+
+        // Cancel one proposal: active count decreases by 1.
+        client.cancel_proposal(&ids[0], &accounts.user1);
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS - 1
+        );
+
+        // Now proposer can create a new proposal.
+        let new_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS
+        );
+        client.vote(&new_id, &accounts.user2, &true);
+
+        // Defeat one proposal: vote against, advance past deadline, execute.
+        client.vote(&ids[1], &accounts.user2, &false);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&ids[1]); // becomes Defeated
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS - 1
+        );
+
+        // Proposer can create another proposal.
+        let _another_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS
+        );
+
+        // Execute new_id: since vote was cast and deadline elapsed, finalize and dispatch.
+        client.execute(&new_id); // Active -> Succeeded
+        client.execute(&new_id); // Succeeded -> Executed
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS - 1
+        );
     }
 }
 

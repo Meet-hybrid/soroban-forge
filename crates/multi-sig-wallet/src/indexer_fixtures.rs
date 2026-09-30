@@ -58,7 +58,7 @@ fn generate() -> Value {
     client.initialize(&owners, &2);
 
     let payload = Bytes::from_slice(&env, b"fixture");
-    let tx_id = client.submit(&owner_a, &target, &payload);
+    let tx_id = client.submit(&owner_a, &target, &payload, &None);
     let mut events = std::vec::Vec::new();
     capture(&env, &contract, &mut events);
     client.confirm(&tx_id, &owner_b);
