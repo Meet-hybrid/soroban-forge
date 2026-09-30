@@ -1070,6 +1070,7 @@ impl MultiSigWallet {
             .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
         bump_entry(&env, &DataKey::Tx(tx_id));
+        events::rejected(&env, &wallet_tx);
         Ok(())
     }
 
@@ -2101,6 +2102,14 @@ mod events {
     }
 
     #[contractevent]
+    pub struct TxRejected {
+        #[topic]
+        pub tx_id: u64,
+        pub signer: Address,
+        pub rejections_count: u32,
+    }
+
+    #[contractevent]
     pub struct TxExecuted {
         #[topic]
         pub tx_id: u64,
@@ -2130,6 +2139,15 @@ mod events {
             tx_id: tx.tx_id,
             signer: tx.confirmations.get_unchecked(tx.confirmations.len() - 1),
             confirmations_count: tx.confirmations.len(),
+        }
+        .publish(env);
+    }
+
+    pub fn rejected(env: &Env, tx: &WalletTx) {
+        TxRejected {
+            tx_id: tx.tx_id,
+            signer: tx.rejections.get_unchecked(tx.rejections.len() - 1),
+            rejections_count: tx.rejections.len(),
         }
         .publish(env);
     }
@@ -2638,6 +2656,56 @@ mod tests {
         let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
         client.reject(&tx_id, &accounts.user2);
         client.reject(&tx_id, &accounts.user3);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
+    }
+
+    #[test]
+    fn reject_emits_tx_rejected_event() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
+        assert_eq!(env.events().all().events().len(), 1);
+
+        client.reject(&tx_id, &accounts.user2);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_rejected")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "signer")).unwrap()),
+            accounts.user2
+        );
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "rejections_count")).unwrap()
+            ),
+            1
+        );
+
+        client.reject(&tx_id, &accounts.user3);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_rejected")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "signer")).unwrap()),
+            accounts.user3
+        );
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "rejections_count")).unwrap()
+            ),
+            2
+        );
         assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
     }
 

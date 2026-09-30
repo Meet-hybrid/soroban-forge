@@ -181,6 +181,16 @@ fn confirm_sequence() -> impl Strategy<Value = std::vec::Vec<usize>> {
     prop::collection::vec(confirm_action(), 0..=8)
 }
 
+/// A single signal action: `(is_confirm, owner_pool_index)`.
+fn signal_action() -> impl Strategy<Value = (bool, usize)> {
+    (any::<bool>(), 0usize..OWNER_POOL_SIZE)
+}
+
+/// A bounded sequence of up to 10 signal actions (confirms and rejects).
+fn signal_sequence() -> impl Strategy<Value = std::vec::Vec<(bool, usize)>> {
+    prop::collection::vec(signal_action(), 0..=10)
+}
+
 // -----------------------------------------------------------------------
 // P1 — Threshold enforcement
 // -----------------------------------------------------------------------
@@ -425,6 +435,103 @@ proptest! {
                     "stored confirmation from owner slot {pos} was never successfully confirmed"
                 );
             }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// P4 — Rejection threshold and execution veto
+// -----------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// For any sequence of confirm and reject signals:
+    /// 1. An owner may signal at most once, in one direction.
+    /// 2. Any rejection blocks execution, even if confirmations meet or exceed threshold.
+    /// 3. When rejections meet threshold (2), tx flips to terminal `Rejected` status.
+    /// 4. Once `Rejected`, further confirms, rejects, and executes all fail with `InvalidInput`.
+    #[test]
+    fn p4_rejection_blocks_execution_and_threshold_is_terminal(
+        actions in signal_sequence(),
+    ) {
+        let w = setup_world();
+        let tx_id = w.submit();
+
+        let mut confirmed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        let mut rejected: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+
+        for (is_confirm, idx) in &actions {
+            let owner = w.owner(*idx).clone();
+            let is_terminal = rejected.len() >= 2;
+
+            if *is_confirm {
+                let res = w.client.try_confirm(&tx_id, &owner);
+                if is_terminal || rejected.contains(idx) || confirmed.contains(idx) {
+                    prop_assert!(
+                        matches!(res, Err(Ok(ForgeError::InvalidInput))),
+                        "confirm must fail with InvalidInput when terminal, rejected, or already confirmed (slot={idx})"
+                    );
+                } else {
+                    prop_assert!(
+                        matches!(res, Ok(Ok(()))),
+                        "first-time confirm from un-signaled owner must succeed (slot={idx})"
+                    );
+                    confirmed.insert(*idx);
+                }
+            } else {
+                let res = w.client.try_reject(&tx_id, &owner);
+                if is_terminal || confirmed.contains(idx) || rejected.contains(idx) {
+                    prop_assert!(
+                        matches!(res, Err(Ok(ForgeError::InvalidInput))),
+                        "reject must fail with InvalidInput when terminal, confirmed, or already rejected (slot={idx})"
+                    );
+                } else {
+                    prop_assert!(
+                        matches!(res, Ok(Ok(()))),
+                        "first-time reject from un-signaled owner must succeed (slot={idx})"
+                    );
+                    rejected.insert(*idx);
+                }
+            }
+
+            // Check post-condition on transaction record
+            let tx = w.client.try_get_tx(&tx_id).expect("outer ok").expect("contract ok");
+            prop_assert_eq!(tx.confirmations.len(), confirmed.len() as u32);
+            prop_assert_eq!(tx.rejections.len(), rejected.len() as u32);
+
+            if rejected.len() >= 2 {
+                prop_assert_eq!(tx.status, TxStatus::Rejected);
+            } else {
+                prop_assert_eq!(tx.status, TxStatus::Pending);
+            }
+
+            // If there is ANY rejection, execute must fail
+            if !rejected.is_empty() {
+                let exec = w.client.try_execute(&tx_id);
+                prop_assert!(
+                    matches!(exec, Err(Ok(ForgeError::InvalidInput))),
+                    "execute must be rejected if rejections is not empty (rejected={}, confirmed={})",
+                    rejected.len(),
+                    confirmed.len()
+                );
+            }
+        }
+
+        // Final terminal / execute assertions
+        let exec = w.client.try_execute(&tx_id);
+        if rejected.is_empty() && confirmed.len() >= 2 {
+            prop_assert!(
+                matches!(exec, Ok(Ok(()))),
+                "execute must succeed when threshold met and zero rejections"
+            );
+            let tx = w.client.try_get_tx(&tx_id).expect("outer ok").expect("contract ok");
+            prop_assert_eq!(tx.status, TxStatus::Executed);
+        } else {
+            prop_assert!(
+                matches!(exec, Err(Ok(ForgeError::InvalidInput))),
+                "execute must fail if below threshold or any rejection exists"
+            );
         }
     }
 }

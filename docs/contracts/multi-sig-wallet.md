@@ -120,8 +120,17 @@ recorded balance.
 
 - `Pending` — Awaiting approvals; liveness view `is_live(tx_id)` reads `true`.
 - `Executed` — Threshold met and the transaction completed (terminal).
-- `Rejected` — Rejection threshold met (terminal).
+- `Rejected` — Rejection threshold met (terminal). Once rejected, further `confirm`, `reject`, and `execute` calls are refused (`ForgeError::InvalidInput`).
 - `Expired` — Expiry deadline reached before meeting approval threshold; evaluated lazily on read/access without requiring an external keeper.
+
+## Events
+
+The contract emits typed `#[contractevent]` lifecycle events:
+- `TxSubmitted` — topic `tx_id: u64`, data: `submitter: Address`, `payload_len: u32`.
+- `TxConfirmed` — topic `tx_id: u64`, data: `signer: Address`, `confirmations_count: u32`.
+- `TxRejected` — topic `tx_id: u64`, data: `signer: Address`, `rejections_count: u32`.
+- `TxExecuted` — topic `tx_id: u64`, data: `confirmations_count: u32`, `threshold: u32`.
+- `TxExpired` — topic `tx_id: u64`, data: `expired_at: u64`.
 
 ### Transaction Lifecycle and Expiry Semantics
 
