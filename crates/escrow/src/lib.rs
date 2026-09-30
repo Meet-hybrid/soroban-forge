@@ -785,7 +785,10 @@ impl Escrow {
             .created_at
             .checked_add(escrow.timeout)
             .ok_or(ForgeError::ArithmeticOverflow)?;
-let remaining = escrow.remaining();
+        if now <= deadline {
+            return Err(ForgeError::DeadlineReached);
+        }
+        let remaining = escrow.remaining();
         transfer_from_contract(&env, &escrow.token, &escrow.buyer, remaining)?;
 
         let mut refunded = escrow;
@@ -1231,13 +1234,6 @@ mod events {
     }
 
     /// Emitted by `refund_expired` when an expired escrow is swept by a keeper.
-    #[contractevent]
-    pub struct RefundExpired {
-        #[topic]
-        pub escrow_id: u64,
-        pub data: EscrowData,
-    }
-
     #[contractevent]
     pub struct RefundExpired {
         #[topic]
