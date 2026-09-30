@@ -42,10 +42,36 @@ pub struct DeployArgs {
 #[derive(Args, Debug, Clone)]
 pub struct NewArgs {
     /// Contract name (alphanumeric, hyphens, or underscores).
-    pub name: String,
+    ///
+    /// Optional when --interactive is used; the wizard will prompt for it.
+    #[arg(required_unless = "interactive")]
+    pub name: Option<String>,
     /// Destination directory path for the new contract.
     #[arg(short, long)]
     pub path: Option<std::path::PathBuf>,
+    /// Run the interactive scaffold wizard.
+    ///
+    /// When enabled, prompts for the project name, description, contract
+    /// templates to include, and optional features (events, TTL, testing).
+    /// When omitted, the command behaves as a non-interactive scaffolder.
+    #[arg(short, long, default_value_t = false)]
+    pub interactive: bool,
+    /// Bref description of the project (used in generated metadata).
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Contract templates to include (comma-separated); repeatable.
+    ///
+    /// Valid values: escrow, vesting, multisig, dao, subscription, marketplace.
+    #[arg(long = "contract", value_delimiter = ',', action = clap::ArgAction::Append)]
+    pub contracts: Vec<String>,
+    /// Optional features to enable (comma-separated); repeatable.
+    ///
+    /// Valid values: events, ttl, property-tests, negative-auth-tests.
+    #[arg(long = "feature", value_delimiter = ',', action = clap::ArgAction::Append)]
+    pub features: Vec<String>,
+    /// Overwrite existing files without prompting.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug, Clone)]
