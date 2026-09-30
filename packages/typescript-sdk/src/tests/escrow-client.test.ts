@@ -392,9 +392,9 @@ test("ForgeError is exported as a runtime object", () => {
   assert.ok(!Array.isArray(ForgeError));
 });
 
-test("ForgeError exposes 13 error codes (1–13)", () => {
+test("ForgeError exposes 15 error codes (1–15)", () => {
   const codes = Object.keys(ForgeError).map(Number).sort((a, b) => a - b);
-  assert.deepEqual(codes, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.deepEqual(codes, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
 });
 
 const EXPECTED_FORGE_ERRORS: Record<number, string> = {
@@ -411,6 +411,8 @@ const EXPECTED_FORGE_ERRORS: Record<number, string> = {
   11: "TokenTransferFailed",
   12: "ContractInvocationFailed",
   13: "WithdrawalLimitExceeded",
+  14: "SubscriptionPastDue",
+  15: "ProposerCooldown",
 };
 
 test("ForgeError messages match the documented error surface", () => {
