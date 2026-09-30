@@ -58,7 +58,13 @@ treasury at a terminal transition.
 | `claimable`                   | ✅ Implemented     | Read-only                                                                                                                                                                                                                            |
 | `get_status`                  | ✅ Implemented     | Read-only; derived from ledger time + claimed amount, so it is current between claims                                                                                                                                                |
 | `get_schedule`                | ✅ Implemented     | Read-only record view of the linear schedule (issue #125), mirroring `get_tranche_schedule` and the other crates' record views; `NotFound` for unknown ids and tranche ids; no auth, no state change; `claimed` reflects completed claims |
-| Revocation                    | ❌ Not implemented | `Revoked` status reserved                                                                                                                                                                                                            |
+| `reassign_beneficiary`        | ✅ Implemented     | Funder-only; snapshots vested value at the reassignment ledger, preserves the old beneficiary's vested-but-unclaimed balance, and leaves the original start/cliff/duration/total unchanged; unlimited and counted |
+| `claim_for` / `claimable_for` | ✅ Implemented     | Explicit beneficiary-scoped access for former assignments; frozen balances are keyed per schedule and beneficiary, while `claim` / `claimable` address the current beneficiary |
+| Revocation                    | ✅ Implemented     | Funder-only; freezes vesting at the revoke timestamp; reassignment is rejected after revocation, and prior frozen balances remain claimable if revocation follows reassignment |
+| Events                        | ✅ Implemented     | `BeneficiaryReassignedFrom` and `BeneficiaryReassignedTo` identify both parties and include vested-unclaimed amount and reassignment count |
+| Reassignment count            | ✅ Implemented     | Exposed in `VestingSchedule.reassignment_count` through `get_schedule` |
+| Storage                       | ✅ Instance-only   | Schedule-scoped former-beneficiary balances; linear schema additions are storage-breaking; no migration to persistent storage |
+| Tests                         | ✅ Implemented     | Exact same-ledger split, token settlement, schedule isolation, timeline invariants, auth rejection, event count, and revoke interaction |
 | `VestingSchedule.token` field | ✅ Wired           | Read by `claim` for the SEP-41 payout                                                                                                                                                                                                |
 
 ## Multi-Sig Wallet (`crates/multi-sig-wallet`)
@@ -141,7 +147,7 @@ treasury at a terminal transition.
 |---|---|---|
 | Checked arithmetic | ✅ Workspace-wide | Overflow-safe; vesting guards documented |
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, DAO governance, and marketplace royalties proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other two: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
-| Events | ✅ Escrow + Multi-Sig + DAO + Marketplace | Full lifecycle events on escrow, multi-sig wallet, DAO governance, and marketplace royalties |
+| Events | ✅ Escrow + Multi-Sig + DAO + Marketplace + Vesting | Full lifecycle events on escrow, multi-sig wallet, DAO governance, marketplace royalties, and vesting beneficiary reassignment |
 | Persistent storage + TTL | ✅ Escrow + Royalties + Multi-Sig + DAO | Per-record persistent entries with `touch_ttl`/`touch_tx_ttl` keepers on escrow, marketplace royalties (royalty + summary), multi-sig (transactions), and DAO (proposals); vesting and subscriptions remain instance-only. TTL policy constants + `bump_entry` helper consolidated in shared-utils (issue #127) and consumed by all four |
 | SEP-41 token settlement | ✅ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Transfers use transfer-before-state ordering; subscription pull-mode charges pay subscriber → provider, while opt-in prepaid subscriptions custody deposits and pay exact debits/refunds |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
@@ -149,7 +155,7 @@ treasury at a terminal transition.
 | TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
 | Provenance + verification | ✅ CLI | `soroban-forge verify` checks a WASM artifact / expected hash against a deterministic rebuild using `provenance-manifest.json` | 
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, and DAO governance proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other three: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
-| Events | ⚠️ Escrow + Multi-Sig + DAO | Full lifecycle events on escrow, multi-sig wallet, and DAO governance |
+| Events | ✅ Escrow + Multi-Sig + DAO + Marketplace + Vesting | Full lifecycle events on escrow, multi-sig wallet, DAO governance, marketplace royalties, and vesting beneficiary reassignment |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
 | SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Real transfers with transfer-before-state ordering on escrow, vesting, marketplace, DAO, and subscriptions; prepaid subscriptions add contract custody, exact balance debits, and cancellation refunds |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
