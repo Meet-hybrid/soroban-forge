@@ -55,4 +55,7 @@ pub enum ForgeError {
     /// can tell a lapsed billing state from an argument that was merely
     /// too early.
     SubscriptionPastDue = 14,
+    /// A proposer has reached the maximum allowed concurrent active proposals
+    /// or is within the proposer cooldown window.
+    ProposerCooldown = 15,
 }

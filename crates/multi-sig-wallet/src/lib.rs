@@ -277,9 +277,6 @@ use soroban_sdk::{
     Env, IntoVal, Symbol, Val, Vec,
 };
 
-/// Maximum number of ordered operations in one stored batch transaction.
-pub const MAX_BATCH_OPS: u32 = 10;
-
 /// Public interface for the Soroban Forge multi-signature wallet contract.
 #[contractclient(name = "SorobanForgeMultiSigWalletClient")]
 pub trait SorobanForgeMultiSigWallet {
@@ -328,13 +325,6 @@ pub trait SorobanForgeMultiSigWallet {
         fn_name: Symbol,
         args: Vec<Val>,
         expiry: Option<u64>,
-    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
-
-    /// Submit a bounded ordered batch as one threshold-approved transaction.
-    fn submit_batch(
-        env: Env,
-        submitter: Address,
-        operations: Vec<BatchOp>,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
     /// Record `signer`'s approval of `tx_id`.
@@ -703,17 +693,6 @@ pub enum TxKind {
     SetThreshold(u32),
     /// Typed cross-contract call.
     Call(Call),
-    /// Atomic ordered batch. Appended to preserve the existing XDR variants.
-    Batch(Vec<BatchOp>),
-}
-
-/// Operation allowed inside a batch. Owner-set changes and nested batches are deliberately excluded.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BatchOp {
-    Withdrawal(Withdrawal),
-    LimitChange(LimitChange),
-    Call(Call),
 }
 
 /// A typed cross-contract call record containing the target address,
@@ -1011,77 +990,6 @@ impl MultiSigWallet {
         Ok(tx_id)
     }
 
-    /// Submit one bounded batch and reserve its aggregate withdrawal usage.
-    pub fn submit_batch(
-        env: Env,
-        submitter: Address,
-        operations: Vec<BatchOp>,
-    ) -> Result<u64, ForgeError> {
-        if !Self::is_initialized(&env) {
-            return Err(ForgeError::NotInitialized);
-        }
-        if !Self::is_owner_impl(&env, &submitter) {
-            return Err(ForgeError::Unauthorized);
-        }
-        let count = operations.len();
-        if count == 0 || count > MAX_BATCH_OPS {
-            return Err(ForgeError::InvalidInput);
-        }
-        submitter.require_auth();
-        let mut simulated_limits: Vec<(Address, Option<WithdrawalLimit>)> = Vec::new(&env);
-        for operation in operations.iter() {
-            match operation {
-                BatchOp::Withdrawal(withdrawal) => {
-                    if withdrawal.amount <= 0 {
-                        return Err(ForgeError::InvalidInput);
-                    }
-                    // Repeated admissions are checked against the same
-                    // rolling window, so the limit applies to the aggregate.
-                    let mut limit = Self::withdrawal_limit_impl(&env, &withdrawal.token);
-                    for (token, replacement) in simulated_limits.iter() {
-                        if token == withdrawal.token {
-                            limit = replacement.clone();
-                        }
-                    }
-                    Self::admit_withdrawal_with_limit(
-                        &env,
-                        &withdrawal.token,
-                        withdrawal.amount,
-                        limit,
-                    )?;
-                }
-                BatchOp::LimitChange(LimitChange::Set(limit)) => {
-                    if limit.amount <= 0 || limit.window_seconds == 0 {
-                        return Err(ForgeError::InvalidInput);
-                    }
-                    simulated_limits.push_back((limit.token.clone(), Some(limit)));
-                }
-                BatchOp::LimitChange(LimitChange::Remove(token)) => {
-                    simulated_limits.push_back((token, None));
-                }
-                BatchOp::Call(_) => {}
-            }
-        }
-        let tx_id = Self::next_id(&env)?;
-        let wallet_tx = WalletTx {
-            tx_id,
-            submitter,
-            target: env.current_contract_address(),
-            payload: Bytes::new(&env),
-            confirmations: Vec::new(&env),
-            rejections: Vec::new(&env),
-            status: TxStatus::Pending,
-            kind: TxKind::Batch(operations),
-            expiry: None,
-        };
-        env.storage()
-            .persistent()
-            .set(&DataKey::Tx(tx_id), &wallet_tx);
-        bump_entry(&env, &DataKey::Tx(tx_id));
-        events::submitted(&env, &wallet_tx);
-        Ok(tx_id)
-    }
-
     /// Record an owner's approval of a pending transaction.
     ///
     /// An owner may confirm only once, and only while the transaction is
@@ -1162,7 +1070,6 @@ impl MultiSigWallet {
             .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
         bump_entry(&env, &DataKey::Tx(tx_id));
-        events::rejected(&env, &wallet_tx);
         Ok(())
     }
 
@@ -1273,37 +1180,6 @@ impl MultiSigWallet {
                     return Err(ForgeError::ContractInvocationFailed);
                 }
             }
-            TxKind::Batch(operations) => {
-                for (index, operation) in operations.iter().enumerate() {
-                    match operation {
-                        BatchOp::Withdrawal(withdrawal) => {
-                            let balance = Self::balance_impl(&env, &withdrawal.token);
-                            if balance < withdrawal.amount {
-                                return Err(ForgeError::InsufficientFunds);
-                            }
-                            transfer_from_contract(
-                                &env,
-                                &withdrawal.token,
-                                &withdrawal.destination,
-                                withdrawal.amount,
-                            )?;
-                            Self::sub_balance(&env, &withdrawal.token, withdrawal.amount)?;
-                        }
-                        BatchOp::LimitChange(change) => Self::apply_limit_change(&env, &change),
-                        BatchOp::Call(call) => {
-                            let result = env.try_invoke_contract::<(), ForgeError>(
-                                &call.target,
-                                &call.fn_name,
-                                call.args.clone(),
-                            );
-                            if let Err(_) | Ok(Err(_)) = result {
-                                return Err(ForgeError::ContractInvocationFailed);
-                            }
-                        }
-                    }
-                    events::batch_step_executed(&env, tx_id, index as u32);
-                }
-            }
         }
 
         wallet_tx.status = TxStatus::Executed;
@@ -1338,7 +1214,6 @@ impl MultiSigWallet {
         transfer_to_contract(&env, &token, &from, amount)?;
 
         Self::add_balance(&env, &token, amount)?;
-        events::deposited(&env, &token, &from, amount, Self::balance_impl(&env, &token));
         Ok(())
     }
 
@@ -1387,9 +1262,6 @@ impl MultiSigWallet {
             .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
         bump_entry(&env, &DataKey::Tx(tx_id));
-        if let TxKind::Withdrawal(withdrawal) = &wallet_tx.kind {
-            events::withdrawal_submitted(&env, &wallet_tx, withdrawal);
-        }
         Ok(tx_id)
     }
 
@@ -1818,23 +1690,7 @@ impl MultiSigWallet {
     /// checked and nothing is recorded: `submit_withdrawal` behaves exactly
     /// as it did before limits existed.
     fn admit_withdrawal(env: &Env, token: &Address, amount: i128) -> Result<(), ForgeError> {
-        Self::admit_withdrawal_with_limit(
-            env,
-            token,
-            amount,
-            Self::withdrawal_limit_impl(env, token),
-        )
-    }
-
-    /// Admit against a simulated policy so a batch can change a limit and
-    /// then use it in the same ordered transaction.
-    fn admit_withdrawal_with_limit(
-        env: &Env,
-        token: &Address,
-        amount: i128,
-        limit: Option<WithdrawalLimit>,
-    ) -> Result<(), ForgeError> {
-        let Some(limit) = limit else {
+        let Some(limit) = Self::withdrawal_limit_impl(env, token) else {
             return Ok(());
         };
         let now = env.ledger().timestamp();
@@ -1937,11 +1793,13 @@ impl MultiSigWallet {
                 let key = DataKey::WithdrawalLimit(limit.token.clone());
                 env.storage().persistent().set(&key, limit);
                 bump_entry(env, &key);
+                events::withdrawal_limit_set(env, limit);
             }
             LimitChange::Remove(token) => {
                 env.storage()
                     .persistent()
                     .remove(&DataKey::WithdrawalLimit(token.clone()));
+                events::withdrawal_limit_removed(env, token);
             }
         }
     }
@@ -2164,9 +2022,6 @@ impl MultiSigWallet {
     }
 }
 
-/// Bump a persistent entry's TTL to the [`ttl::BUMP_AMOUNT`] horizon when
-/// it falls inside [`ttl::BUMP_THRESHOLD`]. The standard threshold/extend
-/// pattern: cheap no-op while the entry is fresh, decisive near expiry.
 /// Move `amount` of `token` from `from` into this contract.
 ///
 /// The depositor's `require_auth` on the calling entrypoint covers the
@@ -2211,8 +2066,10 @@ fn transfer_from_contract(
         &amount,
     ) {
         Ok(Ok(())) => Ok(()),
-        _ => Err(ForgeError::TokenTransferFailed),    }
+        _ => Err(ForgeError::TokenTransferFailed),
+    }
 }
+
 /// Bump a persistent entry's TTL to the workspace policy's 30-day horizon
 /// when it falls inside its one-day threshold — see
 /// `soroban_forge_shared_utils::ttl`.
@@ -2253,43 +2110,28 @@ mod events {
         pub threshold: u32,
     }
 
+    /// A per-token rolling withdrawal limit was installed or replaced.
+    /// The token is a **topic** so indexers can filter by asset cheaply.
     #[contractevent]
-    pub struct BatchStepExecuted {
+    pub struct WithdrawalLimitSet {
         #[topic]
-        pub tx_id: u64,
-        pub step_index: u32,
+        pub token: Address,
+        pub amount: i128,
+        pub window_seconds: u64,
     }
 
-    #[allow(dead_code)]
+    /// A per-token rolling withdrawal limit was removed; withdrawals of
+    /// that token are unconstrained again.
     #[contractevent]
+    pub struct WithdrawalLimitRemoved {
+        #[topic]
+        pub token: Address,
+    #[contractevent]
+    #[allow(dead_code)]
     pub struct TxExpired {
         #[topic]
         pub tx_id: u64,
         pub expired_at: u64,
-    pub struct TxRejected {
-        #[topic]
-        pub tx_id: u64,
-        pub rejecter: Address,
-        pub rejections_count: u32,
-    }
-
-    #[contractevent]
-    pub struct Deposited {
-        #[topic]
-        pub token: Address,
-        pub from: Address,
-        pub amount: i128,
-        pub balance: i128,
-    }
-
-    #[contractevent]
-    pub struct WithdrawalSubmitted {
-        #[topic]
-        pub tx_id: u64,
-        pub token: Address,
-        pub to: Address,
-        pub amount: i128,
-        pub confirmations_count: u32,
     }
 
     pub fn submitted(env: &Env, tx: &WalletTx) {
@@ -2319,41 +2161,23 @@ mod events {
         .publish(env);
     }
 
-    pub fn batch_step_executed(env: &Env, tx_id: u64, step_index: u32) {
-        BatchStepExecuted { tx_id, step_index }.publish(env);
+    pub fn withdrawal_limit_set(env: &Env, limit: &WithdrawalLimit) {
+        WithdrawalLimitSet {
+            token: limit.token.clone(),
+            amount: limit.amount,
+            window_seconds: limit.window_seconds,
+        }
+        .publish(env);
     }
 
+    pub fn withdrawal_limit_removed(env: &Env, token: &Address) {
+        WithdrawalLimitRemoved {
+            token: token.clone(),
+        }
+        .publish(env);
     #[allow(dead_code)]
     pub fn expired(env: &Env, tx_id: u64, expired_at: u64) {
         TxExpired { tx_id, expired_at }.publish(env);
-    pub fn rejected(env: &Env, tx: &WalletTx) {
-        TxRejected {
-            tx_id: tx.tx_id,
-            rejecter: tx.rejections.get_unchecked(tx.rejections.len() - 1),
-            rejections_count: tx.rejections.len(),
-        }
-        .publish(env);
-    }
-
-    pub fn deposited(env: &Env, token: &Address, from: &Address, amount: i128, balance: i128) {
-        Deposited {
-            token: token.clone(),
-            from: from.clone(),
-            amount,
-            balance,
-        }
-        .publish(env);
-    }
-
-    pub fn withdrawal_submitted(env: &Env, tx: &WalletTx, withdrawal: &Withdrawal) {
-        WithdrawalSubmitted {
-            tx_id: tx.tx_id,
-            token: withdrawal.token.clone(),
-            to: withdrawal.destination.clone(),
-            amount: withdrawal.amount,
-            confirmations_count: tx.confirmations.len(),
-        }
-        .publish(env);
     }
 }
 
@@ -2369,55 +2193,23 @@ mod authz;
 #[cfg(test)]
 mod props;
 
+// TTL chaos harness demo: drives randomized ledger gaps through the
+// multi-sig-wallet transaction lifecycle and asserts no persistent tx
+// record expires during a legitimate flow.
+#[cfg(test)]
+mod ttl_chaos;
+
 #[cfg(test)]
 mod indexer_fixtures;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_forge_test_utils::TestAccounts;
+    use soroban_forge_test_utils::{MockTarget, MockTargetClient, TestAccounts};
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+    use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
     use soroban_sdk::{contract, contractimpl, Bytes, Env, FromVal, Map, Symbol, TryIntoVal, Val};
-
-    /// A minimal mock target contract for testing cross-contract
-    /// invocation. Its `execute` method is a no-op that accepts the
-    /// payload without panicking, proving the invocation succeeded.
-    #[contract]
-    pub struct MockTarget;
-
-    #[contracttype]
-    enum MockTargetKey {
-        /// Account balances (unused, but required for the contract).
-        Balance(Address),
-    }
-
-    #[contractimpl]
-    impl MockTarget {
-        /// Accept the invocation. Does not access storage, so it
-        /// works reliably through `try_invoke_contract` in the test
-        /// host.
-        pub fn execute(_env: Env, _payload: Bytes) {}
-    }
-
-    /// A mock target whose `execute` panics, simulating a target
-    /// revert for testing the failure-ordering guarantee.
-    #[contract]
-    pub struct BlockingTarget;
-
-    #[contracttype]
-    enum BlockingTargetKey {
-        /// Account balances (unused, but required for the contract).
-        Balance(Address),
-    }
-
-    #[contractimpl]
-    impl BlockingTarget {
-        /// Panics on invocation, simulating a target revert.
-        pub fn execute(_env: Env, _payload: Bytes) {
-            panic!("target reverted");
-        }
-    }
 
     /// Build a fresh env with mocked auths, a registered contract, a configured
     /// wallet (threshold 2), and named accounts. The generated client exposes
@@ -2714,172 +2506,214 @@ mod tests {
         assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
     }
 
-    #[test]
-    fn reject_emits_event_per_rejection_including_threshold_crossing() {
-        let (env, client, accounts) = setup!();
-        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
-
-        // First rejection: recorded, tx still pending (threshold is 2).
-        client.reject(&tx_id, &accounts.user2);
-        assert_eq!(env.events().all().events().len(), 1);
-        let (topics, data) = event_values(&env);
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get_unchecked(0)),
-            Symbol::new(&env, "tx_rejected")
-        );
-        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
-        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
-        assert_eq!(
-            Address::from_val(&env, &data.get(Symbol::new(&env, "rejecter")).unwrap()),
-            accounts.user2
-        );
-        assert_eq!(
-            u32::from_val(
-                &env,
-                &data.get(Symbol::new(&env, "rejections_count")).unwrap()
-            ),
-            1
-        );
-        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
-
-        // Second rejection crosses the threshold and flips the status.
-        client.reject(&tx_id, &accounts.user3);
-        assert_eq!(env.events().all().events().len(), 1);
-        let (topics, data) = event_values(&env);
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get_unchecked(0)),
-            Symbol::new(&env, "tx_rejected")
-        );
-        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
-        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
-        assert_eq!(
-            Address::from_val(&env, &data.get(Symbol::new(&env, "rejecter")).unwrap()),
-            accounts.user3
-        );
-        assert_eq!(
-            u32::from_val(
-                &env,
-                &data.get(Symbol::new(&env, "rejections_count")).unwrap()
-            ),
-            2
-        );
-        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
+    /// The events recorded by the most recent client invocation under
+    /// `name`, decoded as their full topics (the event name first) and
+    /// their data maps — the shape an indexer consumes. The test host
+    /// exposes one invocation's events at a time, so counts are asserted
+    /// immediately after the emitting call (a failed `try_` call records
+    /// nothing).
+    fn events_named(
+        env: &Env,
+        contract: &Address,
+        name: &str,
+    ) -> std::vec::Vec<(soroban_sdk::Vec<Val>, Map<Symbol, Val>)> {
+        let name = ScVal::Symbol(ScSymbol::try_from(name).unwrap());
+        env.events()
+            .all()
+            .filter_by_contract(contract)
+            .events()
+            .iter()
+            .filter_map(|event| {
+                let ContractEventBody::V0(body) = &event.body;
+                if body.topics.first() != Some(&name) {
+                    return None;
+                }
+                Some((
+                    body.topics.clone().try_into_val(env).unwrap(),
+                    body.data.clone().try_into_val(env).unwrap(),
+                ))
+            })
+            .collect()
     }
 
     #[test]
-    fn reject_duplicate_emits_nothing() {
+    fn withdrawal_limit_set_emits_once_with_token_topic_and_policy_data() {
         let (env, client, accounts) = setup!();
-        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
-        client.reject(&tx_id, &accounts.user2);
+        let token = Address::generate(&env);
+
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
+
+        // Submitting the change only proposes the policy: nothing is emitted
+        // until the quorum executes it.
+        let tx = client.set_withdrawal_limit(&accounts.user1, &token, &1_000_i128, &3_600_u64);
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
+
+        client.confirm(&tx, &accounts.user2);
+        client.confirm(&tx, &accounts.user3);
+        client.execute(&tx);
+
+        // The execute invocation publishes the limit event alongside the
+        // wallet's `tx_executed` event.
+        let events = events_named(&env, &client.address, "withdrawal_limit_set");
+        assert_eq!(events.len(), 1);
+        let (topics, data) = &events[0];
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "withdrawal_limit_set")
+        );
+        assert_eq!(Address::from_val(&env, &topics.get_unchecked(1)), token);
+        assert_eq!(
+            i128::from_val(&env, &data.get(Symbol::new(&env, "amount")).unwrap()),
+            1_000
+        );
+        assert_eq!(
+            u64::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "window_seconds")).unwrap()
+            ),
+            3_600
+        );
+        assert_eq!(client.get_withdrawal_limit(&token).unwrap().amount, 1_000);
+    }
+    #[test]
+    fn replacing_a_limit_emits_one_set_event_with_the_new_values() {
+        let (env, client, accounts) = setup!();
+        let token = Address::generate(&env);
+
+        let first = client.set_withdrawal_limit(&accounts.user1, &token, &1_000_i128, &3_600_u64);
+        client.confirm(&first, &accounts.user2);
+        client.confirm(&first, &accounts.user3);
+        client.execute(&first);
+        assert_eq!(
+            events_named(&env, &client.address, "withdrawal_limit_set").len(),
+            1
+        );
+
+        // Raising the cap rides the same path: the replacement emits exactly
+        // one new event carrying the new values, not two.
+        let second = client.set_withdrawal_limit(&accounts.user1, &token, &2_500_i128, &7_200_u64);
+        client.confirm(&second, &accounts.user2);
+        client.confirm(&second, &accounts.user3);
+        client.execute(&second);
+
+        let events = events_named(&env, &client.address, "withdrawal_limit_set");
+        assert_eq!(events.len(), 1);
+        let (topics, data) = &events[0];
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "withdrawal_limit_set")
+        );
+        assert_eq!(Address::from_val(&env, &topics.get_unchecked(1)), token);
+        assert_eq!(
+            i128::from_val(&env, &data.get(Symbol::new(&env, "amount")).unwrap()),
+            2_500
+        );
+        assert_eq!(
+            u64::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "window_seconds")).unwrap()
+            ),
+            7_200
+        );
+        assert_eq!(client.get_withdrawal_limit(&token).unwrap().amount, 2_500);
+    }
+
+    #[test]
+    fn withdrawal_limit_removed_emits_once_with_token_topic() {
+        let (env, client, accounts) = setup!();
+        let token = Address::generate(&env);
+
+        let set_tx = client.set_withdrawal_limit(&accounts.user1, &token, &1_000_i128, &3_600_u64);
+        client.confirm(&set_tx, &accounts.user2);
+        client.confirm(&set_tx, &accounts.user3);
+        client.execute(&set_tx);
+
+        // Proposing the removal publishes nothing; the execute does.
+        let removal = client.remove_withdrawal_limit(&accounts.user1, &token);
+        assert!(events_named(&env, &client.address, "withdrawal_limit_removed").is_empty());
+        client.confirm(&removal, &accounts.user2);
+        client.confirm(&removal, &accounts.user3);
+        client.execute(&removal);
+
+        let events = events_named(&env, &client.address, "withdrawal_limit_removed");
+        assert_eq!(events.len(), 1);
+        let (topics, _data) = &events[0];
+        // Topics are the event name then the token; the event carries no
+        // data payload.
+        assert_eq!(topics.len(), 2);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "withdrawal_limit_removed")
+        );
+        assert_eq!(Address::from_val(&env, &topics.get_unchecked(1)), token);
+        assert_eq!(client.get_withdrawal_limit(&token), None);
+
+        // Removing an already-absent limit is an idempotent success in this
+        // contract: the policy write is a no-op, but the quorum still
+        // approved and executed a state transition, so that execution emits
+        // exactly one event for it too.
+        let again = client.remove_withdrawal_limit(&accounts.user1, &token);
+        client.confirm(&again, &accounts.user2);
+        client.confirm(&again, &accounts.user3);
+        client.execute(&again);
+        let events = events_named(&env, &client.address, "withdrawal_limit_removed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            Address::from_val(&env, &events[0].0.get_unchecked(1)),
+            token
+        );
+    }
+
+    #[test]
+    fn withdrawal_limit_failure_paths_emit_no_limit_events() {
+        let (env, client, accounts) = setup!();
+        let token = Address::generate(&env);
+
+        // amount <= 0.
         let err = client
-            .try_reject(&tx_id, &accounts.user2)
+            .try_set_withdrawal_limit(&accounts.user1, &token, &0_i128, &3_600_u64)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
-        assert_eq!(env.events().all().events().len(), 0);
-    }
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
 
-    #[test]
-    fn deposit_emits_event_with_post_balance() {
-        let (env, client, accounts, token, _token_client) = custody!();
-        client.deposit(&token, &accounts.user1, &1_000);
-        assert_eq!(env.events().all().events().len(), 1);
-        let (topics, data) = event_values(&env);
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get_unchecked(0)),
-            Symbol::new(&env, "deposited")
-        );
-        assert_eq!(
-            Address::from_val(&env, &topics.get_unchecked(1)),
-            token.clone()
-        );
-        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
-        assert_eq!(
-            Address::from_val(&env, &data.get(Symbol::new(&env, "from")).unwrap()),
-            accounts.user1
-        );
-        assert_eq!(
-            i128::from_val(&env, &data.get(Symbol::new(&env, "amount")).unwrap()),
-            1_000
-        );
-        assert_eq!(
-            i128::from_val(&env, &data.get(Symbol::new(&env, "balance")).unwrap()),
-            1_000
-        );
-
-        // A second deposit reports the accumulated custody balance.
-        client.deposit(&token, &accounts.user1, &500);
-        let (_topics, data) = event_values(&env);
-        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
-        assert_eq!(
-            i128::from_val(&env, &data.get(Symbol::new(&env, "balance")).unwrap()),
-            1_500
-        );
-    }
-
-    #[test]
-    fn deposit_transfer_failure_emits_nothing() {
-        let (env, client, accounts, token, _token_client) = custody!();
+        // window == 0.
         let err = client
-            .try_deposit(&token, &accounts.user2, &1_000)
+            .try_set_withdrawal_limit(&accounts.user1, &token, &1_000_i128, &0_u64)
             .unwrap_err()
             .unwrap();
-        assert_eq!(err, ForgeError::TokenTransferFailed);
-        assert_eq!(env.events().all().events().len(), 0);
-    }
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
 
-    #[test]
-    fn submit_withdrawal_emits_event_on_success() {
-        let (env, client, accounts, token, _token_client) = custody!();
-        client.deposit(&token, &accounts.user1, &1_000);
-        let tx_id = client.submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &400_i128);
-        assert_eq!(env.events().all().events().len(), 1);
-        let (topics, data) = event_values(&env);
-        assert_eq!(
-            Symbol::from_val(&env, &topics.get_unchecked(0)),
-            Symbol::new(&env, "withdrawal_submitted")
-        );
-        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
-        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
-        assert_eq!(
-            Address::from_val(&env, &data.get(Symbol::new(&env, "token")).unwrap()),
-            token.clone()
-        );
-        assert_eq!(
-            Address::from_val(&env, &data.get(Symbol::new(&env, "to")).unwrap()),
-            accounts.arbiter
-        );
-        assert_eq!(
-            i128::from_val(&env, &data.get(Symbol::new(&env, "amount")).unwrap()),
-            400
-        );
-        assert_eq!(
-            u32::from_val(
-                &env,
-                &data.get(Symbol::new(&env, "confirmations_count")).unwrap()
-            ),
-            0
-        );
-    }
-
-    #[test]
-    fn submit_withdrawal_over_limit_emits_nothing() {
-        let (env, client, accounts, token, _token_client) = custody!();
-        client.deposit(&token, &accounts.user1, &10_000);
-        env.ledger().set_timestamp(1_000);
-        limited!(client, accounts, token, 1_000_i128, 3_600_u64);
-
-        // The limit-reserving submission is observable.
-        client.submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &600_i128);
-        assert_eq!(env.events().all().events().len(), 1);
-
-        // A submission refused by the rolling limit emits nothing.
+        // Non-owner submission.
         let err = client
-            .try_submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &600_i128)
+            .try_set_withdrawal_limit(&accounts.arbiter, &token, &1_000_i128, &3_600_u64)
             .unwrap_err()
             .unwrap();
-        assert_eq!(err, ForgeError::WithdrawalLimitExceeded);
-        assert_eq!(env.events().all().events().len(), 0);
+        assert_eq!(err, ForgeError::Unauthorized);
+        let err = client
+            .try_remove_withdrawal_limit(&accounts.arbiter, &token)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
+        assert!(events_named(&env, &client.address, "withdrawal_limit_removed").is_empty());
+
+        // Below-threshold execution: one confirmation of two required must
+        // not install the policy nor emit anything; the eventual
+        // threshold-meeting execute emits exactly one event.
+        let tx = client.set_withdrawal_limit(&accounts.user1, &token, &1_000_i128, &3_600_u64);
+        client.confirm(&tx, &accounts.user2);
+        let err = client.try_execute(&tx).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
+        assert_eq!(client.get_withdrawal_limit(&token), None);
+
+        client.confirm(&tx, &accounts.user3);
+        client.execute(&tx);
+        let events = events_named(&env, &client.address, "withdrawal_limit_set");
+        assert_eq!(events.len(), 1);
+        assert_eq!(client.get_withdrawal_limit(&token).unwrap().amount, 1_000);
     }
 
     #[test]
@@ -3415,7 +3249,8 @@ mod tests {
     fn execute_target_revert_leaves_tx_unexecuted() {
         let (env, client, accounts) = setup!();
         let mock_target_id = Address::generate(&env);
-        env.register_at(&mock_target_id, BlockingTarget, ());
+        env.register_at(&mock_target_id, MockTarget, ());
+        MockTargetClient::new(&env, &mock_target_id).set_revert(&true);
         let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env), &None);
         client.confirm(&tx_id, &accounts.user2);
         client.confirm(&tx_id, &accounts.user3);
@@ -4893,64 +4728,7 @@ mod tests {
 mod call_tests {
     use super::*;
     use soroban_forge_test_utils::{new_env, TestAccounts};
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{symbol_short, vec, Val};
-
-    const DEPOSIT: i128 = 10_000;
-
-    #[contract]
-    struct OrderedTarget;
-
-    #[contracttype]
-    enum OrderedTargetKey {
-        Value,
-    }
-
-    #[contractimpl]
-    impl OrderedTarget {
-        pub fn record(env: Env, value: u32) {
-            let current: u32 = env
-                .storage()
-                .instance()
-                .get(&OrderedTargetKey::Value)
-                .unwrap_or(0);
-            env.storage()
-                .instance()
-                .set(&OrderedTargetKey::Value, &(current * 10 + value));
-        }
-
-        pub fn value(env: Env) -> u32 {
-            env.storage()
-                .instance()
-                .get(&OrderedTargetKey::Value)
-                .unwrap_or(0)
-        }
-    }
-
-    macro_rules! custody {
-        () => {{
-            let env = Env::default();
-            env.mock_all_auths();
-            let contract_id = env.register(MultiSigWallet, ());
-            let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
-            let accounts = TestAccounts::generate(&env);
-            let owners = vec![
-                &env,
-                accounts.user1.clone(),
-                accounts.user2.clone(),
-                accounts.user3.clone(),
-            ];
-            client.initialize(&owners, &2_u32);
-            let admin = Address::generate(&env);
-            let sac = env.register_stellar_asset_contract_v2(admin);
-            let token = sac.address();
-            let token_admin = StellarAssetClient::new(&env, &token);
-            let token_client = TokenClient::new(&env, &token);
-            token_admin.mint(&accounts.user1, &DEPOSIT);
-            (env, client, accounts, token, token_client)
-        }};
-    }
 
     #[test]
     fn submit_call_basic() {
@@ -5014,135 +4792,5 @@ mod call_tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::Unauthorized);
-    }
-
-    #[test]
-    fn batch_rejects_size_over_bound_and_aggregate_withdrawal_limit() {
-        let (env, client, accounts, token, _token_client) = custody!();
-        let mut oversized = Vec::new(&env);
-        for _ in 0..=MAX_BATCH_OPS {
-            oversized.push_back(BatchOp::Call(Call {
-                target: accounts.user3.clone(),
-                fn_name: Symbol::new(&env, "execute"),
-                args: Vec::new(&env),
-            }));
-        }
-        assert_eq!(
-            client
-                .try_submit_batch(&accounts.user1, &oversized)
-                .unwrap_err()
-                .unwrap(),
-            ForgeError::InvalidInput
-        );
-
-        let limit_tx = client.set_withdrawal_limit(&accounts.user1, &token, &100, &1_000);
-        client.confirm(&limit_tx, &accounts.user1);
-        client.confirm(&limit_tx, &accounts.user2);
-        client.execute(&limit_tx);
-        client.deposit(&token, &accounts.user1, &DEPOSIT);
-        let operations = soroban_sdk::vec![
-            &env,
-            BatchOp::Withdrawal(Withdrawal {
-                token: token.clone(),
-                destination: accounts.user2.clone(),
-                amount: 60,
-            }),
-            BatchOp::Withdrawal(Withdrawal {
-                token: token.clone(),
-                destination: accounts.user3.clone(),
-                amount: 60,
-            }),
-        ];
-        assert_eq!(
-            client
-                .try_submit_batch(&accounts.user1, &operations)
-                .unwrap_err()
-                .unwrap(),
-            ForgeError::WithdrawalLimitExceeded
-        );
-    }
-
-    #[test]
-    fn batch_limit_change_applies_to_later_withdrawals_during_submission() {
-        let (env, client, accounts, token, _token_client) = custody!();
-        let operations = soroban_sdk::vec![
-            &env,
-            BatchOp::LimitChange(LimitChange::Set(WithdrawalLimit {
-                token: token.clone(),
-                amount: 100,
-                window_seconds: 1_000,
-            })),
-            BatchOp::Withdrawal(Withdrawal {
-                token,
-                destination: accounts.user2.clone(),
-                amount: 101,
-            }),
-        ];
-        assert_eq!(
-            client
-                .try_submit_batch(&accounts.user1, &operations)
-                .unwrap_err()
-                .unwrap(),
-            ForgeError::WithdrawalLimitExceeded
-        );
-        assert_eq!(client.get_tx_count(), 0);
-    }
-
-    #[test]
-    fn batch_late_call_failure_rolls_back_earlier_withdrawal() {
-        let (env, client, accounts, token, token_client) = custody!();
-        client.deposit(&token, &accounts.user1, &DEPOSIT);
-        let target = env.register(crate::tests::BlockingTarget, ());
-        let operations = soroban_sdk::vec![
-            &env,
-            BatchOp::Withdrawal(Withdrawal {
-                token: token.clone(),
-                destination: accounts.user2.clone(),
-                amount: 500,
-            }),
-            BatchOp::Call(Call {
-                target,
-                fn_name: Symbol::new(&env, "execute"),
-                args: Vec::new(&env),
-            }),
-        ];
-        let tx_id = client.submit_batch(&accounts.user1, &operations);
-        client.confirm(&tx_id, &accounts.user1);
-        client.confirm(&tx_id, &accounts.user2);
-        assert_eq!(
-            client.try_execute(&tx_id).unwrap_err().unwrap(),
-            ForgeError::ContractInvocationFailed
-        );
-        assert_eq!(client.balance(&token), DEPOSIT);
-        assert_eq!(token_client.balance(&accounts.user2), 0);
-        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
-    }
-
-    #[test]
-    fn batch_executes_calls_in_order_and_records_one_transaction() {
-        let (env, client, accounts, _token, _token_client) = custody!();
-        let target = env.register(OrderedTarget, ());
-        let operations = soroban_sdk::vec![
-            &env,
-            BatchOp::Call(Call {
-                target: target.clone(),
-                fn_name: Symbol::new(&env, "record"),
-                args: soroban_sdk::vec![&env, Val::from_u32(1).into()],
-            }),
-            BatchOp::Call(Call {
-                target: target.clone(),
-                fn_name: Symbol::new(&env, "record"),
-                args: soroban_sdk::vec![&env, Val::from_u32(2).into()],
-            }),
-        ];
-        let before = client.get_tx_count();
-        let tx_id = client.submit_batch(&accounts.user1, &operations);
-        assert_eq!(client.get_tx_count(), before + 1);
-        assert!(matches!(client.get_tx(&tx_id).kind, TxKind::Batch(_)));
-        client.confirm(&tx_id, &accounts.user1);
-        client.confirm(&tx_id, &accounts.user2);
-        client.execute(&tx_id);
-        assert_eq!(OrderedTargetClient::new(&env, &target).value(), 12);
-        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
     }
 }

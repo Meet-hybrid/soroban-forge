@@ -82,6 +82,12 @@ to `Expired`, self-cleaning stale pending proposals without external keepers, an
 DAO governance limits concurrent proposals to at most 5 active proposals per
 proposer.)
 
+Escrow's permissionless `refund_expired` does not remove the persistent-entry
+expiry trap: it can settle an expired-in-time escrow only while its record is
+still present. `touch_ttl` can extend an existing entry, but cannot recover
+one after storage expiry (tracked separately by issue #93).
+
+### 3. No events outside escrow
 ### 4. No events in vesting contract
 An escrow whose persistent entry expires becomes inaccessible to contract
 calls until the entry is restored. Keepers can monitor its remaining TTL with
