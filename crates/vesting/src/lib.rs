@@ -155,6 +155,21 @@ pub const MIN_TTL: u32 = 518_400;
 /// days at 5s per ledger.
 pub const BUMP_TTL: u32 = 1_036_800;
 
+/// Ledger-time constants for TTL bumps.
+///
+/// One ledger closes roughly every 5 seconds, so 17,280 ledgers ≈ 1 day.
+/// `BUMP_AMOUNT` is the lifetime written on every touch; `BUMP_THRESHOLD`
+/// is how close to expiry an entry must be before a bump applies. Vesting
+/// windows routinely exceed 30 days, so long-idle schedules rely on
+/// `touch_ttl` (or a claim) to stay live.
+mod ttl {
+    pub const DAY_IN_LEDGERS: u32 = 17_280;
+    /// Lifetime applied on every TTL touch.
+    pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
+    /// Bump only when the entry is within this window of expiring.
+    pub const BUMP_THRESHOLD: u32 = BUMP_AMOUNT - DAY_IN_LEDGERS;
+}
+
 /// Public interface for the Soroban Forge vesting contract.
 ///
 /// Declared as a `contractclient` trait so SDK consumers (and the TypeScript
@@ -511,7 +526,7 @@ impl Vesting {
         // Derive the initial status from time (cliff == 0 starts `Vesting`).
         schedule.status = Self::current_status(&schedule, start)?;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Schedule(id), &schedule);
         events::schedule_created(&env, id, &schedule);
 
@@ -793,7 +808,7 @@ impl Vesting {
             .ok_or(ForgeError::ArithmeticOverflow)?;
         schedule.status = Self::current_status(&schedule, now)?;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Schedule(schedule_id), &schedule);
         events::claimed(
             env,
@@ -920,7 +935,18 @@ impl Vesting {
         env.storage().instance().get(&DataKey::Count).unwrap_or(0)
     }
 
-    /// Allocate the next monotonic schedule id.
+    /// Permissionless keeper: bump the schedule entry's TTL without changing
+    /// any state. The existence check is deliberate — touching a missing id
+    /// must fail loudly so a keeper can distinguish "extended" from "no such
+    /// schedule".
+    pub fn touch_ttl(env: Env, schedule_id: u64) -> Result<(), ForgeError> {
+        Self::get_schedule(&env, schedule_id)?;
+        bump_entry(&env, &DataKey::Schedule(schedule_id));
+        Ok(())
+    }
+
+    /// Allocate the next monotonic schedule id. Instance storage: one small
+    /// entry, written once per creation.
     fn next_id(env: &Env) -> Result<u64, ForgeError> {
         let count: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
         let id = count.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;

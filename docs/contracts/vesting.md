@@ -17,6 +17,7 @@ fn get_tranche_schedule(schedule_id) -> Result<TrancheSchedule, ForgeError>
 fn claim(schedule_id) -> Result<i128, ForgeError>
 fn claimable(schedule_id) -> Result<i128, ForgeError>
 fn get_status(schedule_id) -> Result<VestingStatus, ForgeError>
+fn touch_ttl(schedule_id) -> Result<(), ForgeError>
 ```
 
 `Tranche { unlock_at: u64, amount: i128 }` is one entry of the unlock table:
