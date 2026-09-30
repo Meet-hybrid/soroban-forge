@@ -64,11 +64,59 @@
 //! Both kinds derive status from the same two inputs — ledger time and the
 //! claimed amount: `Locked` before the first unlock, `Vesting` from the first
 //! unlock until the final amount is claimed, `Completed` once `claimed ==
-//! total_amount`. `Revoked` is reserved (see below).
+//! total_amount`. `Revoked` is reachable only through `revoke`, which
+//! freezes the schedule (see *Revocation* below).
 //!
 //! Authorization model:
-//! - `create_schedule` and `create_tranche_schedule` require the beneficiary.
+//! - `create_schedule` requires the beneficiary; its `funder` argument is
+//!   recorded on the linear schedule without authorizing (mirroring escrow's
+//!   non-consenting parties). `create_tranche_schedule` also requires its
+//!   beneficiary.
+//! - `revoke` requires the funder recorded at creation.
 //! - `claim` requires the beneficiary.
+//!
+//! ## Revocation
+//!
+//! `revoke(schedule_id)` terminates a linear schedule before completion:
+//! `Locked | Vesting -> Revoked`, permanently stopping further vesting.
+//! Only the **funder** recorded at creation may revoke (`require_auth` on
+//! it); the beneficiary cannot. The vested amount at the revocation ledger
+//! timestamp is frozen into the record (`revoked_vested`): `claim` after
+//! revocation succeeds only up to that amount — everything already vested
+//! stays claimable — and `claimable` returns `0` once it is claimed.
+//! Nothing after the revocation timestamp ever vests.
+//!
+//! Revoking a `Completed` or already-`Revoked` schedule is rejected with
+//! [`ForgeError::InvalidInput`], so double-revoke is impossible; a caller
+//! other than the funder is rejected by host authorization.
+//!
+//! Revocation is pure state-machine logic: it writes the frozen amount and
+//! the status and moves no tokens. The frozen remainder is settled through
+//! the same SEP-41 transfer path as any other claim (issue #50), and the
+//! unvested remainder stays custodied by the contract — refunding it to the
+//! funder is settlement logic out of scope here. Revocation adds no storage
+//! keys or tiers (issue #55). There is no tranche `revoke`: a tranche table
+//! is immutable and fully pre-funded by construction, and an unmet future
+//! tranche already never unlocks.
+//!
+//! ## Upgrade compatibility
+//!
+//! Adding the funder/revocation fields to the stored linear record is a
+//! **storage-breaking upgrade**, following the pattern documented in
+//! `docs/contracts/vesting.md`:
+//!
+//! - `VestingSchedule` gained `funder: Address` and `revoked_vested:
+//!   Option<i128>`. Under
+//!   Soroban's `#[contracttype]` encoding every struct field is a required
+//!   key, so records written by a pre-revocation build do **not**
+//!   deserialize into the new type: a deployed contract must migrate or
+//!   reset its instance storage when upgrading, and `create_schedule`
+//!   callers must add the `funder` argument.
+//! - The storage keys (`DataKey::Schedule(u64)`,
+//!   `DataKey::TrancheSchedule(u64)`, `DataKey::Count`), the instance-only
+//!   storage tier, and the shared id space are unchanged, so the SEP-41
+//!   settlement path (issue #50) and the persistent-storage/TTL migration
+//!   (issue #55) are unaffected.
 //! - `claimable`, `get_status`, `get_schedule`, and `get_tranche_schedule`
 //!   are read-only views.
 //!
@@ -84,9 +132,6 @@
 //! transfer, so no empty transfers are ever issued. Soroban's frame rollback
 //! is the outer atomicity guarantee: any `Err` returned from `claim` reverts
 //! the whole invocation, including sub-invocations.
-//!
-//! The `Revoked` status is reserved for a revocation method that lands in a
-//! follow-up; it is not reachable through the current public interface.
 
 #[cfg(test)]
 extern crate std;
@@ -116,8 +161,11 @@ pub trait SorobanForgeVesting {
     /// Create a new vesting schedule for `beneficiary` funded by `funder`.
     ///
     /// `cliff` and `duration` are seconds measured from creation
-    /// (`cliff <= duration`, `duration > 0`, `total_amount > 0`). Returns the
-    /// stable schedule id.
+    /// (`cliff <= duration`, `duration > 0`, `total_amount > 0`, and
+    /// `funder != beneficiary`). Returns the stable schedule id. The
+    /// beneficiary is authorized at creation time; `funder` is recorded on
+    /// the schedule without authorizing and is the only party that may
+    /// later [`revoke`](Self::revoke) it.
     fn create_schedule(
         env: Env,
         funder: Address,
@@ -164,6 +212,26 @@ pub trait SorobanForgeVesting {
         schedule_id: u64,
         new_beneficiary: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Revoke a linear schedule before completion and permanently stop
+    /// further vesting.
+    ///
+    /// Transitions `Locked | Vesting -> Revoked` and freezes the vested
+    /// amount at the revocation ledger timestamp: `claim` afterwards
+    /// succeeds only up to that amount, and `claimable` returns `0` once it
+    /// is claimed. Pure state-machine logic — no tokens move at revocation.
+    /// Requires the `funder` recorded at creation; the beneficiary cannot
+    /// revoke.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no linear schedule with this id (a
+    ///   tranche id is `NotFound` here).
+    /// * [`ForgeError::InvalidInput`] — the schedule is `Completed` or
+    ///   already `Revoked`; double-revoke is impossible.
+    /// * [`ForgeError::Unauthorized`] — the funder authorization is missing
+    ///   or invalid (a non-funder caller is rejected at the host).
+    fn revoke(env: Env, schedule_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
     /// Read the full linear schedule record (read-only view).
     ///
@@ -248,7 +316,8 @@ pub enum VestingStatus {
     Vesting,
     /// Fully vested and claimed.
     Completed,
-    /// Schedule was terminated before completion (reserved).
+    /// Schedule was terminated by the funder before completion; the vested
+    /// amount at the revocation timestamp is frozen.
     Revoked,
 }
 
@@ -256,7 +325,7 @@ pub enum VestingStatus {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VestingSchedule {
-    /// Funder who created the schedule and authorizes reassignment.
+    /// Funder who created the schedule and authorizes reassignment; only address that may `revoke`.
     pub funder: Address,
     /// Recipient of the vested tokens.
     pub beneficiary: Address,
@@ -272,6 +341,9 @@ pub struct VestingSchedule {
     pub duration: u64,
     /// Amount already claimed by the current beneficiary.
     pub claimed: i128,
+    /// Vested amount frozen at revocation (`Some` exactly when `status` is
+    /// `Revoked`); `claim` pays only up to it.
+    pub revoked_vested: Option<i128>,
     /// Current lifecycle state.
     pub status: VestingStatus,
     /// Number of times the beneficiary has been reassigned.
@@ -363,8 +435,8 @@ pub struct Vesting;
 impl Vesting {
     /// Create a new vesting schedule and return its stable id.
     ///
-    /// Requires `total_amount > 0`, `duration > 0`, and `cliff <= duration`.
-    /// The funder is authorized at creation time.
+    /// Requires `total_amount > 0`, `duration > 0`, `cliff <= duration`, and
+    /// `funder != beneficiary`. The funder is authorized at creation time.
     pub fn create_schedule(
         env: Env,
         funder: Address,
@@ -383,7 +455,10 @@ impl Vesting {
         if cliff > duration {
             return Err(ForgeError::InvalidInput);
         }
-        funder.require_auth();
+        if funder == beneficiary {
+            return Err(ForgeError::InvalidInput);
+        }
+        beneficiary.require_auth();
 
         let id = Self::next_id(&env)?;
         let start = env.ledger().timestamp();
@@ -396,6 +471,7 @@ impl Vesting {
             cliff,
             duration,
             claimed: 0,
+            revoked_vested: None,
             status: VestingStatus::Locked,
             reassignments: 0,
             old_beneficiary: None,
@@ -531,6 +607,45 @@ impl Vesting {
         Ok(())
     }
 
+    /// Revoke a linear schedule before completion and permanently stop
+    /// further vesting.
+    ///
+    /// Transitions `Locked | Vesting -> Revoked` and freezes the vested
+    /// amount at this ledger timestamp into `revoked_vested`: `claim`
+    /// afterwards succeeds only up to that amount, and `claimable` returns
+    /// `0` once it is claimed. Pure state-machine logic — no tokens move at
+    /// revocation. Requires the `funder` recorded at creation; the
+    /// beneficiary cannot revoke.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no linear schedule with this id (a
+    ///   tranche id is `NotFound` here).
+    /// * [`ForgeError::InvalidInput`] — the schedule is `Completed` or
+    ///   already `Revoked`; double-revoke is impossible.
+    /// * [`ForgeError::Unauthorized`] — the funder authorization is missing
+    ///   or invalid (a non-funder caller is rejected at the host).
+    pub fn revoke(env: Env, schedule_id: u64) -> Result<(), ForgeError> {
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(ForgeError::NotFound)?;
+        schedule.funder.require_auth();
+        match schedule.status {
+            VestingStatus::Completed | VestingStatus::Revoked => Err(ForgeError::InvalidInput),
+            VestingStatus::Locked | VestingStatus::Vesting => {
+                let now = env.ledger().timestamp();
+                schedule.revoked_vested = Some(Self::vested_amount(&schedule, now)?);
+                schedule.status = VestingStatus::Revoked;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Schedule(schedule_id), &schedule);
+                Ok(())
+            }
+        }
+    }
+
     /// Read the full linear schedule record (read-only view; no state
     /// change).
     ///
@@ -554,9 +669,19 @@ impl Vesting {
 
     /// Claim the vested-but-unclaimed amount.
     ///
-    /// Settles the active party: for linear schedules with reassignment, claims
-    /// for the old beneficiary until their vested allocation is exhausted, then
-    /// for the current beneficiary.
+    /// Requires beneficiary. Works for both schedule kinds — id
+    /// resolves to linear or tranche record and matching math runs.
+    /// Returns vested amount since last claim (or `0` when nothing
+    /// claimable); repeated claims never overpay or underpay. On
+    /// `Revoked` linear schedule only amount frozen at revocation is
+    /// payable; drained revoked schedule claims `0` with no transfer.
+    ///
+    /// Settles active party: for linear schedules with reassignment, claims
+    /// for old beneficiary until vested allocation exhausted, then
+    /// for current beneficiary.
+    ///
+    /// Ordering: SEP-41 transfer runs **before** schedule write —
+    /// see module docs. Zero-claim call returns before either.
     pub fn claim(env: Env, schedule_id: u64) -> Result<i128, ForgeError> {
         let now = env.ledger().timestamp();
         match Self::load(&env, schedule_id)? {
@@ -591,6 +716,9 @@ impl Vesting {
     }
 
     /// Amount currently claimable (read-only view; no state change).
+    ///
+    /// On a `Revoked` linear schedule this is the frozen vested amount minus
+    /// what has been claimed — `0` once that amount is claimed.
     pub fn claimable(env: Env, schedule_id: u64) -> Result<i128, ForgeError> {
         let now = env.ledger().timestamp();
         match Self::load(&env, schedule_id)? {
@@ -620,7 +748,8 @@ impl Vesting {
     /// Read the current lifecycle status (read-only view).
     ///
     /// The status is derived from the ledger time and claimed amount rather
-    /// than the stored field, so it is always current between claims.
+    /// than the stored field, so it is always current between claims. A
+    /// revoked schedule reports `Revoked` regardless of ledger time.
     pub fn get_status(env: Env, schedule_id: u64) -> Result<VestingStatus, ForgeError> {
         let now = env.ledger().timestamp();
         match Self::load(&env, schedule_id)? {
@@ -721,8 +850,9 @@ impl Vesting {
         token: &Address,
         amount: i128,
     ) -> Result<bool, ForgeError> {
-        // NOTE: when a revocation method lands, the claim paths must be
-        // gated on `status != Revoked`; the status is currently unreachable.
+        // A revoked schedule needs no separate gate here: revocation freezes
+        // the vested amount, so the payable amount below goes to zero once
+        // the frozen remainder is claimed.
         beneficiary.require_auth();
         if amount == 0 {
             return Ok(false);
@@ -770,7 +900,13 @@ impl Vesting {
     }
 
     /// Derive the lifecycle status from ledger time and claimed amount.
+    ///
+    /// `Revoked` overrides the time/claimed derivation: a frozen schedule
+    /// stays `Revoked` even while its frozen remainder is unclaimed.
     fn current_status(schedule: &VestingSchedule, now: u64) -> Result<VestingStatus, ForgeError> {
+        if schedule.revoked_vested.is_some() {
+            return Ok(VestingStatus::Revoked);
+        }
         let total_claimed = schedule
             .claimed
             .checked_add(schedule.old_claimed)
@@ -793,7 +929,13 @@ impl Vesting {
 
     /// Vested amount at ledger time `now`, using floor division so claims
     /// never round up.
+    ///
+    /// A revoked schedule stopped accruing at its revocation timestamp, so
+    /// the frozen amount is returned for every later time.
     fn vested_amount(schedule: &VestingSchedule, now: u64) -> Result<i128, ForgeError> {
+        if let Some(frozen) = schedule.revoked_vested {
+            return Ok(frozen);
+        }
         let cliff_time = schedule
             .start
             .checked_add(schedule.cliff)
