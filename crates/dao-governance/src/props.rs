@@ -8,7 +8,7 @@
 //! a fixed voter pool:
 //!
 //! ```text
-//! for_votes + against_votes == number of distinct voters who successfully voted
+//! for_votes + against_votes == sum of balances for distinct voters who successfully voted
 //! ```
 //!
 //! The generator can produce repeated pool indices, which the contract rejects
@@ -100,11 +100,14 @@ fn setup_world() -> World {
 
     let accounts = TestAccounts::generate(&env);
     client.configure_bond(&token, &BOND, &accounts.deployer);
+    client.initialize(&token);
     token_admin.mint(&accounts.user1, &FUNDS);
 
     let mut voters = std::vec::Vec::with_capacity(VOTER_POOL_SIZE);
     for _ in 0..VOTER_POOL_SIZE {
-        voters.push(Address::generate(&env));
+        let voter = Address::generate(&env);
+        token_admin.mint(&voter, &FUNDS);
+        voters.push(voter);
     }
 
     let target = env.register(MockTarget, ());
@@ -197,9 +200,9 @@ proptest! {
                         "contract accepted a second vote from voter slot {idx}"
                     );
                     if *support {
-                        expected_for += 1;
+                        expected_for += FUNDS;
                     } else {
-                        expected_against += 1;
+                        expected_against += FUNDS;
                     }
                 }
                 Err(Ok(ForgeError::InvalidInput)) => {
@@ -234,8 +237,8 @@ proptest! {
         );
         prop_assert_eq!(
             proposal.for_votes + proposal.against_votes,
-            voted.len() as i128,
-            "total votes must equal distinct successful voters"
+            voted.len() as i128 * FUNDS,
+            "total votes must equal the weights of distinct successful voters"
         );
     }
 }

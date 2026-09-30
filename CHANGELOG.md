@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Opt-in prepaid subscription balances** (`deposit`, `withdraw_balance`):
+  subscribers can pre-fund a subscription; provider-authorized `charge` debits
+  exact period amounts from contract custody and follows the existing
+  `PastDue` retry policy when funds are insufficient. Explicit and retry-limit
+  cancellation refund the exact remainder. The optional `prepaid_balance`
+  field distinguishes pull mode from prepaid mode, and deposits, debits, and
+  refunds emit typed events. Includes conservation property coverage across
+  randomized lifecycle interleavings (issue #250).
 - **Read-only vesting schedule record view** (`get_schedule`):
   returns the complete stored linear `VestingSchedule` (beneficiary, token,
   total amount, start, cliff, duration, claimed, stored status) for an
@@ -156,7 +164,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-crate `Env`-based tests.
 - **DAO governance contract** (implemented): `propose`, `vote`, `execute`, and
   `get_proposal` with voting deadlines, one-vote-per-voter enforcement,
-  majority finalisation, and 16 in-crate `Env`-based tests.
+  majority finalization, and 16 in-crate `Env`-based tests.
 - **Subscription payments contract** (implemented): `subscribe`, `charge`,
   `cancel`, and `get_subscription` with period-based billing that catches up
   one period per call, and 12 in-crate `Env`-based tests.
