@@ -701,8 +701,7 @@ proptest! {
         let probe_result = w.vesting_client().try_claim(&probe_id);
         prop_assert!(
             matches!(probe_result, Err(Ok(ForgeError::TokenTransferFailed))),
-            "over-custody claim must fail with TokenTransferFailed, got {:?}",
-            probe_result
+            "over-custody claim must fail with TokenTransferFailed"
         );
         prop_assert_eq!(w.pool_total(), pool_before_probe, "failed transfer must not move the pool");
         let probe_after = w.vesting_client().get_tranche_schedule(&probe_id);
@@ -823,7 +822,7 @@ proptest! {
 
         // Point 2: strictly between two offsets — the exact step sum of every
         // tranche unlocked so far (only meaningful when a gap exists).
-        let reachable: std::vec::Vec<u64> = table
+        let reachable: Vec<u64> = table
             .iter()
             .filter(|(unlock_at, _)| *unlock_at != u64::MAX)
             .map(|(unlock_at, _)| *unlock_at)
