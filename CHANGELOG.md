@@ -8,6 +8,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Escrow milestone partial release** (`release_partial`):
+  allows the seller to incrementally release funds from contract custody
+  prior to full completion, supporting milestone-based escrow delivery.
+  Tracks cumulative `released` amounts in persistent `EscrowData` storage
+  with backward-compatible `EscrowDataV1` decode fallback (defaulting `released = 0`);
+  a final partial release that exhausts the remaining balance transitions
+  the escrow to `Completed`. Both `refund` and arbiter `resolve` operate on the
+  remaining balance (`amount - released`). Emits `PartiallyReleased` events
+  (`escrow_id` as topic). Includes negative-authorization tests proving seller-only
+  authorization (`crates/escrow/src/authz.rs`) and randomized property tests
+  verifying pool conservation and fund safety over arbitrary call sequences
+  (`crates/escrow/src/props.rs`).
+- **DAO proposal bonds** (`configure_bond`, `get_bond_config`):
+  configurable SEP-41 token bond requirement for DAO governance
+  (`crates/dao-governance/src/lib.rs`). A one-time, permissionless `configure_bond`
+  initializes the bond token, amount, and treasury address. Proposers must fund
+  the bond upon calling `propose`, which transfers the bond token into contract
+  custody via real SEP-41 transfer before any state write, emitting `BondPosted`.
+  Enforces proposer cooldown limits (`DEFAULT_MAX_ACTIVE_PROPOSALS = 5`,
+  returning `ForgeError::ProposerCooldown`). Upon terminal transitions, the bond
+  is refunded to the proposer if `Executed` or `cancel_proposal` is invoked,
+  or forfeited to the treasury if `Defeated`, emitting `BondReleased`
+  (`proposal_id` as topic). Verified by bond custody lifecycle and conservation
+  tests (`crates/dao-governance/src/tests.rs`, `props.rs`) and nested token
+  authorization frame verification (`crates/dao-governance/src/authz.rs`).
+- **Real SEP-41 token settlement on vesting claims** (`claim`):
+  `claim` in `crates/vesting/src/lib.rs` settles payouts via real SEP-41 token
+  transfers (`token::TokenClient::try_transfer`) from contract custody to beneficiary
+  using transfer-before-state ordering, persisting `claimed` state only after
+  successful transfer. Token failures surface as `ForgeError::TokenTransferFailed`
+  leaving state untouched; zero-claim amounts skip token transfers. Wires the
+  `VestingSchedule.token` field to configure the payout token, with
+  negative-auth and pool-conservation property test coverage (`crates/vesting/src/props.rs`).
+- **Subscription pause and resume lifecycle** (`pause`, `resume`):
+  subscribers can pause an active subscription via `pause(subscription_id)`
+  in `crates/subscription-payments/src/lib.rs`, transitioning state to `Paused`
+  and recording `paused_at` to prevent provider charges while paused.
+  Calling `resume(subscription_id)` restores `Active` state and advances
+  `last_charged` (and subsequent `next_due`) by the exact elapsed duration
+  spent paused, preventing billing drift or accumulated charges upon resumption.
+  Covered by negative authorization and billing lifecycle tests
+  (`crates/subscription-payments/src/authz.rs`, `tests.rs`).
 - **Opt-in prepaid subscription balances** (`deposit`, `withdraw_balance`):
   subscribers can pre-fund a subscription; provider-authorized `charge` debits
   exact period amounts from contract custody and follows the existing
