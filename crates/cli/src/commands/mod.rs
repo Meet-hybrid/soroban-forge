@@ -1,6 +1,7 @@
 pub mod build;
 pub mod deploy;
 pub mod events;
+pub mod inspect;
 pub mod invoke;
 pub mod lint;
 pub mod new;

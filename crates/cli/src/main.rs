@@ -18,7 +18,7 @@ mod commands;
 mod wizard;
 
 use clap::{Parser, Subcommand};
-use cli::{BuildArgs, DeployArgs, EventsArgs, InvokeArgs, LintArgs, NewArgs, TestArgs, VerifyArgs};
+use cli::{BuildArgs, DeployArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs, TestArgs, VerifyArgs};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -42,6 +42,7 @@ pub enum Commands {
     Verify(VerifyArgs),
     Invoke(InvokeArgs),
     Events(EventsArgs),
+    Inspect(InspectArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -54,9 +55,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Test(args) => commands::test::run(args)?,
         Commands::Deploy(args) => commands::deploy::run(args)?,
         Commands::New(args) => commands::new::htandle(args)?,
-        Commands::Verify(args) => commands::verify::run(args)?,
-        Commands::Invoke(args) => commands::invoke::htandle(args)?,
-        Commands::Events(args) => commands::events::handle(args)?,
+        Commands::Verify(args) => commands::verify::run(args)?,        Commands::Invoke(args) => commands::invoke::run(args)?,
+        Commands::Events(args) => commands::events::run(args)?,
+        Commands::Inspect(args) => commands::inspect::run(args)?,
     }
 
     Ok(())
