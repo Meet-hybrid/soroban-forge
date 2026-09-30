@@ -361,6 +361,7 @@ proptest! {
                         refunds += amount;
                     }
                     5 => {
+                        client.cancel(&id);
                         client.cancel(&id, &true);
                         refunds += balance;
                         balance = 0;

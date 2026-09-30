@@ -49,6 +49,18 @@ path for prepaid funds; subscribers can withdraw surplus or cancel to receive
 the remainder. Prepaid `charge_catchup` is rejected; subscribers use the
 single-period retry path so insufficient balance follows `PastDue` semantics.
 
+### 2. DAO voting uses the balance at vote time
+
+DAO governance weights each vote by the voter's current balance of its
+configured SEP-41 governance token. The balance is read when `vote` runs; no
+snapshot is kept at proposal creation or at a common voting block. A holder
+can therefore move tokens between accounts and cast votes from each account
+while a proposal is open, changing the influence represented by those
+accounts. This is a simple stake-weighted foundation, not a manipulation-
+resistant snapshot or delegation system.
+
+### 3. Instance-only storage outside escrow, multi-sig wallet, DAO governance, and marketplace royalties
+
 ### 2. Instance-only storage outside escrow, multi-sig wallet, DAO governance, marketplace royalties, and subscriptions
 
 Vesting schedule records remain in `env.storage().instance()` and face the
@@ -64,8 +76,13 @@ Persistent entries have their own TTL cost: a multi-sig transaction or DAO
 proposal that sits below threshold / waiting for votes still needs its TTL
 extended. The permissionless keepers (`touch_tx_ttl`, `touch_ttl`) cover
 this, but who runs them is an operational question — off-chain keepers must
-visit live transactions and proposals within the 30-day horizon.
+visit live transactions and proposals within the 30-day horizon. (Multi-sig
+transactions now support optional per-tx expiry deadlines which lazily evaluate
+to `Expired`, self-cleaning stale pending proposals without external keepers, and
+DAO governance limits concurrent proposals to at most 5 active proposals per
+proposer.)
 
+### 4. No events in vesting contract
 An escrow whose persistent entry expires becomes inaccessible to contract
 calls until the entry is restored. Keepers can monitor its remaining TTL with
 `ttl_info` and call `touch_ttl` before expiry; `NotFound` from either means
@@ -79,7 +96,7 @@ remains held by the escrow contract while the record is archived.
 Vesting, escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit typed lifecycle events. Other contracts remain to be assessed for event coverage.
 
 
-### 4. Negative authorization coverage outside escrow, vesting, and DAO governance
+### 5. Negative authorization coverage outside escrow, vesting, and DAO governance
 
 **Closed for escrow, vesting, and DAO governance** (was the open item here): dedicated
 negative-auth suites (`crates/escrow/src/authz.rs`, `crates/vesting/src/authz.rs`,
@@ -98,7 +115,7 @@ Still open: other contract entrypoints are proven at call-graph level only.
 Subscription `deposit` and `withdraw_balance` are subscriber-authorized; the
 existing provider-authorized `charge` moves due payments to the provider.
 
-### 5. Vesting rounding residue
+### 6. Vesting rounding residue
 
 Vesting claims use floor division; per-claim residue (at most one stroop
 × number of claims) stays in the contract until the final claim, where it
@@ -106,7 +123,7 @@ is paid out in full (settlement landed: residue is claimable, never lost,
 asserted by `floor_division_residue_stays_claimable_until_final_claim`).
 No dust-sweep entrypoint — revisit only as a convenience.
 
-### 6. Testnet only — no mainnet deployment
+### 7. Testnet only — no mainnet deployment
 
 The escrow contract **is deployed on testnet** with a verified receipt
 round (see the README proof table and `scripts/demo-testnet.sh`). There
@@ -130,7 +147,7 @@ with insufficient balance. A mainnet escrow receipt, once it exists,
 will be added to the README proof table with its own explorer links.
 Total one-time cost to finish: ~18–19 XLM on the issuer account.
 
-### 7. `packages/` are minimal
+### 8. `packages/` are minimal
 
 The TypeScript SDK is now a **generated client from the deployed escrow
 contract's ABI** (`@soroban-forge/escrow-client`, contract ID embedded) —
@@ -138,7 +155,7 @@ replacing the v0.1.0 console-log placeholder. It has no dedicated test
 suite of its own yet, and the Next.js example remains a static landing
 page (stale `teachlink` links fixed; a real demo UI is future work).
 
-### 8. Single maintainer
+### 9. Single maintainer
 
 All commits are by one person. Contributor-facing process exists — scoped
 issues with acceptance criteria, fork-first workflow — but no external
@@ -168,6 +185,7 @@ contributions have landed yet.
 
 ## Out of scope for the flagship phase (deliberate)
 
+- Plan management, multi-recipient royalties
 - Weighted voting, plan management, multi-recipient royalties
 - Formal verification, external audit (planned before any mainnet use)
 

@@ -73,7 +73,16 @@ macro_rules! setup {
         let contract_id = env.register(DaoGovernance, ());
         let client = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
         let accounts = TestAccounts::generate(&env);
+        client.initialize(&token);
         client.configure_bond(&token, &BOND, &accounts.deployer);
+        for who in [
+            &accounts.user1,
+            &accounts.user2,
+            &accounts.user3,
+            &accounts.validator,
+        ] {
+            token_admin.mint(who, &FUNDS);
+        }
         client.configure_category_rules(&crate::test_category_rules(&env, DURATION));
         token_admin.mint(&accounts.user1, &FUNDS);
         let target_id = env.register(MockTarget, ());
@@ -359,7 +368,7 @@ fn cancel_rejects_a_non_proposer_signature_even_when_armed() {
     let res = client.try_cancel_proposal(&id, &accounts.user2);
     assert!(matches!(res, Err(Ok(ForgeError::Unauthorized))));
     assert_eq!(tc.balance(&contract_id), BOND);
-    assert_eq!(tc.balance(&accounts.user2), 0);
+    assert_eq!(tc.balance(&accounts.user2), FUNDS);
     assert_eq!(
         client.get_proposal(&id).bond_state,
         crate::BondState::Posted
@@ -466,7 +475,7 @@ fn vote_accepts_the_voter_signature() {
         .expect("contract ok");
 
     let proposal = client.get_proposal(&id);
-    assert_eq!(proposal.for_votes, 1);
+    assert_eq!(proposal.for_votes, FUNDS);
     assert_eq!(proposal.against_votes, 0);
 }
 
@@ -566,4 +575,16 @@ fn blank_envelope_aborts_vote_and_preserves_tally() {
     let proposal = client.get_proposal(&id);
     assert_eq!(proposal.for_votes, 0);
     assert_eq!(proposal.against_votes, 0);
+}
+
+#[test]
+fn delegation_requires_the_delegator_signature() {
+    let (env, _token, _token_client, _contract_id, client, accounts, _target_id) = setup!();
+    env.set_auths(&[]);
+    assert!(matches!(
+        client.try_delegate(&accounts.user1, &accounts.user2),
+        Err(Err(InvokeError::Abort))
+    ));
+    env.mock_all_auths();
+    assert_eq!(client.get_delegate(&accounts.user1), None);
 }

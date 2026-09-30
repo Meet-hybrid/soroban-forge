@@ -646,6 +646,16 @@ fn blank_envelope_aborts_pause_without_changing_state() {
 }
 
 #[test]
+fn renewal_policy_requires_subscriber_authorization() {
+    let (env, token, _contract_id, client, accounts) = setup!();
+    let id = client.subscribe(&accounts.user1, &accounts.user2, &token, &AMOUNT, &PERIOD);
+    let before = client.get_renewal_policy(&id);
+    env.mock_auths(&[]);
+    assert_auth_abort!(client.try_set_renewal_policy(&id, &accounts.user1, &true, &1));
+    assert_eq!(client.get_renewal_policy(&id), before);
+}
+
+#[test]
 fn resume_accepts_subscriber_signature() {
     let (env, token, contract_id, client, accounts) = setup!();
     let subscriber = &accounts.user1;

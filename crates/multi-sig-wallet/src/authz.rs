@@ -43,7 +43,7 @@
 //! nested sub-invocations appear in any tree (unlike the DAO's bond pull).
 
 use crate::{
-    LimitChange, MultiSigWallet, SorobanForgeMultiSigWalletClient, TxKind, TxStatus,
+    BatchOp, Call, LimitChange, MultiSigWallet, SorobanForgeMultiSigWalletClient, TxKind, TxStatus,
     WithdrawalLimit,
 };
 use soroban_forge_test_utils::{MockTarget, TestAccounts};
@@ -195,13 +195,13 @@ fn submit_accepts_the_owner_signature() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "submit",
-            args: (&accounts.user1, &target, payload(&env)).into_val(&env),
+            args: (&accounts.user1, &target, payload(&env), None::<u64>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
     let tx_id = client
-        .try_submit(&accounts.user1, &target, &payload(&env))
+        .try_submit(&accounts.user1, &target, &payload(&env), &None)
         .expect("outer ok")
         .expect("contract ok");
     assert_eq!(tx_id, 1);
@@ -222,12 +222,12 @@ fn submit_rejects_signature_from_a_non_owner() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "submit",
-            args: (&accounts.user1, &target, payload(&env)).into_val(&env),
+            args: (&accounts.user1, &target, payload(&env), None::<u64>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_submit(&accounts.user1, &target, &payload(&env));
+    let res = client.try_submit(&accounts.user1, &target, &payload(&env), &None);
     assert_auth_abort!(res);
     assert_eq!(client.try_get_tx_count().unwrap().unwrap(), 0_u64);
 }
@@ -241,7 +241,7 @@ fn submit_without_authorization_aborts_and_writes_nothing() {
     env.set_auths(&[]);
 
     let target = env.register(MockTarget, ());
-    let res = client.try_submit(&accounts.user1, &target, &payload(&env));
+    let res = client.try_submit(&accounts.user1, &target, &payload(&env), &None);
     assert_auth_abort!(res);
     assert_eq!(client.try_get_tx_count().unwrap().unwrap(), 0_u64);
 }
@@ -252,7 +252,7 @@ fn submit_authorization_tree_is_the_owner_entrypoint_frame() {
     client.initialize(&owner_vec(&env, &accounts), &2_u32);
     let target = env.register(MockTarget, ());
 
-    client.submit(&accounts.user1, &target, &payload(&env));
+    client.submit(&accounts.user1, &target, &payload(&env), &None);
 
     // The tree is the submitter's entrypoint frame only — a removed
     // `require_auth(submitter)` shrinks this to empty and fails the test.
@@ -264,7 +264,13 @@ fn submit_authorization_tree_is_the_owner_entrypoint_frame() {
                 function: AuthorizedFunction::Contract((
                     contract_id.clone(),
                     Symbol::new(&env, "submit"),
-                    (accounts.user1.clone(), target.clone(), payload(&env)).into_val(&env),
+                    (
+                        accounts.user1.clone(),
+                        target.clone(),
+                        payload(&env),
+                        None::<u64>
+                    )
+                        .into_val(&env),
                 )),
                 sub_invocations: std::vec![],
             },
@@ -281,7 +287,7 @@ fn submit_by_a_non_owner_is_unauthorized_even_under_mocked_auths() {
     // Under blanket mocking the identity check is what rejects: the
     // non-owner deployer gets the typed error, not a host abort.
     let err = client
-        .try_submit(&accounts.deployer, &target, &payload(&env))
+        .try_submit(&accounts.deployer, &target, &payload(&env), &None)
         .unwrap_err()
         .unwrap();
     assert_eq!(err, soroban_forge_shared_utils::ForgeError::Unauthorized);
@@ -296,7 +302,7 @@ fn confirm_accepts_the_owner_signature() {
     let (env, contract_id, client, accounts) = setup!();
     client.initialize(&owner_vec(&env, &accounts), &2_u32);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
 
     env.mock_auths(&[MockAuth {
         address: &accounts.user2,
@@ -325,7 +331,7 @@ fn confirm_rejects_signature_from_a_non_owner() {
     let (env, contract_id, client, accounts) = setup!();
     client.initialize(&owner_vec(&env, &accounts), &2_u32);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
 
     // A stranger (deployer) signs a confirm whose `signer` argument names
     // user2. The contract calls `signer.require_auth()`, so the mismatch
@@ -355,7 +361,7 @@ fn confirm_rejects_signature_over_a_different_signer_argument() {
     let (env, contract_id, client, accounts) = setup!();
     client.initialize(&owner_vec(&env, &accounts), &2_u32);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
 
     // user2 arms a signature for *their own* confirm, but the invocation
     // runs with user3 as the signer — a captured signature must not be
@@ -385,7 +391,7 @@ fn confirm_authorization_tree_is_the_owner_entrypoint_frame() {
     let (env, contract_id, client, accounts) = setup!();
     client.initialize(&owner_vec(&env, &accounts), &2_u32);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
 
     client.confirm(&tx_id, &accounts.user2);
 
@@ -412,7 +418,7 @@ fn blank_envelope_aborts_confirm_and_preserves_state() {
     let (env, _contract_id, client, accounts) = setup!();
     client.initialize(&owner_vec(&env, &accounts), &2_u32);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
 
     env.set_auths(&[]);
     let res = client.try_confirm(&tx_id, &accounts.user2);
@@ -436,7 +442,7 @@ fn execute_is_permissionless_at_threshold_under_a_blank_envelope() {
     let (env, _contract_id, client, accounts) = setup!();
     client.initialize(&owner_vec(&env, &accounts), &2_u32);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
     client.confirm(&tx_id, &accounts.user1);
     client.confirm(&tx_id, &accounts.user2);
 
@@ -458,7 +464,7 @@ fn execute_below_threshold_is_invalid_input_even_for_owners() {
     let (env, _contract_id, client, accounts) = setup!();
     client.initialize(&owner_vec(&env, &accounts), &2_u32);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
     client.confirm(&tx_id, &accounts.user1);
 
     // A single confirmation below the threshold of 2 must never execute —
@@ -477,7 +483,7 @@ fn execute_of_an_already_executed_tx_is_rejected() {
     let (env, _contract_id, client, accounts) = setup!();
     client.initialize(&owner_vec(&env, &accounts), &2_u32);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
     client.confirm(&tx_id, &accounts.user1);
     client.confirm(&tx_id, &accounts.user2);
     client.execute(&tx_id);
@@ -497,7 +503,7 @@ fn reject_accepts_owner_signature_below_threshold() {
     let (env, contract_id, client, accounts) = setup!();
     initialize_wallet(&env, &client, &accounts);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
 
     env.mock_auths(&[MockAuth {
         address: &accounts.user2,
@@ -523,7 +529,7 @@ fn reject_returns_unauthorized_for_non_owner() {
     let (env, _contract_id, client, accounts) = setup!();
     initialize_wallet(&env, &client, &accounts);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
 
     let err = client
         .try_reject(&tx_id, &accounts.deployer)
@@ -540,8 +546,8 @@ fn reject_rejects_signature_replayed_for_another_tx() {
     let (env, contract_id, client, accounts) = setup!();
     initialize_wallet(&env, &client, &accounts);
     let target = env.register(MockTarget, ());
-    let first_tx = client.submit(&accounts.user1, &target, &payload(&env));
-    let second_tx = client.submit(&accounts.user1, &target, &payload(&env));
+    let first_tx = client.submit(&accounts.user1, &target, &payload(&env), &None);
+    let second_tx = client.submit(&accounts.user1, &target, &payload(&env), &None);
 
     env.mock_auths(&[MockAuth {
         address: &accounts.user2,
@@ -563,7 +569,7 @@ fn reject_twice_by_same_owner_is_invalid() {
     let (env, _contract_id, client, accounts) = setup!();
     initialize_wallet(&env, &client, &accounts);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
     client.reject(&tx_id, &accounts.user2);
 
     let err = client
@@ -579,7 +585,7 @@ fn blank_envelope_aborts_reject_without_changing_tx() {
     let (env, _contract_id, client, accounts) = setup!();
     initialize_wallet(&env, &client, &accounts);
     let target = env.register(MockTarget, ());
-    let tx_id = client.submit(&accounts.user1, &target, &payload(&env));
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
     env.set_auths(&[]);
 
     assert_auth_abort!(client.try_reject(&tx_id, &accounts.user2));
@@ -1071,4 +1077,22 @@ fn blank_envelope_aborts_remove_withdrawal_limit_without_writing_tx() {
     assert_auth_abort!(client.try_remove_withdrawal_limit(&accounts.user1, &token));
     assert_eq!(client.get_tx_count(), count_before);
     assert_eq!(client.get_withdrawal_limit(&token), active_limit);
+}
+
+#[test]
+fn batch_submission_requires_owner_authorization() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let operations = soroban_sdk::vec![
+        &env,
+        BatchOp::Call(Call {
+            target: accounts.deployer.clone(),
+            fn_name: Symbol::new(&env, "execute"),
+            args: soroban_sdk::Vec::new(&env),
+        }),
+    ];
+    let count_before = client.get_tx_count();
+    env.set_auths(&[]);
+    assert_auth_abort!(client.try_submit_batch(&accounts.user1, &operations));
+    assert_eq!(client.get_tx_count(), count_before);
 }

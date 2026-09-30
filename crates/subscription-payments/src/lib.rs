@@ -168,6 +168,9 @@ const MAX_RETRIES: u32 = 3;
 /// missed period.
 const MAX_CATCHUP_PERIODS: u32 = 32;
 
+/// Permissionless renewals are accepted for seven days after a period is due.
+pub const RENEWAL_WINDOW: u64 = 7 * 24 * 60 * 60;
+
 /// Maximum number of per-metric quotas one subscription may declare.
 ///
 /// Every charge derives its amount by walking the quota list, so the list is
@@ -286,6 +289,27 @@ pub trait SorobanForgeSubscriptionPayments {
         max_periods: u32,
     ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 
+    /// Configure subscriber-authorized automatic renewal. A zero maximum means unlimited.
+    fn set_renewal_policy(
+        env: Env,
+        subscription_id: u64,
+        subscriber: Address,
+        enabled: bool,
+        max_renewals: u32,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Settle one due period within [`RENEWAL_WINDOW`] without provider authorization.
+    fn renew(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read renewal policy and the next renewal eligibility timestamp.
+    fn get_renewal_policy(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<RenewalPolicy, soroban_forge_shared_utils::ForgeError>;
+
     /// Declare (or replace) the metered-usage quotas of `subscription_id`.
     ///
     /// Requires the subscriber: a quota prices the overage the subscriber is
@@ -355,7 +379,6 @@ pub trait SorobanForgeSubscriptionPayments {
         env: Env,
         subscription_id: u64,
     ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
-
     /// Pause an active subscription, preventing further charges while paused.
     ///
     /// Requires the subscriber. Only valid when `Active`.
@@ -580,6 +603,11 @@ pub struct Subscription {
     pub paused_at: Option<u64>,
     /// Number of consecutive failed billing attempts.
     pub failed_attempts: u32,
+    /// Ledger timestamp at which the subscription first became overdue for the
+    /// current open period, or `None` while the subscription is current.
+    /// Set when a charge observes an elapsed due time without a successful
+    /// payment; cleared on a successful charge.
+    pub past_due_since: Option<u64>,
     /// Per-metric usage quotas priced on top of `amount`.
     ///
     /// Empty is the flat flow: the period bills exactly `amount`. The list is
@@ -633,6 +661,29 @@ pub struct UsageRecord {
     pub period_start: u64,
 }
 
+/// Read model for a subscription's renewal policy.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenewalPolicy {
+    pub enabled: bool,
+    /// Zero means unlimited.
+    pub max_renewals: u32,
+    pub completed_renewals: u32,
+    pub next_renewal_at: u64,
+    /// Ledger through which the token allowance remains valid.
+    pub allowance_live_until_ledger: u32,
+    pub eligible: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StoredRenewalPolicy {
+    enabled: bool,
+    max_renewals: u32,
+    completed_renewals: u32,
+    allowance_live_until_ledger: u32,
+}
+
 /// Instance-storage keys.
 #[contracttype]
 enum DataKey {
@@ -650,6 +701,8 @@ enum DataKey {
     /// `(subscriber, provider)`. Written by `authorize_provider`, removed by
     /// `revoke_provider`, consulted by `subscribe_on_behalf_of`.
     ProviderOptIn(Address, Address),
+    /// Per-subscription renewal policy; persistent to keep Subscription XDR stable.
+    RenewalPolicy(u64),
     /// The open period's unit counter for `(subscription, metric)`. Written by
     /// `record_usage`, removed by the charge that closes the period, read by
     /// the amount derivation.
@@ -1143,6 +1196,137 @@ impl SubscriptionPayments {
         Ok(total)
     }
 
+    /// Enable or update automatic renewals. Only the recorded subscriber can consent.
+    pub fn set_renewal_policy(
+        env: Env,
+        subscription_id: u64,
+        subscriber: Address,
+        enabled: bool,
+        max_renewals: u32,
+    ) -> Result<(), ForgeError> {
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        if subscription.subscriber != subscriber {
+            return Err(ForgeError::Unauthorized);
+        }
+        if subscription.status != SubscriptionStatus::Active {
+            return Err(ForgeError::InvalidInput);
+        }
+        subscriber.require_auth();
+        let key = DataKey::RenewalPolicy(subscription_id);
+        let old: StoredRenewalPolicy =
+            env.storage()
+                .instance()
+                .get(&key)
+                .unwrap_or(StoredRenewalPolicy {
+                    enabled: false,
+                    max_renewals: 0,
+                    completed_renewals: 0,
+                    allowance_live_until_ledger: 0,
+                });
+        let mut policy = StoredRenewalPolicy {
+            enabled,
+            max_renewals,
+            completed_renewals: old.completed_renewals,
+            allowance_live_until_ledger: old.allowance_live_until_ledger,
+        };
+        if enabled || !Self::has_other_enabled_renewal(&env, subscription_id, &subscription) {
+            policy.allowance_live_until_ledger =
+                Self::set_renewal_allowance(&env, &subscription, enabled)?;
+        } else {
+            policy.allowance_live_until_ledger = env.ledger().sequence();
+        }
+        env.storage().instance().set(&key, &policy);
+        events::renewal_policy_changed(&env, subscription_id, enabled, max_renewals);
+        Ok(())
+    }
+
+    /// Permissionless keeper path for one pre-authorized period renewal.
+    pub fn renew(env: Env, subscription_id: u64) -> Result<i128, ForgeError> {
+        let mut subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        if subscription.status != SubscriptionStatus::Active {
+            return Err(ForgeError::InvalidInput);
+        }
+        let key = DataKey::RenewalPolicy(subscription_id);
+        let mut policy: StoredRenewalPolicy = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(ForgeError::InvalidInput)?;
+        if !policy.enabled
+            || (policy.max_renewals != 0 && policy.completed_renewals >= policy.max_renewals)
+        {
+            return Err(ForgeError::InvalidInput);
+        }
+        if env.ledger().sequence() > policy.allowance_live_until_ledger {
+            return Err(ForgeError::InvalidInput);
+        }
+        let due = subscription
+            .last_charged
+            .checked_add(subscription.period)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let window_end = due
+            .checked_add(RENEWAL_WINDOW)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let now = env.ledger().timestamp();
+        if now < due || now > window_end {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        // The policy setup granted this contract a SEP-41 allowance, so a
+        // third-party keeper can renew without the subscriber signing again.
+        Self::settle_period(&env, &subscription, true)?;
+        subscription.last_charged = due;
+        subscription.failed_attempts = 0;
+        policy.completed_renewals = policy
+            .completed_renewals
+            .checked_add(1)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::Subscription(subscription_id), &subscription);
+        env.storage().instance().set(&key, &policy);
+        events::charged(&env, &subscription, subscription.amount);
+        events::renewed(&env, &subscription, policy.completed_renewals);
+        Ok(subscription.amount)
+    }
+
+    /// Return the policy and computed renewal window state without mutation.
+    pub fn get_renewal_policy(env: Env, subscription_id: u64) -> Result<RenewalPolicy, ForgeError> {
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        let stored: StoredRenewalPolicy = env
+            .storage()
+            .instance()
+            .get(&DataKey::RenewalPolicy(subscription_id))
+            .unwrap_or(StoredRenewalPolicy {
+                enabled: false,
+                max_renewals: 0,
+                completed_renewals: 0,
+                allowance_live_until_ledger: 0,
+            });
+        let next_renewal_at = subscription
+            .last_charged
+            .checked_add(subscription.period)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let now = env.ledger().timestamp();
+        let eligible = stored.enabled
+            && subscription.status == SubscriptionStatus::Active
+            && (stored.max_renewals == 0 || stored.completed_renewals < stored.max_renewals)
+            && env.ledger().sequence() <= stored.allowance_live_until_ledger
+            && now >= next_renewal_at
+            && now
+                <= next_renewal_at
+                    .checked_add(RENEWAL_WINDOW)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+        Ok(RenewalPolicy {
+            enabled: stored.enabled,
+            max_renewals: stored.max_renewals,
+            completed_renewals: stored.completed_renewals,
+            next_renewal_at,
+            allowance_live_until_ledger: stored.allowance_live_until_ledger,
+            eligible,
+        })
+    }
+
     /// Declare (or replace) the metered-usage quotas of `subscription_id`.
     ///
     /// Requires the subscriber — see the module docs on metered usage for why
@@ -1336,7 +1520,7 @@ impl SubscriptionPayments {
             }
         }
 
-        if let Some(amount) = prorated_refund {
+i        if let Some(amount) = prorated_refund {
             let transfer_result = token::TokenClient::new(&env, &subscription.token).try_transfer(
                 &subscription.provider,
                 &subscription.subscriber,
@@ -1494,6 +1678,7 @@ impl SubscriptionPayments {
             status: SubscriptionStatus::Active,
             paused_at: None,
             failed_attempts: 0,
+            past_due_since: None,
             // Flat by default: a subscription is metered only when the
             // subscriber declares quotas (today via `set_quotas`, and later
             // copied from the plan it joins).
@@ -1579,6 +1764,98 @@ impl SubscriptionPayments {
             .instance()
             .get(key)
             .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Shared transfer primitive for manual charge and permissionless renew.
+    fn settle_period(
+        env: &Env,
+        subscription: &Subscription,
+        use_allowance: bool,
+    ) -> Result<(), ForgeError> {
+        let client = token::TokenClient::new(env, &subscription.token);
+        let result = if use_allowance {
+            client.try_transfer_from(
+                &env.current_contract_address(),
+                &subscription.subscriber,
+                &subscription.provider,
+                &subscription.amount,
+            )
+        } else {
+            client.try_transfer(
+                &subscription.subscriber,
+                &subscription.provider,
+                &subscription.amount,
+            )
+        };
+        match result {
+            Ok(Ok(())) => Ok(()),
+            _ => Err(ForgeError::TokenTransferFailed),
+        }
+    }
+
+    /// Open or close the shared SEP-41 allowance gate. Individual renewal
+    /// limits remain enforced by each subscription's own policy record.
+    fn set_renewal_allowance(
+        env: &Env,
+        subscription: &Subscription,
+        enabled: bool,
+    ) -> Result<u32, ForgeError> {
+        // SEP-41 allowances are shared by (subscriber, token, spender), not
+        // subscription id. The contract checks each policy before spending.
+        let allowance = if enabled { i128::MAX } else { 0 };
+        let current_ledger = env.ledger().sequence();
+        let live_until_ledger = if enabled {
+            current_ledger
+                .checked_add(env.storage().max_ttl())
+                .ok_or(ForgeError::ArithmeticOverflow)?
+        } else {
+            current_ledger
+        };
+        let result = token::TokenClient::new(env, &subscription.token).try_approve(
+            &subscription.subscriber,
+            &env.current_contract_address(),
+            &allowance,
+            &live_until_ledger,
+        );
+        if matches!(result, Ok(Ok(()))) {
+            Ok(live_until_ledger)
+        } else {
+            Err(ForgeError::TokenTransferFailed)
+        }
+    }
+
+    /// Preserve the shared token allowance while another active policy for
+    /// this subscriber and token still permits renewal calls.
+    fn has_other_enabled_renewal(env: &Env, excluded_id: u64, subscription: &Subscription) -> bool {
+        let ids = Self::index_ids(
+            env,
+            &DataKey::SubscriberSubscriptions(subscription.subscriber.clone()),
+        );
+        for id in ids.iter() {
+            if id == excluded_id {
+                continue;
+            }
+            let Ok(other) = Self::get_subscription_impl(env, id) else {
+                continue;
+            };
+            if other.token != subscription.token || other.status != SubscriptionStatus::Active {
+                continue;
+            }
+            let Some(policy) = env
+                .storage()
+                .instance()
+                .get::<_, StoredRenewalPolicy>(&DataKey::RenewalPolicy(id))
+            else {
+                continue;
+            };
+            if policy.enabled
+                && (policy.max_renewals == 0 || policy.completed_renewals < policy.max_renewals)
+                && env.ledger().sequence() <= policy.allowance_live_until_ledger
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Resolve a contiguous slice of `ids` into `Subscription` records.
@@ -1830,6 +2107,19 @@ mod events {
         pub subscriber: Address,
     }
 
+    #[contractevent]
+    pub struct RenewalPolicyChanged {
+        #[topic]
+        pub subscription_id: u64,
+        pub enabled: bool,
+        pub max_renewals: u32,
+    }
+
+    #[contractevent]
+    pub struct Renewed {
+        #[topic]
+        pub subscription_id: u64,
+        pub completed_renewals: u32,
     /// Emitted when a prorated refund is paid to the subscriber on cancel.
     #[contractevent]
     pub struct Refunded {
@@ -1928,6 +2218,28 @@ mod events {
         }
         .publish(env);
     }
+
+    pub fn renewal_policy_changed(
+        env: &Env,
+        subscription_id: u64,
+        enabled: bool,
+        max_renewals: u32,
+    ) {
+        RenewalPolicyChanged {
+            subscription_id,
+            enabled,
+            max_renewals,
+        }
+        .publish(env);
+    }
+
+    pub fn renewed(env: &Env, subscription: &Subscription, completed_renewals: u32) {
+        Renewed {
+            subscription_id: subscription.subscription_id,
+            completed_renewals,
+        }
+        .publish(env);
+    }
 }
 
 #[cfg(test)]
@@ -1939,6 +2251,9 @@ mod prepaid;
 mod plan;
 #[cfg(test)]
 mod props;
+
+#[cfg(test)]
+mod indexer_fixtures;
 
 #[cfg(test)]
 mod tests {
@@ -2920,6 +3235,111 @@ mod tests {
     }
 
     #[test]
+    fn renewal_policy_limits_renewals_and_reports_eligibility() {
+        let (env, _token, tc, _contract_id, client, accounts, subscription_id) = setup!();
+        client.set_renewal_policy(&subscription_id, &accounts.user1, &true, &1);
+        env.ledger().set_timestamp(START + PERIOD);
+        let policy = client.get_renewal_policy(&subscription_id);
+        assert!(policy.eligible);
+        assert_eq!(policy.next_renewal_at, START + PERIOD);
+        assert_eq!(client.renew(&subscription_id), AMOUNT);
+        assert_eq!(tc.balance(&accounts.user1), 10_000 - AMOUNT);
+        assert_eq!(tc.balance(&accounts.validator), AMOUNT);
+        let policy = client.get_renewal_policy(&subscription_id);
+        assert_eq!(policy.completed_renewals, 1);
+        assert!(!policy.eligible);
+        env.ledger().set_timestamp(START + PERIOD * 2);
+        assert_eq!(
+            client.try_renew(&subscription_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+    }
+
+    #[test]
+    fn renewal_policy_requires_subscriber_and_window_is_bounded() {
+        let (env, _token, _tc, _contract_id, client, accounts, subscription_id) = setup!();
+        let err = client
+            .try_set_renewal_policy(&subscription_id, &accounts.user2, &true, &0)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+        client.set_renewal_policy(&subscription_id, &accounts.user1, &true, &0);
+        env.ledger()
+            .set_timestamp(START + PERIOD + RENEWAL_WINDOW + 1);
+        assert!(!client.get_renewal_policy(&subscription_id).eligible);
+        assert_eq!(
+            client.try_renew(&subscription_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+    }
+
+    #[test]
+    fn renewal_transfer_failure_keeps_subscription_and_counter_unchanged() {
+        let (env, token, _tc, _contract_id, client, accounts, _existing_id) = setup!();
+        let broke_subscriber = Address::generate(&env);
+        let id = client.subscribe(
+            &broke_subscriber,
+            &accounts.validator,
+            &token,
+            &AMOUNT,
+            &PERIOD,
+        );
+        client.set_renewal_policy(&id, &broke_subscriber, &true, &1);
+        env.ledger().set_timestamp(START + PERIOD);
+        let before_subscription = client.get_subscription(&id);
+        let before_policy = client.get_renewal_policy(&id);
+        assert_eq!(
+            client.try_renew(&id).unwrap_err().unwrap(),
+            ForgeError::TokenTransferFailed
+        );
+        assert_eq!(client.get_subscription(&id), before_subscription);
+        assert_eq!(client.get_renewal_policy(&id), before_policy);
+    }
+
+    #[test]
+    fn renewal_obeys_pause_resume_charge_and_cancel_state() {
+        let (env, _token, _tc, _contract_id, client, accounts, id) = setup!();
+        client.set_renewal_policy(&id, &accounts.user1, &true, &2);
+        client.pause(&id);
+        env.ledger().set_timestamp(START + 500);
+        assert_eq!(
+            client.try_renew(&id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+        client.resume(&id);
+        let due = START + 500 + PERIOD;
+        env.ledger().set_timestamp(due);
+        assert_eq!(client.renew(&id), AMOUNT);
+        // A provider charge in the same period sees the advanced due date.
+        assert_eq!(client.charge(&id), 0);
+        client.cancel(&id);
+        assert_eq!(
+            client.try_renew(&id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(client.get_renewal_policy(&id).completed_renewals, 1);
+    }
+
+    #[test]
+    fn separate_policies_share_token_allowance_but_keep_independent_caps() {
+        let (env, token, tc, _contract_id, client, accounts, first_id) = setup!();
+        let second_id = client.subscribe(
+            &accounts.user1,
+            &accounts.validator,
+            &token,
+            &AMOUNT,
+            &PERIOD,
+        );
+        client.set_renewal_policy(&first_id, &accounts.user1, &true, &1);
+        client.set_renewal_policy(&second_id, &accounts.user1, &true, &1);
+        env.ledger().set_timestamp(START + PERIOD);
+        assert_eq!(client.renew(&first_id), AMOUNT);
+        assert_eq!(client.renew(&second_id), AMOUNT);
+        assert_eq!(tc.balance(&accounts.user1), 10_000 - AMOUNT * 2);
+        assert_eq!(client.get_renewal_policy(&first_id).completed_renewals, 1);
+        assert_eq!(client.get_renewal_policy(&second_id).completed_renewals, 1);
+        assert!(!client.get_renewal_policy(&first_id).eligible);
+        assert!(!client.get_renewal_policy(&second_id).eligible);
     fn persistent_record_and_touch_ttl_are_available() {
         let (env, _token, _tc, contract_id, client, _accounts, subscription_id) = setup!();
         let key = DataKey::Subscription(subscription_id);
