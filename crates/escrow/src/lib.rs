@@ -13,6 +13,7 @@
 //!                     |                                  +--> Completed (final partial)
 //!                     |        --release--> Completed (full, direct)
 //!                     |        --refund--> Refunded   (buyer back, remaining only)
+//!                     |        --refund_expired--> Refunded (permissionless keeper, post-deadline)
 //!                     |        --dispute--> Disputed --resolve--> Completed | Refunded
 //!          --cancel--> Cancelled (before funding only)
 //! ```
@@ -101,6 +102,10 @@
 //!   status) return `InvalidInput` without modifying storage.
 //! - `refund` — seller before the deadline; buyer may reclaim after the
 //!   deadline.
+//! - `refund_expired` — **permissionless**. Any account or automated keeper
+//!   may invoke this strictly after the deadline (`now > deadline`) to sweep
+//!   the remaining balance back to the buyer without party signatures. Escrows
+//!   in `Disputed` are frozen against keeper sweeps.
 //! - `dispute` — the **claimant** (buyer or seller) is passed explicitly
 //!   and must be one of the two parties; their `require_auth` proves the
 //!   claim. Soroban has no "auth by A-or-B" primitive, so an explicit
@@ -236,6 +241,24 @@ pub trait SorobanForgeEscrow {
     /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
     ///   the payout.
     fn refund(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    /// Permissionless expiry refund keeper: settles the full remaining balance
+    /// to the buyer when called strictly after the deadline (`now > deadline`).
+    ///
+    /// Valid only while `Funded` and strictly after the deadline. Does not require
+    /// party authorization — any account or automated keeper bot may trigger it
+    /// to sweep expired escrows and return unfulfilled funds to the buyer.
+    ///
+    /// If the escrow is in `Disputed`, calls fail with [`ForgeError::InvalidInput`]
+    /// so the dispute freeze integrity holds against third parties.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Funded` (or is in `Disputed`).
+    /// * [`ForgeError::DeadlineReached`] — deadline has not yet passed (`now <= deadline`).
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected the payout.
+    fn refund_expired(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
     /// Raise a dispute. `claimant` must be the buyer or the seller and
     /// must authorize the call; only valid while `Funded`. Freezes the
@@ -729,6 +752,47 @@ impl Escrow {
         Ok(())
     }
 
+    /// Refund the buyer after the timeout has passed. Permissionless: can be called
+    /// by any account (keeper, bot, indexer, or party) without authorization.
+    ///
+    /// Valid only while `Funded` and strictly after the deadline (`now > deadline`).
+    /// Settles the full remaining balance (`amount - released`) to the buyer.
+    /// Transitions state to `EscrowStatus::Refunded`.
+    ///
+    /// Escrows in `Disputed` return [`ForgeError::InvalidInput`] so the dispute freeze
+    /// holds against third-party sweeps.
+    ///
+    /// Emits a dedicated `RefundExpired` event to distinguish keeper-triggered settlements.
+    pub fn refund_expired(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
+        let escrow = Self::load_escrow(&env, escrow_id)?;
+        if escrow.status != EscrowStatus::Funded {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let now = env.ledger().timestamp();
+        let deadline = escrow
+            .created_at
+            .checked_add(escrow.timeout)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+
+        if now <= deadline {
+            return Err(ForgeError::DeadlineReached);
+        }
+
+        let remaining = escrow.remaining();
+        transfer_from_contract(&env, &escrow.token, &escrow.buyer, remaining)?;
+
+        let mut refunded = escrow;
+        refunded.released = refunded.amount; // account for full payout
+        refunded.status = EscrowStatus::Refunded;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &refunded);
+        bump_entry(&env, &DataKey::Escrow(escrow_id));
+        events::refund_expired(&env, &refunded);
+        Ok(())
+    }
+
     /// Raise a dispute: the claimant (buyer or seller) authorizes, while
     /// `Funded`. Freezes the remaining balance until the arbiter resolves.
     pub fn dispute(env: Env, escrow_id: u64, claimant: Address) -> Result<(), ForgeError> {
@@ -1160,6 +1224,14 @@ mod events {
         pub data: EscrowData,
     }
 
+    /// Emitted by `refund_expired` when an expired escrow is swept by a keeper.
+    #[contractevent]
+    pub struct RefundExpired {
+        #[topic]
+        pub escrow_id: u64,
+        pub data: EscrowData,
+    }
+
     #[contractevent]
     pub struct Disputed {
         #[topic]
@@ -1229,6 +1301,14 @@ mod events {
 
     pub fn refunded(env: &Env, escrow: &EscrowData) {
         Refunded {
+            escrow_id: escrow.escrow_id,
+            data: escrow.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn refund_expired(env: &Env, escrow: &EscrowData) {
+        RefundExpired {
             escrow_id: escrow.escrow_id,
             data: escrow.clone(),
         }

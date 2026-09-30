@@ -10,6 +10,7 @@ fn deposit(escrow_id) -> Result<(), ForgeError>
 fn release(escrow_id) -> Result<(), ForgeError>
 fn release_partial(escrow_id, amount) -> Result<(), ForgeError>
 fn refund(escrow_id) -> Result<(), ForgeError>
+fn refund_expired(escrow_id) -> Result<(), ForgeError>
 fn dispute(escrow_id, claimant) -> Result<(), ForgeError>
 fn resolve(escrow_id, in_favor_of_seller) -> Result<(), ForgeError>
 fn cancel(escrow_id) -> Result<(), ForgeError>
@@ -52,6 +53,7 @@ Pending --deposit--> Funded --release_partial (×n)--> Funded  (partial)
                     |                                  +--> Completed (final partial)
                     |        --release--> Completed (full, direct)
                     |        --refund--> Refunded   (buyer back, remaining only)
+                    |        --refund_expired--> Refunded (permissionless keeper post-deadline)
                     |        --dispute--> Disputed --resolve--> Completed | Refunded
          --cancel--> Cancelled (before funding only)
 ```
@@ -102,6 +104,53 @@ carries `partial_amount` (the incremental transfer) and the full `EscrowData`
 (including updated `released` and `status`). The existing `Released` event
 remains exclusively for the `release` entrypoint and signals terminal
 completion to indexers.
+
+## Permissionless Expiry Refund Keeper
+
+`refund_expired(escrow_id)` provides a permissionless entrypoint allowing any
+caller, keeper bot, or automated cron sweep to trigger an expired escrow refund
+to the buyer without requiring party authorization signatures.
+
+### Mechanics & Invariants
+
+1. **Authorization-Free**: Unlike `refund(escrow_id)` (which requires seller auth
+   pre-deadline or buyer auth post-deadline), `refund_expired` requires no caller
+   signatures. Any third party can execute the sweep.
+2. **Payout Recipient**: All refunded funds are sent strictly to the recorded
+   `buyer` address. The caller/keeper cannot redirect or claim any portion of the
+   escrow principal.
+3. **Conservation**: Operates on remaining balance (`amount - released`),
+   preserving accounting when prior `release_partial` calls occurred.
+4. **State Transition**: Sets `status = Refunded`, `released = amount`, and bumps
+   the persistent entry TTL to `PERSISTENT_BUMP_LEDGERS`.
+5. **Event**: Emits a dedicated `RefundExpired` contract event with topic
+   `refund_expired` and `escrow_id`, distinct from `Refunded`, allowing indexers
+   and monitoring services to attribute keeper-driven sweeps cleanly.
+
+### Anti-Griefing Boundary Analysis
+
+The entrypoint pins strict boundary conditions to protect sellers and arbiters
+against premature sweeps, front-running, or dispute circumvention:
+
+- **Strict Post-Deadline Inequality (`now > deadline`)**:
+  - `deadline = created_at + timeout`.
+  - Calling at `now < deadline` or `now == deadline` is rejected with
+    `ForgeError::DeadlineReached`.
+  - Sellers have until the exact boundary second (`now == deadline`) to confirm
+    delivery or initiate a dispute. Keepers cannot sweep at the boundary second.
+- **Dispute Freeze Protection**:
+  - Escrows in `EscrowStatus::Disputed` reject `refund_expired` with
+    `ForgeError::InvalidInput`.
+  - Once a dispute is raised by either party, arbitration freeze is absolute: a
+    third party cannot bypass the arbiter by waiting out the deadline. Only
+    `resolve` may settle a disputed escrow.
+- **Status Gating**:
+  - Calling on `Pending` escrows (before deposit) rejects with `ForgeError::InvalidInput`.
+  - Calling on terminal escrows (`Completed`, `Refunded`, `Cancelled`) rejects with
+    `ForgeError::InvalidInput`.
+- **Transfer-Before-State Safety**:
+  - Payout via SEP-41 token transfer executes before mutating storage state. If the
+    token contract fails or reverts, the escrow record remains unaltered in `Funded` state.
 
 ## Storage Compatibility
 

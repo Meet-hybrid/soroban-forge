@@ -421,6 +421,38 @@ fn refund_authorization_tree_is_seller_pre_deadline() {
 }
 
 // -----------------------------------------------------------------------
+// refund_expired
+// -----------------------------------------------------------------------
+
+#[test]
+fn refund_expired_requires_no_authorization() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    client.deposit(&id);
+
+    env.ledger().set_timestamp(START + TIMEOUT + 1);
+
+    // Completely empty mock_auths envelope — no caller or party signature armed.
+    env.mock_auths(&[]);
+
+    // Permissionless call succeeds.
+    let res = client.try_refund_expired(&id);
+    assert!(
+        res.is_ok(),
+        "refund_expired must succeed with zero caller auth armed"
+    );
+    assert_eq!(tc.balance(buyer), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
+
+    // Verified: recorded auths are empty because caller needs no auth and token transfer is self-auth.
+    assert_eq!(env.auths(), []);
+}
+
+// -----------------------------------------------------------------------
 // dispute
 // -----------------------------------------------------------------------
 

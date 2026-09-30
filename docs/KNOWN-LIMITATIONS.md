@@ -162,6 +162,14 @@ contributions have landed yet.
   authorized-invocation tree for a payout shows only the party's
   entrypoint frame. Verified, not assumed: see the authz test module's
   documentation.
+- **Permissionless expiry-refund keeper anti-griefing boundaries**:
+  `refund_expired(escrow_id)` enables trustless third-party sweeps of expired
+  escrows without requiring buyer private keys or interaction. To prevent griefing
+  against sellers or arbiters, the entrypoint enforces strict inequality
+  `now > deadline` (rejecting boundary calls at `now == deadline` so sellers have
+  full allowance through the deadline second) and absolute dispute freezing
+  (escrows in `Disputed` status reject `refund_expired` with `ForgeError::InvalidInput`,
+  ensuring third-party keepers cannot front-run or circumvent arbitration).
 
 ## Out of scope for the flagship phase (deliberate)
 
