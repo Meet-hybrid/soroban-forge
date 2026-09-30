@@ -78,6 +78,13 @@ A first tranche at `unlock_at == 0` unlocks at the creation timestamp — the
 "TGE tranche" of a typical agreement. The table is validated, stored once, and
 immutable afterwards.
 
+## Revocation
+
+The creator of a schedule may revoke it, clawing back tokens under a
+configurable policy. Revocation is terminal: a revoked schedule can no longer
+be claimed.
+
+
 ## Release Formula
 
 Linear, at ledger time `t`:

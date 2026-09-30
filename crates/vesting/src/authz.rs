@@ -13,6 +13,9 @@
 //! 2. **Tree assertions** (`env.auths()` under `mock_all_auths`): pins the
 //!    exact authorized-invocation tree the contract demands on creation and
 //!    settlement claim paths.
+//! 3. **Revocation authorization**: only the schedule creator may revoke, and
+//!    the revocation policy is bound into the signed arguments so a tampered
+//!    policy is rejected by the host.
 //!
 //! ## Host Mechanics (soroban-sdk 27.0.6)
 //!
@@ -25,7 +28,7 @@
 //!   sub-invocations, and a claim payout legitimately completes on the beneficiary's
 //!   signature alone.
 
-use crate::{SorobanForgeVestingClient, Vesting, VestingStatus};
+use crate::{RevocationPolicy, SorobanForgeVestingClient, Vesting, VestingStatus};
 
 extern crate std;
 use soroban_sdk::testutils::{
@@ -262,6 +265,190 @@ fn claim_rejects_signature_from_non_beneficiary() {
     let res = client.try_claim(&id);
     assert_auth_abort!(res);
     assert_eq!(tc.balance(beneficiary), 0);
+    assert_eq!(tc.balance(&contract_id), TOTAL);
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+}
+
+// -----------------------------------------------------------------------
+// revoke authorization & negative-auth tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn revoke_accepts_creator_signature_with_matching_args() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let beneficiary = &accounts.user1;
+    let creator = &accounts.user2;
+    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    env.mock_auths(&[MockAuth {
+        address: creator,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id, RevocationPolicy::FullClawback).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_revoke(&id, &RevocationPolicy::FullClawback)
+        .expect("outer ok")
+        .expect("revoke ok");
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+    assert_eq!(tc.balance(creator), TOTAL);
+    assert_eq!(tc.balance(&contract_id), 0);
+}
+
+#[test]
+fn revoke_rejects_signature_from_non_creator() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let beneficiary = &accounts.user1;
+    let creator = &accounts.user2;
+    let attacker = &accounts.user3;
+    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    // Attacker signs, but creator is the revocation authority
+    env.mock_auths(&[MockAuth {
+        address: attacker,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id, RevocationPolicy::FullClawback).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_revoke(&id, &RevocationPolicy::FullClawback);
+    assert_auth_abort!(res);
+    assert_eq!(tc.balance(creator), 0);
+    assert_eq!(tc.balance(&contract_id), TOTAL);
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+}
+
+#[test]
+fn revoke_rejects_beneficiary_signature() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let beneficiary = &accounts.user1;
+    let creator = &accounts.user2;
+    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    // Beneficiary is not the revocation authority
+    env.mock_auths(&[MockAuth {
+        address: beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id, RevocationPolicy::FullClawback).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_revoke(&id, &RevocationPolicy::FullClawback);
+    assert_auth_abort!(res);
+    assert_eq!(tc.balance(beneficiary), 0);
+    assert_eq!(tc.balance(&contract_id), TOTAL);
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+}
+
+#[test]
+fn revoke_rejects_signature_over_different_policy() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let beneficiary = &accounts.user1;
+    let creator = &accounts.user2;
+    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    // Creator signed for FullClawback, but call attempts KeepUnvested
+    env.mock_auths(&[MockAuth {
+        address: creator,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id, RevocationPolicy::FullClawback).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_revoke(&id, &RevocationPolicy::KeepUnvested);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn revoke_rejects_signature_replayed_for_different_schedule_id() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let beneficiary = &accounts.user1;
+    let creator = &accounts.user2;
+    let id1 = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id2 = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    // Signature armed specifically for id1
+    env.mock_auths(&[MockAuth {
+        address: creator,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id1, RevocationPolicy::FullClawback).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    // Attempting to use id1 auth on id2 must fail
+    let res = client.try_revoke(&id2, &RevocationPolicy::FullClawback);
+    assert_auth_abort!(res);
+    assert_eq!(tc.balance(creator), 0);
+    assert_eq!(tc.balance(&contract_id), TOTAL * 2);
+}
+
+#[test]
+fn revoke_authorization_tree_is_creator_root_entrypoint() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let beneficiary = &accounts.user1;
+    let creator = &accounts.user2;
+    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + CLIFF + 500);
+    client.revoke(&id, &RevocationPolicy::FullClawback);
+
+    assert_eq!(
+        env.auths(),
+        [(
+            creator.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "revoke"),
+                    (id, RevocationPolicy::FullClawback).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
+}
+
+#[test]
+fn blank_envelope_aborts_revoke_and_preserves_custody() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let beneficiary = &accounts.user1;
+    let creator = &accounts.user2;
+    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    // Blank envelope
+    env.set_auths(&[]);
+
+    let res = client.try_revoke(&id, &RevocationPolicy::FullClawback);
+    assert_auth_abort!(res);
+    assert_eq!(tc.balance(creator), 0);
     assert_eq!(tc.balance(&contract_id), TOTAL);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
 }

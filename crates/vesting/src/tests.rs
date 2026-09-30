@@ -46,6 +46,22 @@ fn create(client: &SorobanForgeVestingClient<'_>, token: &Address, accounts: &Te
     client.create_schedule(&accounts.user1, token, &TOTAL, &CLIFF, &DURATION)
 }
 
+fn create_with_policy(
+    client: &SorobanForgeVestingClient<'_>,
+    token: &Address,
+    accounts: &TestAccounts,
+    policy: RevocationPolicy,
+) -> u64 {
+    client.create_schedule_with_policy(
+        &accounts.user1,
+        token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+        &policy,
+    )
+}
+
 #[test]
 fn create_schedule_succeeds_and_is_locked() {
     let (_env, token, _tc, _cid, client, accounts) = setup!();
@@ -958,4 +974,182 @@ fn schedules_for_distinct_beneficiaries_are_disjoint() {
 
     assert_eq!(s2.len(), 1);
     assert_eq!(s2.get(0).unwrap(), id2);
+}
+
+// -------------------------------------------------------------------
+// Revocation
+// -------------------------------------------------------------------
+
+#[test]
+fn revoke_before_cliff_full_clawback_returns_all_tokens() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create_with_policy(&client, &token, &accounts, RevocationPolicy::FullClawback);
+
+    // Before the cliff: nothing vested, so the full allocation is clawed back.
+    env.ledger().set_timestamp(START + CLIFF / 2);
+    client.revoke(&id, &RevocationPolicy::FullClawback);
+
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+    assert_eq!(tc.balance(&accounts.user1), 0);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.claimable(&id), 0);
+}
+
+#[test]
+fn revoke_after_cliff_full_clawback_returns_unvested_only() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create_with_policy(&client, &token, &accounts, RevocationPolicy::FullClawback);
+
+    // Halfway through the ramp: floor(TOTAL * 2_000 / 3_000) = 6_666 vested.
+    env.ledger().set_timestamp(START + CLIFF + DURATION / 2);
+    client.revoke(&id, &RevocationPolicy::FullClawback);
+
+    // Vested portion is paid to the beneficiary; the remainder is returned.
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+    assert_eq!(tc.balance(&accounts.user1), 6_666);
+    assert_eq!(tc.balance(&contract_id), TOTAL - 6_666);
+    assert_eq!(client.claimable(&id), 0);
+}
+
+#[test]
+fn revoke_after_cliff_keep_unvested_returns_unvested_only() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create_with_policy(&client, &token, &accounts, RevocationPolicy::KeepUnvested);
+
+    env.ledger().set_timestamp(START + CLIFF + DURATION / 2);
+    client.revoke(&id, &RevocationPolicy::KeepUnvested);
+
+    // Same accounting as FullClawback after the cliff: vested stays with the
+    // beneficiary, unvested returns to the creator.
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+    assert_eq!(tc.balance(&accounts.user1), 6_666);
+    assert_eq!(tc.balance(&contract_id), TOTAL - 6_666);
+    assert_eq!(client.claimable(&id), 0);
+}
+
+#[test]
+fn revoke_after_full_vesting_is_noop_or_error() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create_with_policy(&client, &token, &accounts, RevocationPolicy::FullClawback);
+
+    // Past the end of the window: everything has vested.
+    env.ledger().set_timestamp(START + DURATION + 1);
+    let err = client
+        .try_revoke(&id, &RevocationPolicy::FullClawback)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+
+    // Nothing moved and the schedule is still claimable in full.
+    assert_eq!(tc.balance(&accounts.user1), 0);
+    assert_eq!(tc.balance(&contract_id), TOTAL);
+    assert_eq!(client.claimable(&id), TOTAL);
+}
+
+#[test]
+fn cannot_claim_after_revocation() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create_with_policy(&client, &token, &accounts, RevocationPolicy::FullClawback);
+
+    env.ledger().set_timestamp(START + CLIFF + DURATION / 2);
+    client.revoke(&id, &RevocationPolicy::FullClawback);
+
+    // Any further claim is rejected and moves no tokens.
+    let err = client.try_claim(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(&accounts.user1), 6_666);
+    assert_eq!(tc.balance(&contract_id), TOTAL - 6_666);
+    assert_eq!(client.claimable(&id), 0);
+}
+
+#[test]
+fn revoke_before_cliff_is_rejected() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create_with_policy(&client, &token, &accounts, RevocationPolicy::FullClawback);
+
+    // Cliff enforcement: revocation is not permitted before the cliff.
+    env.ledger().set_timestamp(START + CLIFF - 1);
+    let err = client
+        .try_revoke(&id, &RevocationPolicy::FullClawback)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(client.get_status(&id), VestingStatus::Locked);
+}
+
+#[test]
+fn revoke_missing_schedule_is_not_found() {
+    let (_env, _token, _tc, _cid, client, _accounts) = setup!();
+    let err = client
+        .try_revoke(&999, &RevocationPolicy::FullClawback)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::NotFound);
+}
+
+#[test]
+fn revoke_twice_is_rejected() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create_with_policy(&client, &token, &accounts, RevocationPolicy::FullClawback);
+
+    env.ledger().set_timestamp(START + CLIFF + DURATION / 2);
+    client.revoke(&id, &RevocationPolicy::FullClawback);
+
+    let err = client
+        .try_revoke(&id, &RevocationPolicy::FullClawback)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+}
+
+#[test]
+fn revoke_emits_event_with_amount() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create_with_policy(&client, &token, &accounts, RevocationPolicy::FullClawback);
+
+    env.ledger().set_timestamp(START + CLIFF + DURATION / 2);
+    client.revoke(&id, &RevocationPolicy::FullClawback);
+
+    // The revocation event carries the schedule id and the clawed-back amount.
+    let events = env.events().all();
+    let revoked = events
+        .iter()
+        .find(|(_, topics, _)| {
+            topics
+                .iter()
+                .any(|t| t == soroban_sdk::symbol_short!("revoked").into())
+        })
+        .expect("revoked event not emitted");
+    let (_, _, data) = revoked;
+    let (event_id, event_amount): (u64, i128) = data.try_into_val(&env).unwrap();
+    assert_eq!(event_id, id);
+    assert_eq!(event_amount, TOTAL - 6_666);
+}
+
+#[test]
+fn only_creator_can_revoke() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create_with_policy(&client, &token, &accounts, RevocationPolicy::FullClawback);
+
+    // Enforce auth: the beneficiary cannot revoke their own schedule.
+    env.set_auths(&[]);
+    env.ledger().set_timestamp(START + CLIFF + DURATION / 2);
+    let err = client
+        .try_revoke(&id, &RevocationPolicy::FullClawback)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::Unauthorized);
+}
+
+#[test]
+fn revoke_state_transitions_locked_to_revoked() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create_with_policy(&client, &token, &accounts, RevocationPolicy::FullClawback);
+    assert_eq!(client.get_status(&id), VestingStatus::Locked);
+
+    env.ledger().set_timestamp(START + CLIFF + 1);
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+
+    client.revoke(&id, &RevocationPolicy::FullClawback);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
 }
