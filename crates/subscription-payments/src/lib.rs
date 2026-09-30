@@ -871,6 +871,7 @@ impl SubscriptionPayments {
         env.storage()
             .instance()
             .set(&DataKey::Subscription(subscription_id), &subscription);
+        events::paused(&env, &subscription);
         Ok(())
     }
 
@@ -900,6 +901,7 @@ impl SubscriptionPayments {
         env.storage()
             .instance()
             .set(&DataKey::Subscription(subscription_id), &subscription);
+        events::resumed(&env, &subscription);
         Ok(())
     }
 
@@ -1321,6 +1323,22 @@ mod events {
         pub subscriber: Address,
     }
 
+    /// Billing was paused by the subscriber; no charges occur until resume.
+    #[contractevent]
+    pub struct Paused {
+        #[topic]
+        pub subscription_id: u64,
+        pub subscriber: Address,
+    }
+
+    /// A paused subscription was resumed by the subscriber; billing continues.
+    #[contractevent]
+    pub struct Resumed {
+        #[topic]
+        pub subscription_id: u64,
+        pub subscriber: Address,
+    }
+
     pub fn charged(env: &Env, subscription: &Subscription, amount: i128) {
         let next_charge_at = subscription
             .last_charged
@@ -1360,6 +1378,22 @@ mod events {
         }
         .publish(env);
     }
+
+    pub fn paused(env: &Env, subscription: &Subscription) {
+        Paused {
+            subscription_id: subscription.subscription_id,
+            subscriber: subscription.subscriber.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn resumed(env: &Env, subscription: &Subscription) {
+        Resumed {
+            subscription_id: subscription.subscription_id,
+            subscriber: subscription.subscriber.clone(),
+        }
+        .publish(env);
+    }
 }
 
 #[cfg(test)]
@@ -1373,9 +1407,12 @@ mod props;
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use soroban_sdk::testutils::{
+        Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke,
+    };
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-    use soroban_sdk::{Address, Env};
+    use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
+    use soroban_sdk::{Address, Env, FromVal, IntoVal, InvokeError, Map, Symbol, TryIntoVal, Val};
 
     const START: u64 = 1_000_000;
     const PERIOD: u64 = 1_000;
@@ -2288,5 +2325,246 @@ mod tests {
 
         let sub = client.get_subscription(&subscription_id);
         assert_eq!(sub.last_charged, START + PERIOD * 2);
+    }
+
+    /// Every event the latest invocation published under `name`, decoded as
+    /// its full topics (the event name first) and its data map — the shape an
+    /// indexer consumes.
+    fn events_named(
+        env: &Env,
+        contract: &Address,
+        name: &str,
+    ) -> std::vec::Vec<(Vec<Val>, Map<Symbol, Val>)> {
+        let name = ScVal::Symbol(ScSymbol::try_from(name).unwrap());
+        env.events()
+            .all()
+            .filter_by_contract(contract)
+            .events()
+            .iter()
+            .filter_map(|event| {
+                let ContractEventBody::V0(body) = &event.body;
+                if body.topics.first() != Some(&name) {
+                    return None;
+                }
+                Some((
+                    body.topics.clone().try_into_val(env).unwrap(),
+                    body.data.clone().try_into_val(env).unwrap(),
+                ))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pause_emits_paused_event_once_with_topic_and_subscriber() {
+        let (env, _token, _tc, _contract_id, client, accounts, subscription_id) = setup!();
+        env.ledger().set_timestamp(START + 250);
+        client.pause(&subscription_id);
+
+        let paused = events_named(&env, &client.address, "paused");
+        assert_eq!(paused.len(), 1);
+        let (topics, data) = &paused[0];
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "paused")
+        );
+        assert_eq!(
+            u64::from_val(&env, &topics.get_unchecked(1)),
+            subscription_id
+        );
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "subscriber")).unwrap()),
+            accounts.user1
+        );
+    }
+
+    #[test]
+    fn resume_emits_resumed_event_once_with_topic_and_subscriber() {
+        let (env, _token, _tc, _contract_id, client, accounts, subscription_id) = setup!();
+        env.ledger().set_timestamp(START + 300);
+        client.pause(&subscription_id);
+        env.ledger().set_timestamp(START + 800);
+        client.resume(&subscription_id);
+
+        let resumed = events_named(&env, &client.address, "resumed");
+        assert_eq!(resumed.len(), 1);
+        let (topics, data) = &resumed[0];
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "resumed")
+        );
+        assert_eq!(
+            u64::from_val(&env, &topics.get_unchecked(1)),
+            subscription_id
+        );
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "subscriber")).unwrap()),
+            accounts.user1
+        );
+        // The resume invocation publishes the resume only; the pause event
+        // belongs to its own call.
+        assert!(events_named(&env, &client.address, "paused").is_empty());
+    }
+
+    #[test]
+    fn pause_failure_paths_emit_no_paused_events() {
+        let (env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
+
+        // Unknown id.
+        let err = client.try_pause(&999).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+        assert!(events_named(&env, &client.address, "paused").is_empty());
+
+        // Already paused: the successful pause published exactly once, the
+        // rejected one published nothing.
+        client.pause(&subscription_id);
+        assert_eq!(events_named(&env, &client.address, "paused").len(), 1);
+        let err = client.try_pause(&subscription_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(events_named(&env, &client.address, "paused").is_empty());
+
+        // Cancelled subscriptions cannot pause.
+        client.cancel(&subscription_id);
+        let err = client.try_pause(&subscription_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(events_named(&env, &client.address, "paused").is_empty());
+    }
+
+    #[test]
+    fn resume_failure_paths_emit_no_resumed_events() {
+        let (env, _token, _tc, _contract_id, client, _accounts, subscription_id) = setup!();
+
+        // Resume while Active.
+        let err = client.try_resume(&subscription_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(events_named(&env, &client.address, "resumed").is_empty());
+
+        // Unknown id.
+        let err = client.try_resume(&999).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+        assert!(events_named(&env, &client.address, "resumed").is_empty());
+
+        // Cancelled subscriptions cannot resume. The cancel itself published
+        // exactly one `cancelled` event and no resume event. (A failed `try_`
+        // invocation clears the test host's recorded events, so the count is
+        // asserted before the rejected call.)
+        client.cancel(&subscription_id);
+        assert_eq!(events_named(&env, &client.address, "cancelled").len(), 1);
+        assert!(events_named(&env, &client.address, "resumed").is_empty());
+
+        // The rejected resume publishes nothing.
+        let err = client.try_resume(&subscription_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(events_named(&env, &client.address, "resumed").is_empty());
+    }
+
+    #[test]
+    fn pause_by_wrong_signer_aborts_without_emitting() {
+        let (env, _token, _tc, contract_id, client, accounts, subscription_id) = setup!();
+        // `pause` requires the subscriber; a provider-signed pause aborts
+        // before any state is written or event published.
+        env.mock_auths(&[MockAuth {
+            address: &accounts.validator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause",
+                args: (subscription_id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let res = client.try_pause(&subscription_id);
+        assert!(
+            matches!(res, Err(Err(InvokeError::Abort))),
+            "expected auth abort, got {res:?}"
+        );
+        assert_eq!(
+            client.get_subscription(&subscription_id).status,
+            SubscriptionStatus::Active
+        );
+        assert!(events_named(&env, &client.address, "paused").is_empty());
+    }
+
+    #[test]
+    fn resume_by_wrong_signer_aborts_without_emitting() {
+        let (env, _token, _tc, contract_id, client, accounts, subscription_id) = setup!();
+        client.pause(&subscription_id);
+        // `resume` requires the subscriber; a provider-signed resume aborts
+        // before any state is written or event published.
+        env.mock_auths(&[MockAuth {
+            address: &accounts.validator,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "resume",
+                args: (subscription_id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let res = client.try_resume(&subscription_id);
+        assert!(
+            matches!(res, Err(Err(InvokeError::Abort))),
+            "expected auth abort, got {res:?}"
+        );
+        assert_eq!(
+            client.get_subscription(&subscription_id).status,
+            SubscriptionStatus::Paused
+        );
+        assert!(events_named(&env, &client.address, "resumed").is_empty());
+    }
+
+    #[test]
+    fn cancel_after_pause_and_resume_emits_exactly_one_cancelled_event() {
+        let (env, token, _tc, _contract_id, client, accounts, subscription_id) = setup!();
+
+        env.ledger().set_timestamp(START + 200);
+        client.pause(&subscription_id);
+        assert_eq!(events_named(&env, &client.address, "paused").len(), 1);
+
+        env.ledger().set_timestamp(START + 700);
+        client.resume(&subscription_id);
+        assert_eq!(events_named(&env, &client.address, "resumed").len(), 1);
+
+        client.cancel(&subscription_id);
+        let cancelled = events_named(&env, &client.address, "cancelled");
+        assert_eq!(cancelled.len(), 1);
+        let (topics, data) = &cancelled[0];
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "cancelled")
+        );
+        assert_eq!(
+            u64::from_val(&env, &topics.get_unchecked(1)),
+            subscription_id
+        );
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "subscriber")).unwrap()),
+            accounts.user1
+        );
+        // The cancel invocation carries no pause or resume events. (A failed
+        // `try_` invocation clears the test host's recorded events, so counts
+        // are asserted before the rejected call.)
+        assert!(events_named(&env, &client.address, "paused").is_empty());
+        assert!(events_named(&env, &client.address, "resumed").is_empty());
+
+        // Cancelling again is rejected and publishes nothing.
+        let err = client.try_cancel(&subscription_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(events_named(&env, &client.address, "cancelled").is_empty());
+
+        // Cancelling from `Paused` emits `cancelled` without a `resumed`.
+        let paused_id = client.subscribe(
+            &accounts.user2,
+            &accounts.validator,
+            &token,
+            &AMOUNT,
+            &PERIOD,
+        );
+        client.pause(&paused_id);
+        client.cancel(&paused_id);
+        let cancelled = events_named(&env, &client.address, "cancelled");
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(
+            u64::from_val(&env, &cancelled[0].0.get_unchecked(1)),
+            paused_id
+        );
+        assert!(events_named(&env, &client.address, "resumed").is_empty());
     }
 }
