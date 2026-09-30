@@ -155,6 +155,20 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
+/// Emitted when a subscription charge settles a token transfer.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChargeSettled {
+    #[topic]
+    pub subscription_id: u64,
+    pub subscriber: Address,
+    pub provider: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub period_start: u64,
+    pub period_end: u64,
+}
+
 /// Maximum consecutive failed payment attempts before transitioning to Cancelled.
 const MAX_RETRIES: u32 = 3;
 

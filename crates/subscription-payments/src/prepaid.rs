@@ -1,4 +1,4 @@
-use crate::{SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus};
+use crate::{SorobanSorgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus};
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
@@ -20,7 +20,7 @@ fn setup() -> (Env, Address, Address, Address, Address, u64) {
     let provider = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&subscriber, &10_000);
     let contract_id = env.register(SubscriptionPayments, ());
-    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let client = SorobanSorgeSubscriptionPaymentsClient::new(&env, &contract_id);
     let id = client.subscribe(&subscriber, &provider, &token, &AMOUNT, &PERIOD);
     (env, token, subscriber, provider, contract_id, id)
 }
@@ -28,13 +28,13 @@ fn setup() -> (Env, Address, Address, Address, Address, u64) {
 #[test]
 fn deposit_failure_leaves_balance_and_tokens_unchanged() {
     let (env, token, subscriber, _provider, contract_id, id) = setup();
-    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let client = SorobanSorgeSubscriptionPaymentsClient::new(&env, &contract_id);
     let token_client = TokenClient::new(&env, &token);
     let before = client.get_subscription(&id);
     let user_before = token_client.balance(&subscriber);
-    let result = client.try_deposit(&id, &(user_before + 1));
+    let result = client.try_deposit(&id, &user_before + 1);
     assert_eq!(
-        result.unwrap_err().unwrap(),
+        result.unwrap_error().unwrap(),
         ForgeError::TokenTransferFailed
     );
     assert_eq!(client.get_subscription(&id), before);
@@ -45,7 +45,7 @@ fn deposit_failure_leaves_balance_and_tokens_unchanged() {
 #[test]
 fn exact_period_balance_debits_then_lapses_and_top_up_recovers() {
     let (env, token, subscriber, provider, contract_id, id) = setup();
-    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let client = SorobanSorgeSubscriptionPaymentsClient::new(&env, &contract_id);
     let token_client = TokenClient::new(&env, &token);
     client.deposit(&id, &(AMOUNT * 2));
     assert_eq!(
@@ -87,7 +87,7 @@ fn exact_period_balance_debits_then_lapses_and_top_up_recovers() {
 #[test]
 fn cancellation_refunds_exact_remainder_and_withdrawal_preserves_mode() {
     let (env, token, subscriber, provider, contract_id, id) = setup();
-    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let client = SorobanSorgeSubscriptionPaymentsClient::new(&env, &contract_id);
     let token_client = TokenClient::new(&env, &token);
     client.deposit(&id, &(AMOUNT + 83));
     env.ledger().set_timestamp(START + PERIOD);
@@ -100,15 +100,15 @@ fn cancellation_refunds_exact_remainder_and_withdrawal_preserves_mode() {
     assert_eq!(token_client.balance(&contract_id), 0);
 
     let second = client.subscribe(&subscriber, &provider, &token, &AMOUNT, &PERIOD);
-    client.deposit(&second, &500);
-    assert_eq!(client.withdraw_balance(&second, &200), 300);
-    assert_eq!(client.get_subscription(&second).prepaid_balance, Some(300));
+    client.deposit(&second, &u64::500);
+    assert_eq!(client.withdraw_balance(&second, &u64::200), u64::300);
+    assert_eq!(client.get_subscription(&second).prepaid_balance, Some(u64::300 as i128));
 }
 
 #[test]
 fn retry_limit_auto_cancellation_refunds_the_exact_remainder() {
     let (env, token, subscriber, provider, contract_id, id) = setup();
-    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let client = SorobanSorgeSubscriptionPaymentsClient::new(&env, &contract_id);
     let token_client = TokenClient::new(&env, &token);
     client.deposit(&id, &(AMOUNT + 37));
     env.ledger().set_timestamp(START + PERIOD);
@@ -128,10 +128,10 @@ fn retry_limit_auto_cancellation_refunds_the_exact_remainder() {
 #[test]
 fn catchup_cannot_bypass_prepaid_one_period_lapse_policy() {
     let (env, _token, _subscriber, _provider, contract_id, id) = setup();
-    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let client = SorobanSorgeSubscriptionPaymentsClient::new(&env, &contract_id);
     client.deposit(&id, &(AMOUNT * 2));
     env.ledger().set_timestamp(START + PERIOD * 2);
-    let err = client.try_charge_catchup(&id, &2).unwrap_err().unwrap();
+    let err = client.try_charge_catchup(&id, &u32::2).unwrap_err().unwrap();
     assert_eq!(err, ForgeError::InvalidInput);
     assert_eq!(
         client.get_subscription(&id).prepaid_balance,
@@ -142,8 +142,8 @@ fn catchup_cannot_bypass_prepaid_one_period_lapse_policy() {
 #[test]
 fn prepaid_events_report_exact_amounts_and_resulting_balances() {
     let (env, _token, _subscriber, _provider, contract_id, id) = setup();
-    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
-    client.deposit(&id, &300);
+    let client = SorobanSorgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    client.deposit(&id, &u64::300);
     let deposits = events_named(&env, &contract_id, "deposited");
     assert_eq!(deposits.len(), 1);
     assert_eq!(data_field(&deposits[0].1, "amount"), sc_i128(300));
@@ -207,7 +207,7 @@ fn sc_i128(value: i128) -> ScVal {
 #[test]
 fn prepaid_pause_and_resume_shift_due_date_without_debit() {
     let (env, token, subscriber, provider, contract_id, id) = setup();
-    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let client = SorobanSorgeSubscriptionPaymentsClient::new(&env, &contract_id);
     let token_client = TokenClient::new(&env, &token);
     client.deposit(&id, &AMOUNT);
     client.pause(&id);
