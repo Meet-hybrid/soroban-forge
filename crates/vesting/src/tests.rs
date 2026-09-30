@@ -1,6 +1,7 @@
 use super::*;
 use soroban_forge_test_utils::TestAccounts;
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::events::Event as _;
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::Env;
 
@@ -957,4 +958,181 @@ fn revoked_record_freezes_vested_amount_and_status() {
     assert_eq!(schedule.status, VestingStatus::Revoked);
     assert_eq!(client.get_status(&id), VestingStatus::Revoked);
     assert_eq!(client.claimable(&id), 6_666);
+}
+
+#[test]
+fn reassignment_splits_claims_at_the_exact_ledger_boundary() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let new_beneficiary = Address::generate(&env);
+    let id = create(&client, &token, &accounts);
+
+    env.ledger().set_timestamp(START + CLIFF + 1_000);
+    assert_eq!(client.claim(&id), 3_333);
+
+    let reassignment_time = START + CLIFF + 2_000;
+    env.ledger().set_timestamp(reassignment_time);
+    client.reassign_beneficiary(&id, &new_beneficiary);
+    let emitted_events = env.events().all().filter_by_contract(&contract_id);
+
+    let schedule = client.get_schedule(&id);
+    assert_eq!(schedule.beneficiary, new_beneficiary);
+    assert_eq!(schedule.reassignment_vested, 6_666);
+    assert_eq!(schedule.beneficiary_claimed, 0);
+    assert_eq!(schedule.reassignment_count, 1);
+    assert_eq!(schedule.total_amount, TOTAL);
+    assert_eq!(schedule.start, START);
+    assert_eq!(schedule.cliff, CLIFF);
+    assert_eq!(schedule.duration, DURATION);
+    assert_eq!(client.claimable_for(&id, &accounts.user1), 3_333);
+    assert_eq!(client.claimable(&id), 0);
+    assert_eq!(client.claim(&id), 0);
+
+    // Claiming in the same ledger as reassignment belongs to the old
+    // beneficiary; the new beneficiary begins accruing only after this point.
+    assert_eq!(client.claim_for(&id, &accounts.user1), 3_333);
+    assert_eq!(tc.balance(&accounts.user1), 6_666);
+    assert_eq!(client.claimable_for(&id, &accounts.user1), 0);
+
+    env.ledger().set_timestamp(START + DURATION);
+    assert_eq!(client.claimable(&id), 3_334);
+    assert_eq!(client.claim(&id), 3_334);
+    assert_eq!(tc.balance(&new_beneficiary), 3_334);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_schedule(&id).claimed, TOTAL);
+    assert_eq!(client.get_status(&id), VestingStatus::Completed);
+    let expected_events = std::vec![
+        events::BeneficiaryReassignedFrom {
+            schedule_id: id,
+            beneficiary: accounts.user1.clone(),
+            new_beneficiary: new_beneficiary.clone(),
+            vested_unclaimed: 3_333,
+            reassignment_count: 1,
+        }
+        .to_xdr(&env, &contract_id),
+        events::BeneficiaryReassignedTo {
+            schedule_id: id,
+            beneficiary: new_beneficiary.clone(),
+            old_beneficiary: accounts.user1.clone(),
+            vested_unclaimed: 3_333,
+            reassignment_count: 1,
+        }
+        .to_xdr(&env, &contract_id),
+    ];
+    assert_eq!(emitted_events.events(), expected_events.as_slice());
+}
+
+#[test]
+fn reassignment_claim_accounting_is_scoped_to_schedule_id() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let first_id = create(&client, &token, &accounts);
+    let second_id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user2,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+
+    env.ledger()
+        .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
+    client.reassign_beneficiary(&first_id, &accounts.user2);
+
+    assert_eq!(client.claimable_for(&first_id, &accounts.user1), TOTAL / 2);
+    assert_eq!(client.claimable(&first_id), 0);
+    assert_eq!(client.claimable(&second_id), TOTAL / 2);
+}
+
+#[test]
+fn repeated_reassignments_preserve_each_former_beneficiary_balance() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let third_beneficiary = Address::generate(&env);
+    let id = create(&client, &token, &accounts);
+
+    env.ledger().set_timestamp(START + CLIFF + 1_500);
+    client.reassign_beneficiary(&id, &accounts.user2);
+    env.ledger().set_timestamp(START + CLIFF + 2_250);
+    client.reassign_beneficiary(&id, &third_beneficiary);
+
+    let schedule = client.get_schedule(&id);
+    assert_eq!(schedule.reassignment_count, 2);
+    assert_eq!(schedule.beneficiary, third_beneficiary);
+    assert_eq!(client.claimable_for(&id, &accounts.user1), 5_000);
+    assert_eq!(client.claimable_for(&id, &accounts.user2), 2_500);
+    assert_eq!(client.claimable(&id), 0);
+
+    env.ledger().set_timestamp(START + DURATION);
+    assert_eq!(client.claim_for(&id, &accounts.user1), 5_000);
+    assert_eq!(client.claim_for(&id, &accounts.user2), 2_500);
+    assert_eq!(client.claim(&id), 2_500);
+    assert_eq!(tc.balance(&accounts.user1), 5_000);
+    assert_eq!(tc.balance(&accounts.user2), 2_500);
+    assert_eq!(tc.balance(&third_beneficiary), 2_500);
+    assert_eq!(tc.balance(&contract_id), 0);
+}
+
+#[test]
+fn reassignment_composes_with_revocation_without_moving_prior_entitlement() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let new_beneficiary = Address::generate(&env);
+    let id = create(&client, &token, &accounts);
+
+    env.ledger().set_timestamp(START + CLIFF + 1_500);
+    client.reassign_beneficiary(&id, &new_beneficiary);
+
+    env.ledger().set_timestamp(START + CLIFF + 2_250);
+    client.revoke(&id);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+    assert_eq!(client.claimable_for(&id, &accounts.user1), 5_000);
+    assert_eq!(client.claimable(&id), 2_500);
+
+    let err = client
+        .try_reassign_beneficiary(&id, &accounts.validator)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+
+    env.ledger().set_timestamp(START + DURATION + 100);
+    assert_eq!(client.claim_for(&id, &accounts.user1), 5_000);
+    assert_eq!(client.claim(&id), 2_500);
+    assert_eq!(tc.balance(&accounts.user1), 5_000);
+    assert_eq!(tc.balance(&new_beneficiary), 2_500);
+    assert_eq!(tc.balance(&contract_id), TOTAL - 7_500);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+}
+
+#[test]
+fn reassignment_rejects_unknown_tranche_and_completed_schedules() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let err = client
+        .try_reassign_beneficiary(&999, &accounts.user2)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::NotFound);
+
+    let tranche_id = client.create_tranche_schedule(
+        &accounts.user1,
+        &token,
+        &soroban_sdk::vec![
+            &env,
+            Tranche {
+                unlock_at: 0,
+                amount: TOTAL
+            }
+        ],
+    );
+    let err = client
+        .try_reassign_beneficiary(&tranche_id, &accounts.user2)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::NotFound);
+
+    let id = create(&client, &token, &accounts);
+    env.ledger().set_timestamp(START + DURATION);
+    assert_eq!(client.claim(&id), TOTAL);
+    let err = client
+        .try_reassign_beneficiary(&id, &accounts.user2)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
 }
