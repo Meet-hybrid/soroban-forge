@@ -1986,10 +1986,8 @@ fn transfer_from_contract(
         &amount,
     ) {
         Ok(Ok(())) => Ok(()),
-        _ => Err(ForgeError::TokenTransferFailed),
-    }
+        _ => Err(ForgeError::TokenTransferFailed),    }
 }
-
 /// Bump a persistent entry's TTL to the workspace policy's 30-day horizon
 /// when it falls inside its one-day threshold — see
 /// `soroban_forge_shared_utils::ttl`.
@@ -2069,6 +2067,9 @@ mod authz;
 // (issue #61).
 #[cfg(test)]
 mod props;
+
+#[cfg(test)]
+mod indexer_fixtures;
 
 #[cfg(test)]
 mod tests {

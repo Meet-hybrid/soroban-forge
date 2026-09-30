@@ -6,8 +6,8 @@ the flagship: it moves real SEP-41 tokens; marketplace royalties settles
 its splits the same way via `settle_sale` and, for batches, `settle_sales`,
 and `distribute` now pays the royalty share directly; vesting settles its
 claims via
-`claim`. The subscription state machine is honestly labeled where it tracks
-but does not settle; DAO governance now dispatches approved opaque actions
+`claim`. Subscription charges now settle directly in pull mode and support
+opt-in prepaid custody, period debits, and refunds; DAO governance dispatches approved opaque actions
 on-chain and settles a SEP-41 proposal bond — pulled at `propose`, refunded
 to the proposer or forfeited to the treasury at a terminal transition.
 Multi-sig wallet transactions live in persistent storage with a
@@ -15,7 +15,8 @@ permissionless TTL keeper, alongside its threshold-and-confirmation state
 machine.
 its splits the same way via `settle_sale`; vesting settles its claims via
 `claim`; subscriptions bill each due period with a real subscriber →
-provider transfer and retry past-due payments; DAO governance now
+provider transfer in pull mode or prepaid contract-balance debit, with retry
+and refund behavior; DAO governance now
 dispatches approved opaque actions on-chain and settles a SEP-41 proposal
 bond — pulled at `propose`, refunded to the proposer or forfeited to the
 treasury at a terminal transition.
@@ -105,18 +106,18 @@ treasury at a terminal transition.
 
 | Entrypoint | Status | Notes |
 |---|---|---|
+| `initialize` | ✅ Implemented | One-time permissionless configuration of the SEP-41 governance token used to weight votes |
 | `configure_bond` | ✅ Implemented | One-time permissionless config (token, amount, treasury); first caller wins; `propose` is rejected with `NotInitialized` while unconfigured |
 | `propose` | ✅ Implemented | Stores the target contract, opaque action payload, and voting deadline; **real token transfer** proposer → contract for the bond, before any state write |
-| `vote` | ✅ Implemented | One-vote-per-voter enforced |
+| `vote` | ✅ Implemented | One-vote-per-voter; adds the voter's current governance-token balance to the selected tally; zero-balance votes rejected |
 | `execute` | ✅ Implemented | Permissionless majority finalisation, then `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Succeeded`; on terminal transitions the bond is **refunded** to the proposer (`Executed`) or **forfeited** to the treasury (`Defeated`) in the same frame |
 | `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; **real token transfer** refund of the bond |
 | `get_proposal` / `get_proposal_count` / `get_proposals` / `has_voted` | ✅ Implemented | Read-only views; pagination with bounds clamping |
 | `get_bond_config` | ✅ Implemented | Read-only; `NotInitialized` when no bond is configured |
 | `touch_ttl` | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a proposal; `NotFound` for unknown ids |
-| Events | ✅ Implemented | `Proposed`, `VoteCast`, `Finalised`, `BondPosted`, `BondReleased` (`proposal_id` as topic) |
-| Storage | ✅ Persistent + TTL | `DataKey::Proposal` records in persistent storage with 30-day TTL maintenance; count, bond config, custody total, and vote markers in instance storage |
-| Tests | ✅ 74 | Bond custody lifecycle (post/refund/forfeit/conservation), arithmetic boundary tests, rollback-on-failure ordering, cross-contract dispatch + retry, introspection/pagination views, plus a **negative-auth suite** (`authz.rs`): wrong-signer and args-replay rejection, the nested token authorization frame for the bond pull, `env.auths()` authorization-tree assertions |
-| Weighted voting | ❌ Not implemented | Follow-up |
+| Events | ✅ Implemented | `Proposed`, `VoteCast` (includes weight), `Finalised`, `BondPosted`, `BondReleased` (`proposal_id` as topic) |
+| Storage | ✅ Persistent + TTL | `DataKey::Proposal` records in persistent storage with 30-day TTL maintenance; count, bond config, governance-token config, custody total, and vote markers in instance storage |
+| Tests | ✅ 79 | Bond custody lifecycle (post/refund/forfeit/conservation), weighted voting and arithmetic boundary tests, rollback-on-failure ordering, cross-contract dispatch + retry, introspection/pagination views, plus a **negative-auth suite** (`authz.rs`): wrong-signer and args-replay rejection, the nested token authorization frame for the bond pull, `env.auths()` authorization-tree assertions |
 
 ## Subscription Payments (`crates/subscription-payments`)
 
@@ -146,15 +147,19 @@ treasury at a terminal transition.
 | `subscribe` | ✅ Implemented | Validates `amount > 0` / `period > 0` before auth; subscriber-authorized; record + sequential id + both subscriber/provider indexes written atomically |
 | `subscribe_on_behalf_of` | ✅ Implemented | Provider-initiated; requires a **subscriber opt-in** (`ProviderOptIn`) checked before provider auth; shares the same id counter and record shape as `subscribe` |
 | `authorize_provider` / `revoke_provider` / `is_provider_authorized` | ✅ Implemented | Explicit per-relationship opt-in; subscriber-authorized; idempotent; read-only view has no auth |
-| `charge` | ✅ Implemented | Provider-authorized; bills when a full period has elapsed via a **real SEP-41 transfer** subscriber → provider; on failure increments `failed_attempts` → `PastDue`, and `Cancelled` after `MAX_RETRIES` (3) |
+| `charge` | ✅ Implemented | Provider-authorized; pull mode transfers subscriber → provider; prepaid mode transfers an exact period amount from contract custody → provider; a subscription whose due time has elapsed is observable as `PastDue` (time-derived), and a successful catch-up charge bills exactly one overdue period, restores `Active`, and advances the due timestamp one period; insufficient prepaid balance follows retry → `PastDue`, auto-cancelling after 3 failures with exact remainder refund |
+| `deposit` / `withdraw_balance` | ✅ Implemented | Subscriber-authorized prepaid opt-in and top-up pulls exact funds before state writes; surplus withdrawal transfers contract → subscriber before balance update; failed transfers leave state unchanged |
 | `pause` / `resume` | ✅ Implemented | Subscriber-authorized; `resume` advances the next due date by the elapsed paused duration |
 | `set_quotas` | ✅ Implemented | Subscriber-authorized (prices the overage the subscriber is billed); `Active` only and rejected once the open period has usage, so metered units cannot be repriced mid-period; validates ≤ `MAX_QUOTAS` (16) unique metrics, `bucket_units > 0`, `overage_price >= 0`; an empty list returns to flat pricing |
 | `record_usage` | ✅ Implemented | Provider-authorized; accumulates **raw units** for the open period only; rejects undeclared metrics, zero units, non-`Active` subscriptions, and a `u64` counter overflow; meters are dropped atomically with the charge that closes the period, so a failed transfer leaves them intact and the retry bills identically |
 | `quote_period` / `get_usage` | ✅ Implemented | Read-only views with no auth; `quote_period` is the same derivation `charge`/`charge_catchup` settle, so a quote and the charge cannot disagree; `get_usage` returns a zeroed record stamped with the current window for an unused metric |
 | Metered overage pricing | ✅ Implemented | `base + Σ ceil(min(max(0, units - included), cap) / bucket) * price`, rounded up per bucket, derived per period from raw units so multi-period totals cannot drift; cap enforced by clamping (never rejecting) at settlement; an unrepresentable bill → `ArithmeticOverflow` before any transfer |
-| `cancel` | ✅ Implemented | Subscriber-authorized from `Active` / `Paused` / `PastDue`; rejects already-`Cancelled` |
+| Prepaid balance | ✅ Implemented | Per-subscription optional balance (`None` is unchanged pull mode; `Some(0)` remains prepaid); one-period charge only, catch-up rejected; `Deposited`, `BalanceDebited`, `BalanceRefunded`; conservation property tested against independent lifecycle mirror |
+| `cancel` | ✅ Implemented | Subscriber-authorized from `Active` / `Paused` / `PastDue`; refunds exact remaining prepaid balance before `Cancelled`; rejects already-`Cancelled` |
 | `get_subscription` / `get_subscription_count` / `subscriptions_for_subscriber` / `subscriptions_for_provider` | ✅ Implemented | Read-only views; paged by `offset`/`limit` with `limit == 0` → `InvalidInput`; empty index yields an empty page, not an error |
 | Plan management | ✅ Implemented | `create_plan(provider, token, amount, period, quotas)` → `plan_id`; `subscribe_to_plan(plan_id, subscriber)` → `subscription_id`; `get_plan(plan_id)` → `Plan`; `plan_count()` → `u64`; plan ids from a separate monotonic counter; a subscriber may hold multiple subscriptions to the same plan (each a distinct record); plan quotas copied verbatim into the subscription on join |
+| Plan management | ❌ Not implemented | Follow-up |
+| `PastDue` lifecycle | ✅ Implemented | Time-derived lapsed state (`Active → PastDue → Active`); `PastDueEntered` event per transition; recoverable only through a successful catch-up charge (never reverts by time alone); `cancel` from `PastDue` and `pause`/`resume` interactions defined and tested; one-period-per-call invariant preserved with overflow-safe `checked_add` due math |
 
 ## Marketplace Royalties (`crates/marketplace-royalties`)
 
@@ -181,8 +186,9 @@ treasury at a terminal transition.
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting (including `revoke` creator-only authority), DAO governance, and marketplace royalties proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other two: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
 | Events | ✅ Escrow + Multi-Sig + DAO + Marketplace | Full lifecycle events on escrow, multi-sig wallet, DAO governance, and marketplace royalties |
 | Persistent storage + TTL | ✅ Escrow + Royalties + Multi-Sig + DAO | Per-record persistent entries with `touch_ttl`/`touch_tx_ttl` keepers on escrow, marketplace royalties (royalty + summary), multi-sig (transactions), and DAO (proposals); vesting and subscriptions remain instance-only. TTL policy constants + `bump_entry` helper consolidated in shared-utils (issue #127) and consumed by all four |
-| SEP-41 token settlement | ✅ Escrow + royalties + multi-sig + vesting + subscriptions | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale`/`settle_sales`/`distribute` settle splits; DAO `propose` pulls the proposal bond and refunds/forfeits it on settlement; multi-sig `execute` performs cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions still store amounts only |
+Kim| SEP-41 token settlement | ✅ Escrow + royalties + multi-sig + vesting + subscriptions | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale`/`settle_sales`/`distribute` settle splits; DAO `propose` pulls the proposal bond and refunds/forfeits it on settlement; multi-sig `execute` performs cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions still store amounts only |
 | Shared SEP-41 transfer helpers | ✅ `shared-utils` | `transfer_to_contract`, `transfer_from_contract`, and `transfer_tokens` consolidated into `soroban-forge-shared-utils::token`; all settlement crates (escrow, vesting, multi-sig-wallet, marketplace-royalties, dao-governance) call the canonical implementations; local copies deleted; helpers carry unit tests covering both directions and the `TokenTransferFailed` failure path |
+| SEP-41 token settlement | ✅ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Transfers use transfer-before-state ordering; subscription pull-mode charges pay subscriber → provider, while opt-in prepaid subscriptions custody deposits and pay exact debits/refunds |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
 | Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
 | TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
@@ -190,7 +196,7 @@ treasury at a terminal transition.
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, and DAO governance proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other three: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
 | Events | ⚠️ Escrow + Multi-Sig + DAO | Full lifecycle events on escrow, multi-sig wallet, and DAO governance |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
-| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale` settles splits; DAO `propose` pulls the proposal bond and refunds/forfeits it on settlement; multi-sig `execute` performs cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions `charge` executes a real subscriber → provider transfer (past-due retry → auto-cancel after 3 failed attempts) |
+| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Real transfers with transfer-before-state ordering on escrow, vesting, marketplace, DAO, and subscriptions; prepaid subscriptions add contract custody, exact balance debits, and cancellation refunds |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
 | Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
 | TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |

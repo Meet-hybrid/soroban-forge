@@ -202,7 +202,7 @@ use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env, Vec,
 };
 
-use soroban_forge_shared_utils::{ttl::TTLHelper, ForgeError};
+use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ttl::TTLHelper, ForgeError};
 
 /// Ledger-time constants for TTL bumps.
 ///
@@ -1852,6 +1852,7 @@ fn transfer_from_contract(
     }
 }
 
+
 /// Split a non-negative amount by basis points without overflowing an
 /// intermediate `amount * seller_bps` multiplication.
 fn split_amount(amount: i128, seller_bps: u32) -> Result<(i128, i128), ForgeError> {
@@ -1886,6 +1887,7 @@ fn split_amount(amount: i128, seller_bps: u32) -> Result<(i128, i128), ForgeErro
 /// Bump a persistent entry's TTL to the [`ttl::BUMP_AMOUNT`] horizon when
 /// it falls inside [`ttl::BUMP_THRESHOLD`]. The standard threshold/extend
 /// pattern: cheap no-op while the entry is fresh, decisive near expiry.
+
 fn bump_entry(env: &Env, key: &DataKey) {
     shared_bump_entry(env, key);
     // Mirror the escrow record's expiration ledger for `ttl_info`: SDK 27
