@@ -1162,6 +1162,7 @@ impl MultiSigWallet {
             .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
         bump_entry(&env, &DataKey::Tx(tx_id));
+        events::rejected(&env, &wallet_tx);
         Ok(())
     }
 
@@ -1337,6 +1338,7 @@ impl MultiSigWallet {
         transfer_to_contract(&env, &token, &from, amount)?;
 
         Self::add_balance(&env, &token, amount)?;
+        events::deposited(&env, &token, &from, amount, Self::balance_impl(&env, &token));
         Ok(())
     }
 
@@ -1385,6 +1387,9 @@ impl MultiSigWallet {
             .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
         bump_entry(&env, &DataKey::Tx(tx_id));
+        if let TxKind::Withdrawal(withdrawal) = &wallet_tx.kind {
+            events::withdrawal_submitted(&env, &wallet_tx, withdrawal);
+        }
         Ok(tx_id)
     }
 
@@ -2261,6 +2266,30 @@ mod events {
         #[topic]
         pub tx_id: u64,
         pub expired_at: u64,
+    pub struct TxRejected {
+        #[topic]
+        pub tx_id: u64,
+        pub rejecter: Address,
+        pub rejections_count: u32,
+    }
+
+    #[contractevent]
+    pub struct Deposited {
+        #[topic]
+        pub token: Address,
+        pub from: Address,
+        pub amount: i128,
+        pub balance: i128,
+    }
+
+    #[contractevent]
+    pub struct WithdrawalSubmitted {
+        #[topic]
+        pub tx_id: u64,
+        pub token: Address,
+        pub to: Address,
+        pub amount: i128,
+        pub confirmations_count: u32,
     }
 
     pub fn submitted(env: &Env, tx: &WalletTx) {
@@ -2297,6 +2326,34 @@ mod events {
     #[allow(dead_code)]
     pub fn expired(env: &Env, tx_id: u64, expired_at: u64) {
         TxExpired { tx_id, expired_at }.publish(env);
+    pub fn rejected(env: &Env, tx: &WalletTx) {
+        TxRejected {
+            tx_id: tx.tx_id,
+            rejecter: tx.rejections.get_unchecked(tx.rejections.len() - 1),
+            rejections_count: tx.rejections.len(),
+        }
+        .publish(env);
+    }
+
+    pub fn deposited(env: &Env, token: &Address, from: &Address, amount: i128, balance: i128) {
+        Deposited {
+            token: token.clone(),
+            from: from.clone(),
+            amount,
+            balance,
+        }
+        .publish(env);
+    }
+
+    pub fn withdrawal_submitted(env: &Env, tx: &WalletTx, withdrawal: &Withdrawal) {
+        WithdrawalSubmitted {
+            tx_id: tx.tx_id,
+            token: withdrawal.token.clone(),
+            to: withdrawal.destination.clone(),
+            amount: withdrawal.amount,
+            confirmations_count: tx.confirmations.len(),
+        }
+        .publish(env);
     }
 }
 
@@ -2655,6 +2712,174 @@ mod tests {
             client.get_threshold()
         );
         assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
+    }
+
+    #[test]
+    fn reject_emits_event_per_rejection_including_threshold_crossing() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+
+        // First rejection: recorded, tx still pending (threshold is 2).
+        client.reject(&tx_id, &accounts.user2);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_rejected")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "rejecter")).unwrap()),
+            accounts.user2
+        );
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "rejections_count")).unwrap()
+            ),
+            1
+        );
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+
+        // Second rejection crosses the threshold and flips the status.
+        client.reject(&tx_id, &accounts.user3);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "tx_rejected")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "rejecter")).unwrap()),
+            accounts.user3
+        );
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "rejections_count")).unwrap()
+            ),
+            2
+        );
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
+    }
+
+    #[test]
+    fn reject_duplicate_emits_nothing() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        client.reject(&tx_id, &accounts.user2);
+        let err = client
+            .try_reject(&tx_id, &accounts.user2)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(env.events().all().events().len(), 0);
+    }
+
+    #[test]
+    fn deposit_emits_event_with_post_balance() {
+        let (env, client, accounts, token, _token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &1_000);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "deposited")
+        );
+        assert_eq!(
+            Address::from_val(&env, &topics.get_unchecked(1)),
+            token.clone()
+        );
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "from")).unwrap()),
+            accounts.user1
+        );
+        assert_eq!(
+            i128::from_val(&env, &data.get(Symbol::new(&env, "amount")).unwrap()),
+            1_000
+        );
+        assert_eq!(
+            i128::from_val(&env, &data.get(Symbol::new(&env, "balance")).unwrap()),
+            1_000
+        );
+
+        // A second deposit reports the accumulated custody balance.
+        client.deposit(&token, &accounts.user1, &500);
+        let (_topics, data) = event_values(&env);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            i128::from_val(&env, &data.get(Symbol::new(&env, "balance")).unwrap()),
+            1_500
+        );
+    }
+
+    #[test]
+    fn deposit_transfer_failure_emits_nothing() {
+        let (env, client, accounts, token, _token_client) = custody!();
+        let err = client
+            .try_deposit(&token, &accounts.user2, &1_000)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::TokenTransferFailed);
+        assert_eq!(env.events().all().events().len(), 0);
+    }
+
+    #[test]
+    fn submit_withdrawal_emits_event_on_success() {
+        let (env, client, accounts, token, _token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &1_000);
+        let tx_id = client.submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &400_i128);
+        assert_eq!(env.events().all().events().len(), 1);
+        let (topics, data) = event_values(&env);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "withdrawal_submitted")
+        );
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        let data: Map<Symbol, Val> = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "token")).unwrap()),
+            token.clone()
+        );
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "to")).unwrap()),
+            accounts.arbiter
+        );
+        assert_eq!(
+            i128::from_val(&env, &data.get(Symbol::new(&env, "amount")).unwrap()),
+            400
+        );
+        assert_eq!(
+            u32::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "confirmations_count")).unwrap()
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn submit_withdrawal_over_limit_emits_nothing() {
+        let (env, client, accounts, token, _token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &10_000);
+        env.ledger().set_timestamp(1_000);
+        limited!(client, accounts, token, 1_000_i128, 3_600_u64);
+
+        // The limit-reserving submission is observable.
+        client.submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &600_i128);
+        assert_eq!(env.events().all().events().len(), 1);
+
+        // A submission refused by the rolling limit emits nothing.
+        let err = client
+            .try_submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &600_i128)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::WithdrawalLimitExceeded);
+        assert_eq!(env.events().all().events().len(), 0);
     }
 
     #[test]
