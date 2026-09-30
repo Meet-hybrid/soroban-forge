@@ -42,7 +42,14 @@ export type VestingStatus = {tag: "Locked", values: void} | {tag: "Vesting", val
 /**
  * A single token-vesting schedule.
  */
+/**
+ * A single token-vesting schedule.
+ */
 export interface VestingSchedule {
+  /**
+ * Funder who created the schedule and authorizes reassignment.
+ */
+funder: string;
   /**
  * Recipient of the vested tokens.
  */
@@ -75,6 +82,39 @@ token: string;
  * Total amount to vest linearly between `cliff` and `duration`.
  */
 total_amount: i128;
+  /**
+ * Number of times the beneficiary has been reassigned.
+ */
+reassignments: u32;
+  /**
+ * Previous beneficiary before reassignment, if any.
+ */
+old_beneficiary?: Option<string>;
+  /**
+ * Vested amount snapshot allocated to old beneficiary at reassignment.
+ */
+old_vested: i128;
+  /**
+ * Amount claimed by the old beneficiary.
+ */
+old_claimed: i128;
+}
+
+export interface Tranche {
+  unlock_at: u64;
+  amount: i128;
+}
+
+export interface TrancheSchedule {
+  funder: string;
+  beneficiary: string;
+  token: string;
+  total_amount: i128;
+  start: u64;
+  tranches: Array<Tranche>;
+  claimed: i128;
+  status: VestingStatus;
+  reassignments: u32;
 }
 
 
@@ -285,9 +325,21 @@ export interface Client {
    * Create a new vesting schedule and return its stable id.
    * 
    * Requires `total_amount > 0`, `duration > 0`, and `cliff <= duration`.
-   * The beneficiary is authorized at creation time.
+   * The funder is authorized at creation time.
    */
-  create_schedule: ({beneficiary, token, total_amount, cliff, duration}: {beneficiary: string, token: string, total_amount: i128, cliff: u64, duration: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+  create_schedule: ({funder, beneficiary, token, total_amount, cliff, duration}: {funder: string, beneficiary: string, token: string, total_amount: i128, cliff: u64, duration: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+
+  create_tranche_schedule: ({funder, beneficiary, token, tranches}: {funder: string, beneficiary: string, token: string, tranches: Array<Tranche>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+
+  reassign_beneficiary: ({schedule_id, new_beneficiary}: {schedule_id: u64, new_beneficiary: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  claim_for: ({schedule_id, claimant}: {schedule_id: u64, claimant: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<i128>>>
+
+  claimable_for: ({schedule_id, claimant}: {schedule_id: u64, claimant: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<i128>>>
+
+  get_schedule: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<VestingSchedule>>>
+
+  get_tranche_schedule: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<TrancheSchedule>>>
 
 }
 export class Client extends ContractClient {
@@ -324,8 +376,14 @@ export class Client extends ContractClient {
   }
   public readonly fromJSON = {
     claim: this.txFromJSON<Result<i128>>,
-        claimable: this.txFromJSON<Result<i128>>,
-        get_status: this.txFromJSON<Result<VestingStatus>>,
-        create_schedule: this.txFromJSON<Result<u64>>
+    claim_for: this.txFromJSON<Result<i128>>,
+    claimable: this.txFromJSON<Result<i128>>,
+    claimable_for: this.txFromJSON<Result<i128>>,
+    get_status: this.txFromJSON<Result<VestingStatus>>,
+    get_schedule: this.txFromJSON<Result<VestingSchedule>>,
+    get_tranche_schedule: this.txFromJSON<Result<TrancheSchedule>>,
+    create_schedule: this.txFromJSON<Result<u64>>,
+    create_tranche_schedule: this.txFromJSON<Result<u64>>,
+    reassign_beneficiary: this.txFromJSON<Result<void>>
   }
 }

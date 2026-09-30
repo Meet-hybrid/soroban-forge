@@ -92,7 +92,9 @@
 extern crate std;
 
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, Env, Vec};
+use soroban_sdk::{
+    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env, Vec,
+};
 
 /// Maximum number of tranches a single schedule may carry.
 ///
@@ -111,13 +113,14 @@ pub const MAX_TRANCHES: u32 = 32;
 /// implementation crate.
 #[contractclient(name = "SorobanForgeVestingClient")]
 pub trait SorobanForgeVesting {
-    /// Create a new vesting schedule for `beneficiary`.
+    /// Create a new vesting schedule for `beneficiary` funded by `funder`.
     ///
     /// `cliff` and `duration` are seconds measured from creation
     /// (`cliff <= duration`, `duration > 0`, `total_amount > 0`). Returns the
     /// stable schedule id.
     fn create_schedule(
         env: Env,
+        funder: Address,
         beneficiary: Address,
         token: Address,
         total_amount: i128,
@@ -126,7 +129,7 @@ pub trait SorobanForgeVesting {
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
     /// Create a new tranche (discrete unlock) vesting schedule for
-    /// `beneficiary`.
+    /// `beneficiary` funded by `funder`.
     ///
     /// `tranches` is the unlock table: an ordered list of [`Tranche`]s, each
     /// an offset in seconds from creation plus the amount that unlocks at it.
@@ -146,10 +149,21 @@ pub trait SorobanForgeVesting {
     ///   `i128::MAX`.
     fn create_tranche_schedule(
         env: Env,
+        funder: Address,
         beneficiary: Address,
         token: Address,
         tranches: Vec<Tranche>,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+
+    /// Reassign a linear vesting schedule to `new_beneficiary` (funder only).
+    ///
+    /// Redirects the unvested portion to `new_beneficiary` while preserving
+    /// the vested-but-unclaimed tokens for the previous beneficiary.
+    fn reassign_beneficiary(
+        env: Env,
+        schedule_id: u64,
+        new_beneficiary: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
     /// Read the full linear schedule record (read-only view).
     ///
@@ -182,10 +196,9 @@ pub trait SorobanForgeVesting {
 
     /// Claim tokens that have vested as of the current ledger time.
     ///
-    /// Requires the beneficiary. Works for both schedule kinds and transfers
-    /// the exact vested-but-unclaimed amount from this contract to the
-    /// beneficiary, then records the claim; returns `0` without issuing a
-    /// transfer when nothing is claimable.
+    /// Works for both schedule kinds. For linear schedules with reassignment,
+    /// claims for the active party (old beneficiary until their vested
+    /// allocation is settled, then new beneficiary).
     ///
     /// # Errors
     ///
@@ -195,6 +208,13 @@ pub trait SorobanForgeVesting {
     /// * [`ForgeError::ArithmeticOverflow`] — the claimed total overflowed.
     fn claim(env: Env, schedule_id: u64) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 
+    /// Claim tokens specifically for `claimant` (beneficiary or old beneficiary).
+    fn claim_for(
+        env: Env,
+        schedule_id: u64,
+        claimant: Address,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
+
     /// Return the amount currently claimable by `schedule_id` (read-only).
     ///
     /// Kind-aware: a linear id is measured against its cliff and duration, a
@@ -202,6 +222,13 @@ pub trait SorobanForgeVesting {
     fn claimable(
         env: Env,
         schedule_id: u64,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
+
+    /// Return the amount currently claimable specifically by `claimant`.
+    fn claimable_for(
+        env: Env,
+        schedule_id: u64,
+        claimant: Address,
     ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 
     /// Read the current lifecycle status of `schedule_id` (read-only).
@@ -227,8 +254,10 @@ pub enum VestingStatus {
 
 /// A single token-vesting schedule.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VestingSchedule {
+    /// Funder who created the schedule and authorizes reassignment.
+    pub funder: Address,
     /// Recipient of the vested tokens.
     pub beneficiary: Address,
     /// Token contract whose balance is drawn down.
@@ -241,10 +270,18 @@ pub struct VestingSchedule {
     pub cliff: u64,
     /// Seconds after `start` at which the schedule is fully vested.
     pub duration: u64,
-    /// Amount already claimed by the beneficiary.
+    /// Amount already claimed by the current beneficiary.
     pub claimed: i128,
     /// Current lifecycle state.
     pub status: VestingStatus,
+    /// Number of times the beneficiary has been reassigned.
+    pub reassignments: u32,
+    /// Previous beneficiary before reassignment, if any.
+    pub old_beneficiary: Option<Address>,
+    /// Vested amount snapshot allocated to old beneficiary at reassignment.
+    pub old_vested: i128,
+    /// Amount claimed by the old beneficiary.
+    pub old_claimed: i128,
 }
 
 /// One entry of a tranche schedule's unlock table: an amount that becomes
@@ -270,8 +307,10 @@ pub struct Tranche {
 /// wire shape stays untouched, and the two kinds sit under distinct
 /// `DataKey` variants while sharing one monotonic id counter.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrancheSchedule {
+    /// Funder who created the schedule.
+    pub funder: Address,
     /// Recipient of the unlocked tokens.
     pub beneficiary: Address,
     /// Token contract whose balance is drawn down.
@@ -288,6 +327,8 @@ pub struct TrancheSchedule {
     pub claimed: i128,
     /// Current lifecycle state.
     pub status: VestingStatus,
+    /// Number of reassignments.
+    pub reassignments: u32,
 }
 
 /// Instance-storage keys.
@@ -323,9 +364,10 @@ impl Vesting {
     /// Create a new vesting schedule and return its stable id.
     ///
     /// Requires `total_amount > 0`, `duration > 0`, and `cliff <= duration`.
-    /// The beneficiary is authorized at creation time.
+    /// The funder is authorized at creation time.
     pub fn create_schedule(
         env: Env,
+        funder: Address,
         beneficiary: Address,
         token: Address,
         total_amount: i128,
@@ -341,11 +383,12 @@ impl Vesting {
         if cliff > duration {
             return Err(ForgeError::InvalidInput);
         }
-        beneficiary.require_auth();
+        funder.require_auth();
 
         let id = Self::next_id(&env)?;
         let start = env.ledger().timestamp();
         let mut schedule = VestingSchedule {
+            funder,
             beneficiary,
             token,
             total_amount,
@@ -354,6 +397,10 @@ impl Vesting {
             duration,
             claimed: 0,
             status: VestingStatus::Locked,
+            reassignments: 0,
+            old_beneficiary: None,
+            old_vested: 0,
+            old_claimed: 0,
         };
         // Derive the initial status from time (cliff == 0 starts `Vesting`).
         schedule.status = Self::current_status(&schedule, start)?;
@@ -369,23 +416,25 @@ impl Vesting {
     /// `unlock_at` offsets in seconds from the creation timestamp. Requires a
     /// non-empty table of at most [`MAX_TRANCHES`] entries, every
     /// `amount > 0`, and a cumulative sum that fits in `i128`; the table is
-    /// then stored once and treated as immutable. The beneficiary is
+    /// then stored once and treated as immutable. The funder is
     /// authorized at creation time, mirroring `create_schedule`.
     ///
     /// A first tranche at `unlock_at == 0` is allowed: it unlocks at the
     /// creation timestamp, the "TGE tranche" of a typical grant agreement.
     pub fn create_tranche_schedule(
         env: Env,
+        funder: Address,
         beneficiary: Address,
         token: Address,
         tranches: Vec<Tranche>,
     ) -> Result<u64, ForgeError> {
         let total_amount = Self::validate_tranches(&tranches)?;
-        beneficiary.require_auth();
+        funder.require_auth();
 
         let id = Self::next_id(&env)?;
         let start = env.ledger().timestamp();
         let mut schedule = TrancheSchedule {
+            funder,
             beneficiary,
             token,
             total_amount,
@@ -393,6 +442,7 @@ impl Vesting {
             tranches,
             claimed: 0,
             status: VestingStatus::Locked,
+            reassignments: 0,
         };
         // Derive the initial status from time (a table starting at 0 begins
         // `Vesting`, mirroring the linear `cliff == 0` case).
@@ -401,6 +451,84 @@ impl Vesting {
             .instance()
             .set(&DataKey::TrancheSchedule(id), &schedule);
         Ok(id)
+    }
+
+    /// Reassign a linear vesting schedule to `new_beneficiary` (funder only).
+    ///
+    /// Redirects the unvested portion to `new_beneficiary` while preserving
+    /// the vested-but-unclaimed tokens for the previous beneficiary.
+    pub fn reassign_beneficiary(
+        env: Env,
+        schedule_id: u64,
+        new_beneficiary: Address,
+    ) -> Result<(), ForgeError> {
+        let mut schedule = match Self::load(&env, schedule_id)? {
+            Stored::Linear(s) => s,
+            Stored::Tranche(_) => return Err(ForgeError::InvalidInput),
+        };
+
+        let now = env.ledger().timestamp();
+        let status = Self::current_status(&schedule, now)?;
+        if status == VestingStatus::Revoked
+            || status == VestingStatus::Completed
+            || schedule.status == VestingStatus::Completed
+            || schedule.status == VestingStatus::Revoked
+        {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        if new_beneficiary == schedule.beneficiary {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        schedule.funder.require_auth();
+
+        let vested_now = Self::vested_amount(&schedule, now)?;
+        let old_beneficiary = schedule.beneficiary.clone();
+
+        if schedule.old_beneficiary.is_none() {
+            schedule.old_beneficiary = Some(old_beneficiary.clone());
+            schedule.old_vested = vested_now;
+            schedule.old_claimed = schedule.claimed;
+        } else {
+            // Prior old beneficiary must have claimed their vested portion before another reassignment
+            if schedule.old_claimed < schedule.old_vested {
+                return Err(ForgeError::InvalidInput);
+            }
+            schedule.old_beneficiary = Some(old_beneficiary.clone());
+            schedule.old_vested = vested_now;
+            schedule.old_claimed = schedule
+                .old_claimed
+                .checked_add(schedule.claimed)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+        }
+
+        schedule.beneficiary = new_beneficiary.clone();
+        schedule.claimed = 0;
+        schedule.reassignments = schedule
+            .reassignments
+            .checked_add(1)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+
+        let unvested_amount = schedule
+            .total_amount
+            .checked_sub(vested_now)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+
+        events::beneficiary_reassigned(
+            &env,
+            schedule_id,
+            &old_beneficiary,
+            &new_beneficiary,
+            vested_now,
+            unvested_amount,
+            schedule.reassignments,
+        );
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(schedule_id), &schedule);
+        Ok(())
     }
 
     /// Read the full linear schedule record (read-only view; no state
@@ -426,18 +554,39 @@ impl Vesting {
 
     /// Claim the vested-but-unclaimed amount.
     ///
-    /// Requires the beneficiary. Works for both schedule kinds — the id
-    /// resolves to a linear or a tranche record and the matching math runs.
-    /// Returns exactly what vested since the last claim (or `0` when nothing
-    /// is claimable), so repeated claims can never overpay or underpay.
-    ///
-    /// Ordering: the SEP-41 transfer runs **before** the schedule write —
-    /// see the module docs. A zero-claim call returns before either.
+    /// Settles the active party: for linear schedules with reassignment, claims
+    /// for the old beneficiary until their vested allocation is exhausted, then
+    /// for the current beneficiary.
     pub fn claim(env: Env, schedule_id: u64) -> Result<i128, ForgeError> {
         let now = env.ledger().timestamp();
         match Self::load(&env, schedule_id)? {
-            Stored::Linear(schedule) => Self::settle_linear(&env, schedule_id, schedule, now),
+            Stored::Linear(schedule) => {
+                let claimant = if schedule.old_beneficiary.is_some()
+                    && schedule.old_claimed < schedule.old_vested
+                {
+                    schedule.old_beneficiary.clone().unwrap()
+                } else {
+                    schedule.beneficiary.clone()
+                };
+                Self::settle_linear_for(&env, schedule_id, schedule, claimant, now)
+            }
             Stored::Tranche(schedule) => Self::settle_tranche(&env, schedule_id, schedule, now),
+        }
+    }
+
+    /// Claim tokens specifically for `claimant` (beneficiary or old beneficiary).
+    pub fn claim_for(env: Env, schedule_id: u64, claimant: Address) -> Result<i128, ForgeError> {
+        let now = env.ledger().timestamp();
+        match Self::load(&env, schedule_id)? {
+            Stored::Linear(schedule) => {
+                Self::settle_linear_for(&env, schedule_id, schedule, claimant, now)
+            }
+            Stored::Tranche(schedule) => {
+                if claimant != schedule.beneficiary {
+                    return Err(ForgeError::InvalidInput);
+                }
+                Self::settle_tranche(&env, schedule_id, schedule, now)
+            }
         }
     }
 
@@ -447,6 +596,24 @@ impl Vesting {
         match Self::load(&env, schedule_id)? {
             Stored::Linear(schedule) => Self::claimable_amount(&schedule, now),
             Stored::Tranche(schedule) => Self::tranche_claimable(&schedule, now),
+        }
+    }
+
+    /// Amount currently claimable specifically by `claimant`.
+    pub fn claimable_for(
+        env: Env,
+        schedule_id: u64,
+        claimant: Address,
+    ) -> Result<i128, ForgeError> {
+        let now = env.ledger().timestamp();
+        match Self::load(&env, schedule_id)? {
+            Stored::Linear(schedule) => Self::claimable_amount_for(&schedule, &claimant, now),
+            Stored::Tranche(schedule) => {
+                if claimant != schedule.beneficiary {
+                    return Err(ForgeError::InvalidInput);
+                }
+                Self::tranche_claimable(&schedule, now)
+            }
         }
     }
 
@@ -485,22 +652,32 @@ impl Vesting {
         Err(ForgeError::NotFound)
     }
 
-    /// Settle a claim against a linear schedule: transfer-before-state, then
+    /// Settle a claim against a linear schedule for `claimant`: transfer-before-state, then
     /// record `claimed` and the derived status.
-    fn settle_linear(
+    fn settle_linear_for(
         env: &Env,
         schedule_id: u64,
         mut schedule: VestingSchedule,
+        claimant: Address,
         now: u64,
     ) -> Result<i128, ForgeError> {
-        let amount = Self::claimable_amount(&schedule, now)?;
-        if !Self::authorize_and_pay(env, &schedule.beneficiary, &schedule.token, amount)? {
+        let amount = Self::claimable_amount_for(&schedule, &claimant, now)?;
+        if !Self::authorize_and_pay(env, &claimant, &schedule.token, amount)? {
             return Ok(0);
         }
-        schedule.claimed = schedule
-            .claimed
-            .checked_add(amount)
-            .ok_or(ForgeError::ArithmeticOverflow)?;
+        if Some(&claimant) == schedule.old_beneficiary.as_ref() {
+            schedule.old_claimed = schedule
+                .old_claimed
+                .checked_add(amount)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+        } else if claimant == schedule.beneficiary {
+            schedule.claimed = schedule
+                .claimed
+                .checked_add(amount)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+        } else {
+            return Err(ForgeError::InvalidInput);
+        }
         schedule.status = Self::current_status(&schedule, now)?;
         env.storage()
             .instance()
@@ -509,7 +686,7 @@ impl Vesting {
     }
 
     /// Settle a claim against a tranche schedule: the same
-    /// transfer-before-state discipline as [`Self::settle_linear`], over the
+    /// transfer-before-state discipline as [`Self::settle_linear_for`], over the
     /// unlock table's step function.
     fn settle_tranche(
         env: &Env,
@@ -594,8 +771,15 @@ impl Vesting {
 
     /// Derive the lifecycle status from ledger time and claimed amount.
     fn current_status(schedule: &VestingSchedule, now: u64) -> Result<VestingStatus, ForgeError> {
-        if schedule.claimed >= schedule.total_amount {
+        let total_claimed = schedule
+            .claimed
+            .checked_add(schedule.old_claimed)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        if total_claimed >= schedule.total_amount {
             return Ok(VestingStatus::Completed);
+        }
+        if schedule.status == VestingStatus::Revoked {
+            return Ok(VestingStatus::Revoked);
         }
         let cliff_time = schedule
             .start
@@ -642,39 +826,56 @@ impl Vesting {
         Ok(vested)
     }
 
-    /// Claimable amount at ledger time `now` (vested minus claimed).
+    /// Claimable amount specifically for `claimant` at ledger time `now`.
+    fn claimable_amount_for(
+        schedule: &VestingSchedule,
+        claimant: &Address,
+        now: u64,
+    ) -> Result<i128, ForgeError> {
+        if Some(claimant) == schedule.old_beneficiary.as_ref() {
+            schedule
+                .old_vested
+                .checked_sub(schedule.old_claimed)
+                .ok_or(ForgeError::ArithmeticOverflow)
+        } else if *claimant == schedule.beneficiary {
+            let total_vested = Self::vested_amount(schedule, now)?;
+            let new_vested = total_vested.saturating_sub(schedule.old_vested);
+            new_vested
+                .checked_sub(schedule.claimed)
+                .ok_or(ForgeError::ArithmeticOverflow)
+        } else {
+            Err(ForgeError::InvalidInput)
+        }
+    }
+
+    /// Total claimable amount across the schedule at ledger time `now`.
     fn claimable_amount(schedule: &VestingSchedule, now: u64) -> Result<i128, ForgeError> {
-        let vested = Self::vested_amount(schedule, now)?;
-        // By construction `claimed` never exceeds `vested`, so the subtraction
-        // cannot underflow; use checked arithmetic to fail loudly if the
-        // invariant is ever broken.
-        vested
-            .checked_sub(schedule.claimed)
-            .ok_or(ForgeError::ArithmeticOverflow)
+        if schedule.old_beneficiary.is_some() {
+            let old_rem = schedule.old_vested.saturating_sub(schedule.old_claimed);
+            let total_vested = Self::vested_amount(schedule, now)?;
+            let new_vested = total_vested.saturating_sub(schedule.old_vested);
+            let new_rem = new_vested.saturating_sub(schedule.claimed);
+            old_rem
+                .checked_add(new_rem)
+                .ok_or(ForgeError::ArithmeticOverflow)
+        } else {
+            let vested = Self::vested_amount(schedule, now)?;
+            vested
+                .checked_sub(schedule.claimed)
+                .ok_or(ForgeError::ArithmeticOverflow)
+        }
     }
 
     /// Seconds elapsed since `start`, saturating at zero.
-    ///
-    /// Tranche progress is compared on this offset instead of on
-    /// `start + unlock_at`, which keeps a `u64::MAX` offset from overflowing:
-    /// the tranche is simply never reached. A ledger timestamp before `start`
-    /// yields `0`, i.e. nothing unlocked — the conservative direction.
     fn elapsed_since(start: u64, now: u64) -> u64 {
         now.saturating_sub(start)
     }
 
     /// Derive the lifecycle status of a tranche schedule.
-    ///
-    /// Same two inputs as the linear kind — ledger time and claimed amount —
-    /// with the first unlock standing in for the cliff: `Locked` before it,
-    /// `Vesting` from it until the final amount is claimed, `Completed` once
-    /// `claimed == total_amount`.
     fn tranche_status(schedule: &TrancheSchedule, now: u64) -> Result<VestingStatus, ForgeError> {
         if schedule.claimed >= schedule.total_amount {
             return Ok(VestingStatus::Completed);
         }
-        // Creation rejects an empty table, so the first tranche is always
-        // there; the arm is defensive only.
         let Some(first) = schedule.tranches.get(0) else {
             return Ok(VestingStatus::Locked);
         };
@@ -684,14 +885,7 @@ impl Vesting {
         Ok(VestingStatus::Vesting)
     }
 
-    /// Unlocked amount of a tranche schedule at ledger time `now`: the sum of
-    /// every tranche whose offset has elapsed.
-    ///
-    /// The scan stops at the first tranche that has not unlocked yet, which is
-    /// exact because creation guarantees strictly increasing offsets (and
-    /// bounded because the table is capped at [`MAX_TRANCHES`]). The
-    /// cumulative sum is checked even though creation already proved it fits
-    /// in `i128`, so a tampered record fails loudly instead of wrapping.
+    /// Unlocked amount of a tranche schedule at ledger time `now`.
     fn tranche_unlocked(schedule: &TrancheSchedule, now: u64) -> Result<i128, ForgeError> {
         let elapsed = Self::elapsed_since(schedule.start, now);
         let mut total: i128 = 0;
@@ -710,12 +904,46 @@ impl Vesting {
     /// minus claimed).
     fn tranche_claimable(schedule: &TrancheSchedule, now: u64) -> Result<i128, ForgeError> {
         let unlocked = Self::tranche_unlocked(schedule, now)?;
-        // `unlocked` is monotonic in `now` and `claimed` only ever rises to a
-        // previously unlocked value, so the subtraction cannot underflow; use
-        // checked arithmetic to fail loudly if the invariant is ever broken.
         unlocked
             .checked_sub(schedule.claimed)
             .ok_or(ForgeError::ArithmeticOverflow)
+    }
+}
+
+pub mod events {
+    use super::*;
+
+    #[contractevent]
+    pub struct BeneficiaryReassigned {
+        #[topic]
+        pub schedule_id: u64,
+        #[topic]
+        pub old_beneficiary: Address,
+        #[topic]
+        pub new_beneficiary: Address,
+        pub vested_amount: i128,
+        pub unvested_amount: i128,
+        pub reassignments: u32,
+    }
+
+    pub fn beneficiary_reassigned(
+        env: &Env,
+        schedule_id: u64,
+        old_beneficiary: &Address,
+        new_beneficiary: &Address,
+        vested_amount: i128,
+        unvested_amount: i128,
+        reassignments: u32,
+    ) {
+        BeneficiaryReassigned {
+            schedule_id,
+            old_beneficiary: old_beneficiary.clone(),
+            new_beneficiary: new_beneficiary.clone(),
+            vested_amount,
+            unvested_amount,
+            reassignments,
+        }
+        .publish(env);
     }
 }
 

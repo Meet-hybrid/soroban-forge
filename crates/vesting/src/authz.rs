@@ -80,22 +80,23 @@ macro_rules! assert_auth_abort {
 // -----------------------------------------------------------------------
 
 #[test]
-fn create_schedule_accepts_beneficiary_signature_with_matching_args() {
+fn create_schedule_accepts_funder_signature_with_matching_args() {
     let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
 
     env.mock_auths(&[MockAuth {
-        address: beneficiary,
+        address: funder,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_schedule",
-            args: (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            args: (funder, beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
     let id = client
-        .try_create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION)
+        .try_create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION)
         .expect("outer ok")
         .expect("contract ok");
     assert_eq!(id, 1);
@@ -103,104 +104,117 @@ fn create_schedule_accepts_beneficiary_signature_with_matching_args() {
 }
 
 #[test]
-fn create_schedule_rejects_signature_from_non_beneficiary() {
+fn create_schedule_rejects_signature_from_non_funder() {
     let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
     let attacker = &accounts.user2;
 
-    // Attacker signs, but beneficiary is named in the call
+    // Attacker signs, but funder is named in the call
     env.mock_auths(&[MockAuth {
         address: attacker,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_schedule",
-            args: (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            args: (funder, beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let res = client.try_create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
     assert_auth_abort!(res);
 }
 
 #[test]
 fn create_schedule_rejects_signature_over_different_amount() {
     let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
 
-    // Beneficiary signed for TOTAL, but transaction attempts TOTAL + 5000
+    // Funder signed for TOTAL, but transaction attempts TOTAL + 5000
     env.mock_auths(&[MockAuth {
-        address: beneficiary,
+        address: funder,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_schedule",
-            args: (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            args: (funder, beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_create_schedule(beneficiary, &token, &(TOTAL + 5000), &CLIFF, &DURATION);
+    let res = client.try_create_schedule(
+        funder,
+        beneficiary,
+        &token,
+        &(TOTAL + 5000),
+        &CLIFF,
+        &DURATION,
+    );
     assert_auth_abort!(res);
 }
 
 #[test]
 fn create_schedule_rejects_signature_over_different_cliff_or_duration() {
     let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
 
-    // Beneficiary signed for CLIFF=1000, DURATION=4000
+    // Funder signed for CLIFF=1000, DURATION=4000
     env.mock_auths(&[MockAuth {
-        address: beneficiary,
+        address: funder,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_schedule",
-            args: (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            args: (funder, beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
     // Attempted call alters duration to 2000
-    let res = client.try_create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &2000u64);
+    let res = client.try_create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &2000u64);
     assert_auth_abort!(res);
 }
 
 #[test]
 fn create_schedule_rejects_signature_over_different_token() {
     let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
     let other_token = &accounts.validator;
 
-    // Beneficiary signed for token, but call uses other_token
+    // Funder signed for token, but call uses other_token
     env.mock_auths(&[MockAuth {
-        address: beneficiary,
+        address: funder,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_schedule",
-            args: (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            args: (funder, beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_create_schedule(beneficiary, other_token, &TOTAL, &CLIFF, &DURATION);
+    let res =
+        client.try_create_schedule(funder, beneficiary, other_token, &TOTAL, &CLIFF, &DURATION);
     assert_auth_abort!(res);
 }
 
 #[test]
-fn create_schedule_authorization_tree_is_beneficiary_root() {
+fn create_schedule_authorization_tree_is_funder_root() {
     let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
 
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
 
     assert_eq!(
         env.auths(),
         [(
-            beneficiary.clone(),
+            funder.clone(),
             AuthorizedInvocation {
                 function: AuthorizedFunction::Contract((
                     contract_id.clone(),
                     Symbol::new(&env, "create_schedule"),
-                    (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+                    (funder, beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
                 )),
                 sub_invocations: std::vec![],
             },
@@ -216,8 +230,9 @@ fn create_schedule_authorization_tree_is_beneficiary_root() {
 #[test]
 fn claim_accepts_beneficiary_signature_alone() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
 
     env.ledger().set_timestamp(START + DURATION);
 
@@ -242,9 +257,10 @@ fn claim_accepts_beneficiary_signature_alone() {
 #[test]
 fn claim_rejects_signature_from_non_beneficiary() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
     let attacker = &accounts.user2;
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
 
     env.ledger().set_timestamp(START + DURATION);
 
@@ -269,9 +285,10 @@ fn claim_rejects_signature_from_non_beneficiary() {
 #[test]
 fn claim_rejects_signature_replayed_for_different_schedule_id() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
-    let id1 = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
-    let id2 = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id1 = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id2 = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
 
     env.ledger().set_timestamp(START + DURATION);
 
@@ -295,8 +312,9 @@ fn claim_rejects_signature_replayed_for_different_schedule_id() {
 #[test]
 fn claim_authorization_tree_is_beneficiary_root_entrypoint() {
     let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
 
     env.ledger().set_timestamp(START + DURATION);
     client.claim(&id);
@@ -326,25 +344,27 @@ fn claim_authorization_tree_is_beneficiary_root_entrypoint() {
 #[test]
 fn blank_envelope_aborts_create_schedule_and_writes_nothing() {
     let (env, token, _tc, _contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
 
     // Empty envelope
     env.set_auths(&[]);
 
-    let res = client.try_create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let res = client.try_create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
     assert_auth_abort!(res);
 
     // Re-arming proves no ID counter was consumed
     env.mock_all_auths();
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
     assert_eq!(id, 1);
 }
 
 #[test]
 fn blank_envelope_aborts_claim_and_preserves_custody() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
     let beneficiary = &accounts.user1;
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
 
     env.ledger().set_timestamp(START + DURATION);
 
@@ -356,4 +376,220 @@ fn blank_envelope_aborts_claim_and_preserves_custody() {
     assert_eq!(tc.balance(beneficiary), 0);
     assert_eq!(tc.balance(&contract_id), TOTAL);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+}
+
+// -----------------------------------------------------------------------
+// reassign_beneficiary authorization & negative-auth tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn reassign_beneficiary_accepts_funder_signature() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let new_beneficiary = &accounts.user2;
+
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    // Arm funder auth
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "reassign_beneficiary",
+            args: (id, new_beneficiary).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_reassign_beneficiary(&id, new_beneficiary);
+    assert!(res.is_ok() && res.unwrap().is_ok());
+
+    let sched = client.get_schedule(&id);
+    assert_eq!(sched.beneficiary, *new_beneficiary);
+    assert_eq!(sched.old_beneficiary, Some(beneficiary.clone()));
+    assert_eq!(sched.reassignments, 1);
+}
+
+#[test]
+fn reassign_beneficiary_rejects_old_beneficiary_signature() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let new_beneficiary = &accounts.user2;
+
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    // Old beneficiary attempts to authorize reassignment
+    env.mock_auths(&[MockAuth {
+        address: beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "reassign_beneficiary",
+            args: (id, new_beneficiary).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_reassign_beneficiary(&id, new_beneficiary);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn reassign_beneficiary_rejects_new_beneficiary_signature() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let new_beneficiary = &accounts.user2;
+
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    // New beneficiary attempts to authorize reassignment
+    env.mock_auths(&[MockAuth {
+        address: new_beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "reassign_beneficiary",
+            args: (id, new_beneficiary).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_reassign_beneficiary(&id, new_beneficiary);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn reassign_beneficiary_rejects_third_party_signature() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let new_beneficiary = &accounts.user2;
+    let attacker = &accounts.validator;
+
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    // Third party / attacker attempts to authorize reassignment
+    env.mock_auths(&[MockAuth {
+        address: attacker,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "reassign_beneficiary",
+            args: (id, new_beneficiary).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_reassign_beneficiary(&id, new_beneficiary);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn reassign_beneficiary_authorization_tree_is_funder_root() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let new_beneficiary = &accounts.user2;
+
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    client.reassign_beneficiary(&id, new_beneficiary);
+
+    assert_eq!(
+        env.auths(),
+        [(
+            funder.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "reassign_beneficiary"),
+                    (id, new_beneficiary).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
+}
+
+#[test]
+fn blank_envelope_aborts_reassign_beneficiary() {
+    let (env, token, _tc, _contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let new_beneficiary = &accounts.user2;
+
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    env.ledger().set_timestamp(START + CLIFF + 500);
+
+    env.set_auths(&[]);
+
+    let res = client.try_reassign_beneficiary(&id, new_beneficiary);
+    assert_auth_abort!(res);
+}
+
+// -----------------------------------------------------------------------
+// claim_for authorization & negative-auth tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn claim_for_accepts_claimant_signature() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let new_beneficiary = &accounts.user2;
+
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    env.ledger().set_timestamp(START + CLIFF + 1_000); // 1,500s into 4,000s duration -> 3,750 vested
+    client.reassign_beneficiary(&id, new_beneficiary);
+
+    // Old beneficiary claims via claim_for
+    env.mock_auths(&[MockAuth {
+        address: beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "claim_for",
+            args: (id, beneficiary).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let paid = client
+        .try_claim_for(&id, beneficiary)
+        .expect("outer ok")
+        .expect("claim_for ok");
+    assert_eq!(paid, 3_333);
+    assert_eq!(tc.balance(beneficiary), 3_333);
+}
+
+#[test]
+fn claim_for_rejects_non_claimant_signature() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let new_beneficiary = &accounts.user2;
+    let attacker = &accounts.validator;
+
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    env.ledger().set_timestamp(START + CLIFF + 1_000);
+    client.reassign_beneficiary(&id, new_beneficiary);
+
+    // Attacker attempts to sign for old beneficiary's claim_for
+    env.mock_auths(&[MockAuth {
+        address: attacker,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "claim_for",
+            args: (id, beneficiary).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_claim_for(&id, beneficiary);
+    assert_auth_abort!(res);
+    assert_eq!(tc.balance(beneficiary), 0);
 }

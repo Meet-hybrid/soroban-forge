@@ -7,14 +7,17 @@ explicit table of unlock tranches.
 
 ```rust
 // linear (cliff + ramp)
-fn create_schedule(beneficiary, token, total_amount, cliff, duration) -> Result<u64, ForgeError>
+fn create_schedule(funder, beneficiary, token, total_amount, cliff, duration) -> Result<u64, ForgeError>
 fn get_schedule(schedule_id) -> Result<VestingSchedule, ForgeError>
+fn reassign_beneficiary(schedule_id, new_beneficiary) -> Result<(), ForgeError>
 // tranche (discrete unlock table)
-fn create_tranche_schedule(beneficiary, token, tranches: Vec<Tranche>) -> Result<u64, ForgeError>
+fn create_tranche_schedule(funder, beneficiary, token, tranches: Vec<Tranche>) -> Result<u64, ForgeError>
 fn get_tranche_schedule(schedule_id) -> Result<TrancheSchedule, ForgeError>
-// both kinds
+// claim APIs
 fn claim(schedule_id) -> Result<i128, ForgeError>
+fn claim_for(schedule_id, claimant) -> Result<i128, ForgeError>
 fn claimable(schedule_id) -> Result<i128, ForgeError>
+fn claimable_for(schedule_id, claimant) -> Result<i128, ForgeError>
 fn get_status(schedule_id) -> Result<VestingStatus, ForgeError>
 ```
 
@@ -109,10 +112,26 @@ revocation method.
 
 ## Authorization
 
-- `create_schedule` and `create_tranche_schedule` require the beneficiary.
-- `claim` requires the beneficiary.
-- `claimable`, `get_status`, `get_schedule`, and `get_tranche_schedule` are
+- `create_schedule` and `create_tranche_schedule` require the `funder`.
+- `reassign_beneficiary` requires the `funder`.
+- `claim` requires the active claimant (the prior beneficiary while their vested portion remains unexhausted, then the current beneficiary).
+- `claim_for` requires the explicit `claimant`.
+- `claimable`, `claimable_for`, `get_status`, `get_schedule`, and `get_tranche_schedule` are
   read-only views.
+
+## Beneficiary Reassignment
+
+A funder can reassign a linear vesting schedule to a new beneficiary via `reassign_beneficiary(schedule_id, new_beneficiary)`:
+- **Authorization**: Only `schedule.funder` can reassign. Reassignment calls from the old beneficiary, new beneficiary, or third parties are rejected (`InvokeError::Abort`).
+- **Validation**: Rejects `Revoked` or `Completed` schedules (`ForgeError::InvalidInput`), identical beneficiary reassignments (`ForgeError::InvalidInput`), and tranche schedules (`ForgeError::InvalidInput`).
+- **Exact Split Accounting**:
+  - The schedule snapshots `old_beneficiary = schedule.beneficiary`, `old_vested = vested_amount(now)`, and `old_claimed = schedule.claimed`.
+  - The previous beneficiary retains full claim rights to `old_vested - old_claimed`.
+  - The new beneficiary accrues from the reassignment timestamp forward: `(vested_amount(now) - old_vested) - claimed`.
+  - Balance conservation invariant is preserved: `old_vested + (total_amount - old_vested) == total_amount`.
+  - Monotonic counter `reassignments` is incremented.
+- **Contract Events**:
+  - Emits `BeneficiaryReassigned` with topics `schedule_id`, `old_beneficiary`, `new_beneficiary` and data payload `(vested_amount, unvested_amount, reassignments)`.
 
 ## Settlement
 
