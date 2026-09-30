@@ -8,6 +8,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **DAO proposal dependency DAG** (`requires` and `conflicts_with`): proposal
+  creation validates same-contract references and cycles with iterative DFS;
+  permissionless dispatch waits for requirements and stops after a conflict
+  executes. `get_dependencies` exposes edges, and `Proposed.data` includes
+  them. This changes the `propose` client signature and stored `Proposal`
+  shape; regenerate DAO client bindings and treat existing deployed records as
+  requiring an explicit migration before upgrading (none is included here).
+- **Opt-in prepaid subscription balances** (`deposit`, `withdraw_balance`):
+  subscribers can pre-fund a subscription; provider-authorized `charge` debits
+  exact period amounts from contract custody and follows the existing
+  `PastDue` retry policy when funds are insufficient. Explicit and retry-limit
+  cancellation refund the exact remainder. The optional `prepaid_balance`
+  field distinguishes pull mode from prepaid mode, and deposits, debits, and
+  refunds emit typed events. Includes conservation property coverage across
+  randomized lifecycle interleavings (issue #250).
+- **Read-only vesting schedule record view** (`get_schedule`):
+  returns the complete stored linear `VestingSchedule` (beneficiary, token,
+  total amount, start, cliff, duration, claimed, stored status) for an
+  existing id, mirroring `get_tranche_schedule` and the workspace's other
+  record views (`get_escrow`, `get_tx`, `get_proposal`,
+  `get_subscription`). Unknown ids and tranche ids return
+  `ForgeError::NotFound`; no authorization, no state change (issue #125).
+- **Read-only marketplace sale quote** (`quote_sale` -> `SaleQuote`):
+  returns the exact split a settlement would apply (`gross`, effective
+  `royalty_bps`, `royalty_amount`, `seller_net`) so integrators display the
+  contract's own basis-point math instead of a parallel off-chain
+  implementation. Settle-parity by construction — the quote reuses the
+  settlement paths' `effective_bps` + `split` resolution, floor rounding
+  included, and `royalty_amount + seller_net == gross` exactly;
+  `NotFound` for unregistered collections, `InvalidInput` for
+  `amount <= 0`; a `Disabled` configuration quotes at zero bps, matching
+  `settle_sale`'s settle-in-full behavior; no auth, no storage mutation,
+  no events (issue #126).
+- **Consolidated TTL policy in shared-utils** (`soroban_forge_shared_utils::ttl`
+  + `bump_entry`): the byte-identical TTL constants (30-day `BUMP_AMOUNT`,
+  one-day `BUMP_THRESHOLD` margin) and the persistent-entry bump helper
+  that were copy-pasted across the settlement contracts now live in one
+  place, generic over any `IntoVal<Env, Val>` storage key so future
+  persistent-storage migrations can adopt it unchanged. `escrow`,
+  `multi-sig-wallet`, `marketplace-royalties`, and `dao-governance` now
+  delegate to it; behavior and constant values are unchanged (issue #127).
 - **Atomic batch settlement** for marketplace royalties
   (`settle_sales`): settles up to `MAX_SETTLE_SALES` (20) sales of one
   collection in a single invocation against one collection + one payer
@@ -130,7 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-crate `Env`-based tests.
 - **DAO governance contract** (implemented): `propose`, `vote`, `execute`, and
   `get_proposal` with voting deadlines, one-vote-per-voter enforcement,
-  majority finalisation, and 16 in-crate `Env`-based tests.
+  majority finalization, and 16 in-crate `Env`-based tests.
 - **Subscription payments contract** (implemented): `subscribe`, `charge`,
   `cancel`, and `get_subscription` with period-based billing that catches up
   one period per call, and 12 in-crate `Env`-based tests.
@@ -202,3 +243,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transitive dependency of the pinned soroban-sdk 21.x chain, is not
   compiled into the workspace graph, and is ignored in CI with rationale
   until the soroban-sdk 27 migration (issue #14) removes it.
+
+<div id="task-263"></div>
