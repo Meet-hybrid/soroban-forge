@@ -91,8 +91,48 @@
 #[cfg(test)]
 extern crate std;
 
-use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, Env, Vec};
+use soroban_forge_shared_utils::{transfer_from_contract, ForgeError};
+use soroban_sdk::{
+    contract, contractclient, contractevent, contractimpl, contracttype, Address, Env, Vec,
+};
+
+mod events {
+    use super::*;
+
+    #[contractevent]
+    pub struct ScheduleCreated {
+        #[topic]
+        pub schedule_id: u64,
+        pub schedule: VestingSchedule,
+    }
+
+    #[contractevent]
+    pub struct Claimed {
+        #[topic]
+        pub schedule_id: u64,
+        pub amount: i128,
+        pub claimed: i128,
+        pub status: VestingStatus,
+    }
+
+    pub fn schedule_created(env: &Env, schedule_id: u64, schedule: &VestingSchedule) {
+        ScheduleCreated {
+            schedule_id,
+            schedule: schedule.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn claimed(env: &Env, schedule_id: u64, amount: i128, total: i128, status: VestingStatus) {
+        Claimed {
+            schedule_id,
+            amount,
+            claimed: total,
+            status,
+        }
+        .publish(env);
+    }
+}
 
 /// Maximum number of tranches a single schedule may carry.
 ///
@@ -209,6 +249,17 @@ pub trait SorobanForgeVesting {
         env: Env,
         schedule_id: u64,
     ) -> Result<VestingStatus, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read all schedule ids belonging to `beneficiary` in creation order (read-only).
+    ///
+    /// Returns an empty list if the beneficiary has no schedules.
+    ///
+    /// *Growth note:* this index lives in instance storage, so its cost scales
+    /// linearly with the number of schedules per beneficiary.
+    fn schedules_for_beneficiary(env: Env, beneficiary: Address) -> soroban_sdk::Vec<u64>;
+
+    /// Read the total number of schedules ever created (read-only).
+    fn schedule_count(env: Env) -> u64;
 }
 
 /// Lifecycle state of a vesting schedule.
@@ -300,6 +351,9 @@ pub struct TrancheSchedule {
 enum DataKey {
     /// The linear vesting record for `u64` id.
     Schedule(u64),
+    /// The list of schedule ids for a given beneficiary.
+    BeneficiarySchedules(Address),
+    /// Monotonic id counter.
     /// The tranche vesting record for `u64` id, unlock table included.
     TrancheSchedule(u64),
     /// Monotonic id counter, shared by both kinds.
@@ -346,7 +400,7 @@ impl Vesting {
         let id = Self::next_id(&env)?;
         let start = env.ledger().timestamp();
         let mut schedule = VestingSchedule {
-            beneficiary,
+            beneficiary: beneficiary.clone(),
             token,
             total_amount,
             start,
@@ -360,6 +414,19 @@ impl Vesting {
         env.storage()
             .instance()
             .set(&DataKey::Schedule(id), &schedule);
+        events::schedule_created(&env, id, &schedule);
+
+        let mut schedules: soroban_sdk::Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::BeneficiarySchedules(beneficiary.clone()))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        schedules.push_back(id);
+        env.storage().instance().set(
+            &DataKey::BeneficiarySchedules(beneficiary.clone()),
+            &schedules,
+        );
+
         Ok(id)
     }
 
@@ -505,6 +572,13 @@ impl Vesting {
         env.storage()
             .instance()
             .set(&DataKey::Schedule(schedule_id), &schedule);
+        events::claimed(
+            env,
+            schedule_id,
+            amount,
+            schedule.claimed,
+            schedule.status.clone(),
+        );
         Ok(amount)
     }
 
@@ -529,6 +603,13 @@ impl Vesting {
         env.storage()
             .instance()
             .set(&DataKey::TrancheSchedule(schedule_id), &schedule);
+        events::claimed(
+            env,
+            schedule_id,
+            amount,
+            schedule.claimed,
+            schedule.status.clone(),
+        );
         Ok(amount)
     }
 
@@ -582,6 +663,19 @@ impl Vesting {
                 .ok_or(ForgeError::ArithmeticOverflow)?;
         }
         Ok(total)
+    }
+
+    /// Read all schedule ids belonging to `beneficiary` in creation order.
+    pub fn schedules_for_beneficiary(env: Env, beneficiary: Address) -> soroban_sdk::Vec<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::BeneficiarySchedules(beneficiary))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    /// Read the total number of schedules ever created.
+    pub fn schedule_count(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::Count).unwrap_or(0)
     }
 
     /// Allocate the next monotonic schedule id.
@@ -716,32 +810,6 @@ impl Vesting {
         unlocked
             .checked_sub(schedule.claimed)
             .ok_or(ForgeError::ArithmeticOverflow)
-    }
-}
-
-/// Move `amount` of `token` from this contract to `to`.
-///
-/// Token failures are bucketed into [`ForgeError::TokenTransferFailed`]
-/// rather than forwarded — the same policy as escrow: a client receiving
-/// `Error(Contract, #N)` cannot know whether `N` came from the token or this
-/// contract, and the root cause remains visible in the transaction's
-/// diagnostic events.
-fn transfer_from_contract(
-    env: &Env,
-    token: &Address,
-    to: &Address,
-    amount: i128,
-) -> Result<(), ForgeError> {
-    match token::TokenClient::new(env, token).try_transfer(
-        &env.current_contract_address(),
-        to,
-        &amount,
-    ) {
-        Ok(Ok(())) => Ok(()),
-        // Token returned a typed error (insufficient balance, custom token
-        // logic) or the host aborted (most commonly an undeployed token
-        // address). The raw discriminant is intentionally discarded.
-        _ => Err(ForgeError::TokenTransferFailed),
     }
 }
 

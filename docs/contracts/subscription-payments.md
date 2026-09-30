@@ -7,6 +7,10 @@ pull a fixed `amount` per `period` (seconds) through SEP-41 token transfers.
 
 ```rust
 fn subscribe(subscriber, provider, token, amount, period) -> Result<u64, ForgeError>
+fn subscribe_on_behalf_of(provider, subscriber, token, amount, period) -> Result<u64, ForgeError>
+fn authorize_provider(subscriber, provider) -> Result<(), ForgeError>
+fn revoke_provider(subscriber, provider) -> Result<(), ForgeError>
+fn is_provider_authorized(subscriber, provider) -> bool
 fn charge(subscription_id) -> Result<i128, ForgeError>
 fn deposit(subscription_id, amount) -> Result<i128, ForgeError>
 fn withdraw_balance(subscription_id, amount) -> Result<i128, ForgeError>
@@ -20,6 +24,11 @@ fn get_usage(subscription_id, metric: Symbol) -> Result<UsageRecord, ForgeError>
 fn get_subscription_count() -> u64
 fn subscriptions_for_subscriber(subscriber, offset, limit) -> Result<Vec<Subscription>, ForgeError>
 fn subscriptions_for_provider(provider, offset, limit) -> Result<Vec<Subscription>, ForgeError>
+// Plan registry (issue #116)
+fn create_plan(provider, token, amount, period, quotas: Vec<MetricQuota>) -> Result<u64, ForgeError>
+fn subscribe_to_plan(plan_id, subscriber) -> Result<u64, ForgeError>
+fn get_plan(plan_id) -> Result<Plan, ForgeError>
+fn plan_count() -> u64
 ```
 
 - `subscribe` requires the subscriber and returns a stable, monotonic id.
@@ -196,3 +205,92 @@ The contract emits typed on-chain lifecycle events for indexers and off-chain mo
 - `BalanceDebited` (topic: `subscription_id: u64`) — successful prepaid period settlement; contains the exact `amount` and `balance_after`.
 - `BalanceRefunded` (topic: `subscription_id: u64`) — successful subscriber withdrawal or cancellation refund; contains `amount` and `balance_after`.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
+- `Charged` (topic: `subscription_id: u64`) — emitted on successful billing via `charge` (one event) or `charge_catchup` (one event per settled period). Contains `amount`, `last_charged`, and `next_charge_at`.
+- `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
+
+
+## Plan Registry
+
+A provider can publish a reusable billing plan once and share its `plan_id`
+with subscribers, who then self-serve without needing the token, amount, and
+period out-of-band.
+
+### Creating a plan
+
+```rust
+fn create_plan(provider, token, amount, period, quotas) -> Result<u64, ForgeError>
+```
+
+- Requires the **provider's authorization**.
+- Validates `amount > 0` and `period > 0` before auth, so invalid inputs never
+  spend the provider's signature.
+- `quotas` follows the same validation as `set_quotas`: at most 16 entries, no
+  duplicate metrics, `bucket_units > 0`, `overage_price >= 0`. Pass an empty
+  `Vec` for flat pricing.
+- Returns a stable `plan_id` allocated from a **separate monotonic counter**
+  (`DataKey::PlanCount`) so plan ids and subscription ids are in distinct
+  namespaces and can never be confused.
+- Plan ids are sequential starting from 1 and stable — they never change after
+  creation.
+
+### Subscribing to a plan
+
+```rust
+fn subscribe_to_plan(plan_id, subscriber) -> Result<u64, ForgeError>
+```
+
+- Requires the **subscriber's authorization**.
+- Looks up the plan; returns `ForgeError::NotFound` for an unknown `plan_id`.
+- Creates a `Subscription` record with the plan's token, amount, period, and
+  quotas copied verbatim. The subscription id is allocated from the **same**
+  counter as `subscribe`, so all subscription ids are globally unique regardless
+  of creation path.
+- **A subscriber can hold multiple subscriptions to the same plan.** Each call
+  creates a distinct record with its own `subscription_id`, `last_charged`
+  timestamp, and independent lifecycle. This mirrors the existing behaviour of
+  `subscribe`, which also creates a new record on every call even with the same
+  provider.
+- The resulting subscription is indistinguishable from one created via
+  `subscribe`: it appears in both subscriber and provider secondary indexes,
+  supports `charge`, `charge_catchup`, `pause`, `resume`, `cancel`,
+  `set_quotas`, `record_usage`, and all views.
+
+### Reading plan state
+
+```rust
+fn get_plan(plan_id) -> Result<Plan, ForgeError>  // no auth required
+fn plan_count() -> u64                            // no auth required
+```
+
+- `get_plan` returns `ForgeError::NotFound` for an unknown id. No
+  authorization required.
+- `plan_count` returns the total number of plans created (the monotonic counter;
+  it never decreases). No authorization required.
+
+### Plan struct
+
+```rust
+struct Plan {
+    plan_id:  u64,
+    provider: Address,
+    token:    Address,
+    amount:   i128,
+    period:   u64,
+    quotas:   Vec<MetricQuota>,  // empty = flat pricing
+}
+```
+
+### Authorization table (plan entrypoints)
+
+| Entrypoint          | Required authorization |
+| ------------------- | ---------------------- |
+| `create_plan`       | provider               |
+| `subscribe_to_plan` | subscriber             |
+| `get_plan`          | none                   |
+| `plan_count`        | none                   |
+
+### Storage keys (plan registry)
+
+- `Plan(plan_id: u64)` — the plan record.
+- `PlanCount` — monotonic plan id counter (separate from `Count` used for
+  subscriptions).

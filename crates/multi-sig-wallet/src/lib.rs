@@ -1939,6 +1939,9 @@ impl MultiSigWallet {
     }
 }
 
+/// Bump a persistent entry's TTL to the [`ttl::BUMP_AMOUNT`] horizon when
+/// it falls inside [`ttl::BUMP_THRESHOLD`]. The standard threshold/extend
+/// pattern: cheap no-op while the entry is fresh, decisive near expiry.
 /// Move `amount` of `token` from `from` into this contract.
 ///
 /// The depositor's `require_auth` on the calling entrypoint covers the

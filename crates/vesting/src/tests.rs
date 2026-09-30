@@ -1,6 +1,6 @@
 use super::*;
 use soroban_forge_test_utils::TestAccounts;
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::Env;
 
@@ -12,6 +12,7 @@ const TOTAL: i128 = 10_000;
 /// Build a fresh env with mocked auths, a registered contract, and named
 /// accounts. The generated client borrows the env, so it cannot be
 /// returned from a helper.
+#[macro_export]
 macro_rules! setup {
     () => {{
         let env = Env::default();
@@ -51,6 +52,27 @@ fn create_schedule_succeeds_and_is_locked() {
     let id = create(&client, &token, &accounts);
     assert_eq!(client.get_status(&id), VestingStatus::Locked);
     assert_eq!(client.claimable(&id), 0);
+}
+
+#[test]
+fn lifecycle_events_cover_creation_claim_and_silent_zero_claim() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    // In soroban-sdk 27, `env.events().all()` returns the events published
+    // by the most recent contract invocation (not a cumulative log), so each
+    // step asserts the exact per-call emission instead of a delta.
+    let id = create(&client, &token, &accounts);
+    assert_eq!(env.events().all().events().len(), 1);
+
+    // A claim before the cliff pays out zero and stays silent: it returns
+    // before the transfer and before the `Claimed` event.
+    assert_eq!(client.claim(&id), 0);
+    assert_eq!(env.events().all().events().len(), 0);
+
+    env.ledger().set_timestamp(START + DURATION);
+    assert_eq!(client.claim(&id), TOTAL);
+    // The mature claim invocation publishes two events: the nested SEP-41
+    // payout transfer from the contract, then the `Claimed` record.
+    assert_eq!(env.events().all().events().len(), 2);
 }
 
 #[test]
@@ -699,4 +721,241 @@ fn get_schedule_requires_no_auth() {
     env.set_auths(&[]);
     let schedule = client.get_schedule(&id);
     assert_eq!(schedule.beneficiary, accounts.user1);
+}
+
+// --- Tranche Vesting Validation & Unit Tests ---
+
+#[test]
+fn create_tranche_schedule_rejects_empty_table() {
+    let (env, _, token, _, client, _) = setup!();
+    env.mock_all_auths();
+    let beneficiary = Address::generate(&env);
+
+    let tranches = soroban_sdk::Vec::new(&env);
+    let res = client.try_create_tranche_schedule(&beneficiary, &token.address, &tranches);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+}
+
+#[test]
+fn create_tranche_schedule_rejects_too_many_tranches() {
+    let (env, _, token, _, client, _) = setup!();
+    env.mock_all_auths();
+    let beneficiary = Address::generate(&env);
+
+    let mut tranches = soroban_sdk::Vec::new(&env);
+    for i in 0..=32 {
+        tranches.push_back(Tranche {
+            unlock_at: i * 100,
+            amount: 100,
+        });
+    }
+
+    let res = client.try_create_tranche_schedule(&beneficiary, &token.address, &tranches);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+}
+
+#[test]
+fn create_tranche_schedule_rejects_non_positive_amount() {
+    let (env, _, token, _, client, _) = setup!();
+    env.mock_all_auths();
+    let beneficiary = Address::generate(&env);
+
+    let mut tranches = soroban_sdk::Vec::new(&env);
+    tranches.push_back(Tranche {
+        unlock_at: 100,
+        amount: 0,
+    });
+
+    let res = client.try_create_tranche_schedule(&beneficiary, &token.address, &tranches);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+}
+
+#[test]
+fn create_tranche_schedule_rejects_non_increasing_offsets() {
+    let (env, _, token, _, client, _) = setup!();
+    env.mock_all_auths();
+    let beneficiary = Address::generate(&env);
+
+    let mut equal_offsets = soroban_sdk::Vec::new(&env);
+    equal_offsets.push_back(Tranche {
+        unlock_at: 100,
+        amount: 500,
+    });
+    equal_offsets.push_back(Tranche {
+        unlock_at: 100,
+        amount: 500,
+    });
+    let res = client.try_create_tranche_schedule(&beneficiary, &token.address, &equal_offsets);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+
+    let mut decreasing = soroban_sdk::Vec::new(&env);
+    decreasing.push_back(Tranche {
+        unlock_at: 200,
+        amount: 500,
+    });
+    decreasing.push_back(Tranche {
+        unlock_at: 100,
+        amount: 500,
+    });
+    let res2 = client.try_create_tranche_schedule(&beneficiary, &token.address, &decreasing);
+    assert_eq!(res2.unwrap_err().unwrap(), ForgeError::InvalidInput);
+}
+
+#[test]
+fn create_tranche_schedule_rejects_arithmetic_overflow() {
+    let (env, _, token, _, client, _) = setup!();
+    env.mock_all_auths();
+    let beneficiary = Address::generate(&env);
+
+    let mut tranches = soroban_sdk::Vec::new(&env);
+    tranches.push_back(Tranche {
+        unlock_at: 100,
+        amount: i128::MAX,
+    });
+    tranches.push_back(Tranche {
+        unlock_at: 200,
+        amount: 1,
+    });
+
+    let res = client.try_create_tranche_schedule(&beneficiary, &token.address, &tranches);
+    assert_eq!(res.unwrap_err().unwrap(), ForgeError::ArithmeticOverflow);
+}
+
+#[test]
+fn tranche_tge_and_max_u64_behavior() {
+    let (env, _, token, _, client, _) = setup!();
+    env.mock_all_auths();
+    let beneficiary = Address::generate(&env);
+
+    let mut tranches = soroban_sdk::Vec::new(&env);
+    tranches.push_back(Tranche {
+        unlock_at: 0,
+        amount: 1_000,
+    });
+    tranches.push_back(Tranche {
+        unlock_at: u64::MAX,
+        amount: 9_000,
+    });
+
+    let id = client.create_tranche_schedule(&beneficiary, &token.address, &tranches);
+
+    assert_eq!(client.claimable(&id), 1_000);
+
+    env.ledger().set_timestamp(u64::MAX / 2);
+    assert_eq!(client.claimable(&id), 1_000);
+}
+
+#[test]
+fn tranche_claim_step_function_and_settlement() {
+    let (env, _, token, _, client, _) = setup!();
+    env.mock_all_auths();
+    let beneficiary = Address::generate(&env);
+
+    let mut tranches = soroban_sdk::Vec::new(&env);
+    tranches.push_back(Tranche {
+        unlock_at: 100,
+        amount: 2_000,
+    });
+    tranches.push_back(Tranche {
+        unlock_at: 200,
+        amount: 3_000,
+    });
+
+    let id = client.create_tranche_schedule(&beneficiary, &token.address, &tranches);
+
+    // Before first tranche
+    env.ledger().set_timestamp(START + 50);
+    assert_eq!(client.claimable(&id), 0);
+    assert_eq!(client.claim(&id), 0);
+
+    // At first tranche unlock (claims 2,000)
+    env.ledger().set_timestamp(START + 100);
+    assert_eq!(client.claimable(&id), 2_000);
+    assert_eq!(client.claim(&id), 2_000);
+
+    // Between tranches (since 2,000 was already claimed, 0 remain unclaimed until next unlock)
+    env.ledger().set_timestamp(START + 150);
+    assert_eq!(client.claimable(&id), 0);
+    assert_eq!(client.claim(&id), 0);
+
+    // At second tranche unlock (total vested = 5,000; 2,000 claimed -> 3,000 claimable)
+    env.ledger().set_timestamp(START + 200);
+    assert_eq!(client.claimable(&id), 3_000);
+    assert_eq!(client.claim(&id), 3_000);
+
+    let status = client.get_status(&id);
+    assert_eq!(status, VestingStatus::Completed);
+}
+
+#[test]
+fn linear_and_tranche_coexistence() {
+    let (env, _, token, _, client, _) = setup!();
+    let beneficiary1 = Address::generate(&env);
+    let beneficiary2 = Address::generate(&env);
+
+    let id_linear = client.create_schedule(&beneficiary1, &token.address, &10_000, &100, &200);
+
+    let mut tranches = soroban_sdk::Vec::new(&env);
+    tranches.push_back(Tranche {
+        unlock_at: 100,
+        amount: 5_000,
+    });
+    let id_tranche = client.create_tranche_schedule(&beneficiary2, &token.address, &tranches);
+
+    assert_ne!(id_linear, id_tranche);
+    assert!(client.try_get_tranche_schedule(&id_linear).is_err());
+}
+
+#[test]
+fn schedules_for_beneficiary_returns_empty_when_none() {
+    let (_env, _token, _tc, _cid, client, accounts) = setup!();
+    let schedules = client.schedules_for_beneficiary(&accounts.user2);
+    assert_eq!(schedules.len(), 0);
+}
+
+#[test]
+fn schedule_count_starts_at_zero() {
+    let (_env, _token, _tc, _cid, client, _accounts) = setup!();
+    assert_eq!(client.schedule_count(), 0);
+}
+
+#[test]
+fn schedules_grow_in_creation_order_and_count_matches() {
+    let (_env, token, _tc, _cid, client, accounts) = setup!();
+    let beneficiary = &accounts.user1;
+
+    let id1 = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    assert_eq!(client.schedule_count(), 1);
+    let s1 = client.schedules_for_beneficiary(beneficiary);
+    assert_eq!(s1.len(), 1);
+    assert_eq!(s1.get(0).unwrap(), id1);
+
+    let id2 = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    assert_eq!(client.schedule_count(), 2);
+    let s2 = client.schedules_for_beneficiary(beneficiary);
+    assert_eq!(s2.len(), 2);
+    assert_eq!(s2.get(0).unwrap(), id1);
+    assert_eq!(s2.get(1).unwrap(), id2);
+}
+
+#[test]
+fn schedules_for_distinct_beneficiaries_are_disjoint() {
+    let (_env, token, _tc, _cid, client, accounts) = setup!();
+    let b1 = &accounts.user1;
+    let b2 = &accounts.user2;
+
+    let id1 = client.create_schedule(b1, &token, &TOTAL, &CLIFF, &DURATION);
+    let id2 = client.create_schedule(b2, &token, &TOTAL, &CLIFF, &DURATION);
+    let id3 = client.create_schedule(b1, &token, &TOTAL, &CLIFF, &DURATION);
+
+    let s1 = client.schedules_for_beneficiary(b1);
+    let s2 = client.schedules_for_beneficiary(b2);
+
+    assert_eq!(client.schedule_count(), 3);
+    assert_eq!(s1.len(), 2);
+    assert_eq!(s1.get(0).unwrap(), id1);
+    assert_eq!(s1.get(1).unwrap(), id3);
+
+    assert_eq!(s2.len(), 1);
+    assert_eq!(s2.get(0).unwrap(), id2);
 }
