@@ -2188,6 +2188,8 @@ mod events {
             token: token.clone(),
         }
         .publish(env);
+    }
+
     pub fn rejected(env: &Env, tx: &WalletTx) {
         TxRejected {
             tx_id: tx.tx_id,

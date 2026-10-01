@@ -102,7 +102,8 @@
 //! tally (weighted voting is tracked separately as issue #59).
 
 #[cfg(test)]
-extern crate std;use soroban_forge_shared_utils::{
+extern crate std;
+use soroban_forge_shared_utils::{
     bump_entry as shared_bump_entry, ForgeError, BUMP_AMOUNT, BUMP_THRESHOLD,
 };
 
@@ -1027,7 +1028,8 @@ impl DaoGovernance {
         let key = DataKey::Proposal(proposal_id);
         if !env.storage().persistent().has(&key) {
             return Err(ForgeError::NotFound);
-        }        bump_entry(&env, &key);
+        }
+        bump_entry(&env, &key);
         bump_instance(&env);
 
         Ok(())
@@ -1258,8 +1260,8 @@ mod events {
 mod tests {
     use super::*;
     use soroban_forge_test_utils::{MockTarget, MockTargetClient, RevertingTarget, TestAccounts};
-    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
+    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{Bytes, Env};
 
@@ -2650,10 +2652,7 @@ mod tests {
 
         // Both halves of the vote now share the same 30-day horizon.
         assert_eq!(instance_ttl(&env, &contract_id), BUMP_AMOUNT);
-        assert_eq!(
-            proposal_ttl(&env, &contract_id, proposal_id),
-            BUMP_AMOUNT
-        );
+        assert_eq!(proposal_ttl(&env, &contract_id, proposal_id), BUMP_AMOUNT);
         assert!(client.has_voted(&proposal_id, &accounts.user2));
     }
 
@@ -2672,10 +2671,7 @@ mod tests {
         client.touch_ttl(&proposal_id);
 
         assert_eq!(instance_ttl(&env, &contract_id), BUMP_AMOUNT);
-        assert_eq!(
-            proposal_ttl(&env, &contract_id, proposal_id),
-            BUMP_AMOUNT
-        );
+        assert_eq!(proposal_ttl(&env, &contract_id, proposal_id), BUMP_AMOUNT);
         // The mark survived the extension and still reports truthfully.
         assert!(client.has_voted(&proposal_id, &accounts.user2));
     }

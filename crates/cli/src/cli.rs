@@ -1,4 +1,5 @@
 use clap::Args;
+use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
 pub struct BuildArgs {
@@ -42,36 +43,10 @@ pub struct DeployArgs {
 #[derive(Args, Debug, Clone)]
 pub struct NewArgs {
     /// Contract name (alphanumeric, hyphens, or underscores).
-    ///
-    /// Optional when --interactive is used; the wizard will prompt for it.
-    #[arg(required_unless = "interactive")]
-    pub name: Option<String>,
+    pub name: String,
     /// Destination directory path for the new contract.
     #[arg(short, long)]
     pub path: Option<std::path::PathBuf>,
-    /// Run the interactive scaffold wizard.
-    ///
-    /// When enabled, prompts for the project name, description, contract
-    /// templates to include, and optional features (events, TTL, testing).
-    /// When omitted, the command behaves as a non-interactive scaffolder.
-    #[arg(short, long, default_value_t = false)]
-    pub interactive: bool,
-    /// Bref description of the project (used in generated metadata).
-    #[arg(long)]
-    pub description: Option<String>,
-    /// Contract templates to include (comma-separated); repeatable.
-    ///
-    /// Valid values: escrow, vesting, multisig, dao, subscription, marketplace.
-    #[arg(long = "contract", value_delimiter = ',', action = clap::ArgAction::Append)]
-    pub contracts: Vec<String>,
-    /// Optional features to enable (comma-separated); repeatable.
-    ///
-    /// Valid values: events, ttl, property-tests, negative-auth-tests.
-    #[arg(long = "feature", value_delimiter = ',', action = clap::ArgAction::Append)]
-    pub features: Vec<String>,
-    /// Overwrite existing files without prompting.
-    #[arg(long, default_value_t = false)]
-    pub force: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -127,18 +102,25 @@ pub struct EventsArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct InspectArgs {
-    /// Contract address or alias
+    /// Contract address or alias.
     pub contract: String,
-    /// Specific DataKey entries to inspect (comma-separated)
+    /// Specific DataKey entries to inspect (comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub keys: Vec<String>,
-    /// Output as JSON for programmatic use
+    /// Output as JSON for programmatic use.
     #[arg(long, default_value_t = false)]
     pub json: bool,
-    /// Network to use
+    /// Network to use.
     #[arg(long, default_value = "testnet")]
     pub network: String,
-    /// Source account
+    /// Source account.
     #[arg(long)]
     pub source: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DoctorArgs {
+    /// Optional WASM artifact to validate as a regular, non-empty file.
+    #[arg(long, value_name = "PATH")]
+    pub wasm: Option<PathBuf>,
 }

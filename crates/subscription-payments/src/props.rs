@@ -1,1 +1,381 @@
-Ly8hIFJhbmRvbWl6ZWQgaW52YXJpYW50IHN1aXRlIChwcm9wdGVzdCkgZm9yIHN1YnNjcmlwdGlvbiBwYXltZW50cy4KLy8vCi8vLyBFeGVyY2lzZWQgcHJvcGVydGllczoKLy8vIDEuIE1vbm90b25pY2l0eTogYGxhc3RfY2hhcmdlZGAgbW9ub3RvbmljIGFuZCBhZHZhbmNlcyBieSBleGFjdGx5IG9uZSBwZXJpb2QKLy8vICAgIHBlciBzdWNjZXNzZnVsIGNoYXJnZS4KLy8vIDIuIE5vIGVhcmx5IGJpbGw6IGBjaGFyZ2VgIHJldHVybnMgYDBgIGFuZCBjaGFuZ2VzIG5vdGhpbmcgYmVmb3JlIGEgZnVsbCBwZXJpb2QKLy8vICAgIGhhcyBlbGFwc2VkLgovLy8gMy4gVGVybWluYWwgc2FmZXR5OiBhIGBDYW5jZWxsZWRgIHN1YnNjcmlwdGlvbiBuZXZlciBiaWxscy4KCnVzZSBjcmF0ZTo6ewogICAgU29yb2JhbkZvcmdlU3Vic2NyaXB0aW9uUGF5bWVudHNDbGllbnQsIFN1YnNjcmlwdGlvblBheW1lbnRzLCBTdWJzY3JpcHRpb25TdGF0dXMsCiAgICBNQVhfQ0FUQ0hVUF9QRVJJT0RTLCBNQVhfUkVUUklFUywKfTsKdXNlIHByb3B0ZXN0OjpwcmVsdWRlOjoqOwp1c2Ugc29yb2Jhbl9mb3JnZV9zaGFyZWRfdXRpbHM6OkZvcmdlRXJyb3I7CnVzZSBzb3JvYmFuX3Nkazp0ZXN0dXRpbHM6OkFkZHJlc3MgYXMgXzsKdXNlIHNvcm9iYW5fc2RrOjp0ZXN0dXRpbHM6OkxlZGdlciBhcyBfOwp1c2Ugc29yb2Jhbl9zZGs6OnRva2VuOjpTdGVsbGFyQXNzZXRDbGllbnQ7CnVzZSBzb3JvYmFuX3Nkazp7QWRkcmVzcywgRW52fTsKCmNvbnN0IFNUQVJUOiB1NjQgPSAxXzAwMF8wMDA7CmNvbnN0IE1BWF9BTU9VTlQ6IGkxMjggPSAxXzAwMF8wMDBfMDAwXzAwMDsKY29uc3QgTUFYX1BFUklPRDogdTY0ID0gMTAgKiAzNjUgKiAyNCAqIDM2MDA7CgpzdHJ1Y3QgV29ybGQgewogICAgZW52OiBFbnYsCiAgICB0b2tlbjogQWRkcmVzcywKICAgIGNvbnRyYWN0X2lkOiBBZGRyZXNzLAogICAgc3Vic2NyaWJlcjogQWRkcmVzcywKICAgIHByb3ZpZGVyOiBBZGRyZXNzLAp9CgpmbiBzZXR1cF93b3JsZChtaW50X2Ftb3VudDogaTEyOCkgLT4gV29ybGQgewogICAgbGV0IGVudiA9IEVudjo6ZGVmYXVsdCgpOwogICAgZW52Lm1vY2tfYWxsX2F1dGhzX2FsbG93aW5nX25vbl9yb290X2F1dGgoKTsKICAgIGVudi5sZWRnZXIoKS5zZXRfdGltZXN0YW1wKFNUQVJUKTsKCiAgICBsZXQgYWRtaW4gPSBBZGRyZXNzOjpnZW5lcmF0ZSgmZW52KTsKICAgIGxldCBzYWMgPSBlbnYucmVnaXN0ZXJfc3RlbGxhcl9hc3NldF9jb250cmFjdF92MihhZG1pbik7CiAgICBsZXQgdG9rZW4gPSBzYWMuYWRkcmVzcygpOwoKICAgIGxldCBzdWJzY3JpYmVyID0gQWRkcmVzczo6Z2VuZXJhdGUoJmVudik7CiAgICBsZXQgcHJvdmlkZXIgPSBBZGRyZXNzOjpnZW5lcmF0ZSgmZW52KTsKCiAgICBTdGVsbGFyQXNzZXRDbGllbnQ6Om5ldygmZW52LCAmdG9rZW4pLm1pbnQoJnN1YnNjcmliZXIsICZtaW50X2Ftb3VudCk7CgogICAgbGV0IGNvbnRyYWN0X2lkID0gZW52LnJlZ2lzdGVyKFN1YnNjcmlwdGlvblBheW1lbnRzLCAoKSk7CgogICAgV29ybGQgewogICAgICAgIGVudiwKICAgICAgICB0b2tlbiwKICAgICAgICBjb250cmFjdF9pZCwKICAgICAgICBzdWJzY3JpYmVyLAogICAgICAgIHByb3ZpZGVyLAogICAgfQp9CgppbXBsIFdvcmxkIHsKICAgIGZuIGNsaWVudCgmU2VsZikgLT4gU29yb2JhbkZvcmdlU3Vic2NyaXB0aW9uUGF5bWVudHNDbGllbnQ8J18+IHsKICAgICAgICBTb3JvYmFuRm9yZ2VTdWJzY3JpcHRpb25QYXltZW50c0NsaWVudDo6bmV3KCZzZWxmLmVudiwgJnNlbGYuY29udHJhY3RfaWQpCiAgICB9CgogICAgZm4gc3Vic2NyaWJlKCZzZWxmLCBhbW91bnQ6IGkxMjgsIHBlcmlvZDogdTY0KSAtPiB1NjQgewogICAgICAgIHNlbGYuY2xpZW50KCkuc3Vic2NyaWJlKAogICAgICAgICAgICAmc2VsZi5zdWJzY3JpYmVyLAogICAgICAgICAgICAmc2VsZi5wcm92aWRlciwKICAgICAgICAgICAgJnNlbGYudG9rZW4sCiAgICAgICAgICAgICZhbW91bnQsCiAgICAgICAgICAgICZwZXJpb2QsCiAgICAgICAgKQogICAgfQp9Cgpwcm9wdGVzdCEgewogICAgI1twcm9wdGVzdF9jb25maWcoUHJvcHRlc3RDb25maWc6OndpdGhfY2FzZXMoMjU2KSldCgogICAgI1t0ZXN0XQogICAgZm4gcHJvcF9sYXN0X2NoYXJnZWRfaXNfbW9ub3RvbmljX2FuZF9hZHZhbmNlc19ieV9vbmVfcGVyaW9kKAogICAgICAgIGFtb3VudCBpbiAxaTEyOC4uPTEwMF8wMDBfaTEyOCwKICAgICAgICBwZXJpb2QgaW4gMXU2NC4uPU1BWF9QRVJJT0QsCiAgICAgICAgY2hhcmdlc19jb3VudCBpbiAxdTMyLi49MTBfdTMyLAogICAgKSB7CiAgICAgICAgbGV0IG1pbnRfdG90YWwgPSBhbW91bnQuc2F0dXJhdGluZ19tdWwoY2hhcmdlc19jb3VudCBhcyBpMTI4KTsKICAgICAgICBsZXQgdyA9IHNldHVwX3dvcmxkKG1pbnRfdG90YWwpOwogICAgICAgIGxldCBpZCA9IHcuc3Vic2NyaWJlKGFtb3VudCwgcGVyaW9kKTsKCiAgICAgICAgbGV0IG11dCBwcmV2X2xhc3RfY2hhcmdlZCA9IFNUQVJUOwoKICAgICAgICBmb3IgaSBpbiAxLi49Y2hhcmdlc19jb3VudCB7CiAgICAgICAgICAgIGxldCB0YXJnZXRfdGltZSA9IFNUQVJUICsgcGVyaW9kICogKGkgYXMgdTY0KTsKICAgICAgICAgICAgdy5lbnYubGVkZ2VyKCkuc2V0X3RpbWVzdGFtcCh0YXJnZXRfdGltZSk7CgogICAgICAgICAgICBsZXQgYmlsbGVkID0gdy5jbGllbnQoKS5jaGFyZ2UoJmlkKTsKICAgICAgICAgICAgcHJvcF9hc3NlcnRfZXEoYmlsbGVkLCBhbW91bnQpOwoKICAgICAgICAgICAgbGV0IHN1YiA9IHcuY2xpZW50KCkuZ2V0X3N1YnNjcmlwdGlvbigmaWQpOwogICAgICAgICAgICBwcm9wX2Fzc2VydCEoc3ViLmxhc3RfY2hhcmdlZCA+IHByZXZfbGFzdF9jaGFyZ2VkLCAibGFzdF9jaGFyZ2VkIG11c3QgYmUgc3RyaWN0bHkgbW9ub3RvbmljIik7CiAgICAgICAgICAgIHByb3BfYXNzZXJ0X2VxKHN1Yi5sYXN0X2NoYXJnZWQsIFNUQVJUICsgcGVyaW9kICogKGkgYXMgdTY0KSwgImxhc3RfY2hhcmdlZCBtdXN0IGFkdmFuY2UgYnkgb25lIHBlcmlvZCBwZXIgY2hhcmdlIik7CiAgICAgICAgICAgIHByZXZfbGFzdF9jaGFyZ2VkID0gc3ViLmxhc3RfY2hhcmdlZDsKICAgICAgICB9CiAgICB9CgogICAgI1t0ZXN0XQogICAgZm4gcHJvcF9jaGFyZ2VfcmV0dXJuc196ZXJvX2JlZm9yZV9wZXJpb2RfZWxhcHNlcygKICAgICAgICBhbW91bnQgaW4gMWkxMjguLj1NQVhfQU1PVU5ULAogICAgICAgIHBlcmlvZCBpbiAydTY0Li49TUFYX1BFUklPRCwKICAgICAgICBlbGFwc2VkX2RlbHRhIGluIDF1NjQuLj1NQVhfUEVSSU9ELAogICAgKSB7CiAgICAgICAgbGV0IGRlbHRhID0gZWxhcHNlZF9kZWx0YSAlIHBlcmlvZDsKICAgICAgICBpZiBkZWx0YSA9PSAwIHsKICAgICAgICAgICAgcmV0dXJuIE9rKCk7CiAgICAgICAgfQoKICAgICAgICBsZXQgdyA9IHNldHVwX3dvcmxkKGFtb3VudCAqIDEwKTsKICAgICAgICBsZXQgaWQgPSB3LnN1YnNjcmliZShhbW91bnQsIHBlcmlvZCk7CgogICAgICAgIHcuZW52LmxlZGdlcigpLnNldF90aW1lc3RhbXAoU1RBUlQgKyBkZWx0YSk7CgogICAgICAgIGxldCBiaWxsZWQgPSB3LmNsaWVudCgpLmNoYXJnZSgmaWQpOwogICAgICAgIHByb3BfYXNzZXJ0X2VxKGJpbGxlZCwgMCwgImNoYXJnZSBtdXN0IHJldHVybiAwIGJlZm9yZSBwZXJpb2QgZWxhcHNlcyIpOwoKICAgICAgICBsZXQgc3ViID0gdy5jbGllbnQoKS5nZXRfc3Vic2NyaXB0aW9uKCZpZCk7CiAgICAgICAgcHJvcF9hc3NlcnRfZXEoc3ViLmxhc3RfY2hhcmdlZCwgU1RBUlQsICJsYXN0X2NoYXJnZWQgbXVzdCByZW1haW4gdW5jaGFuZ2VkIHdoZW4gY2hhcmdpbmcgZWFybHkiKTsKICAgIH0KCiAgICAjW3Rlc3RdCiAgICBmbiBwcm9wX2NhbmNlbGxlZF9zdWJzY3JpcHRpb25fbmV2ZXJfYmlsbHMoCiAgICAgICAgYW1vdW50IGluIDFpMTI4Li49TUFYX0FNT1VOVCwKICAgICAgICBwZXJpb2QgaW4gMXU2NC4uPU1BWF9QRVJJT0QsCiAgICAgICAgY2FuY2VsX2RlbGF5IGluIDB1NjQuLj1NQVhfUEVSSU9ELAogICAgICAgIGNoYXJnZV9kZWxheSBpbiAxdTY0Li49TUFYX1BFUklPRCwKICAgICkgewogICAgICAgIGxldCB3ID0gc2V0dXBfd29ybGQoYW1vdW50ICogMTApOwogICAgICAgIGxldCBpZCA9IHcuc3Vic2NyaWJlKGFtb3VudCwgcGVyaW9kKTsKCiAgICAgICAgdy5lbnYubGVkZ2VyKCkuc2V0X3RpbWVzdGFtcChTVEFSVCArIGNhbmNlbF9kZWxheSk7CiAgICAgICAgdy5jbGllbnQoKS5jYW5jZWwoJmlkKTsKCiAgICAgICAgbGV0IHN1Yl9hZnRlcl9jYW5jZWwgPSB3LmNsaWVudCgpLmdldF9zdWJzY3JpcHRpb24oJmlkKTsKICAgICAgICBwcm9wX2Fzc2VydF9lcShzdWJfYWZ0ZXJfY2FuY2VsLnN0YXR1cywgU3Vic2NyaXB0aW9uU3RhdHVzOjpDYW5jZWxsZWQpOwoKICAgICAgICB3LmVudi5sZWRnZXIoKS5zZXRfdGltZXN0YW1wKFNUQVJUICsgY2FuY2VsX2RlbGF5ICsgY2hhcmdlX2RlbGF5KTsKICAgICAgICBsZXQgcmVzID0gdy5jbGllbnQoKS50cnlfY2hhcmdlKCZpZCk7CiAgICAgICAgcHJvcF9hc3NlcnQhKHJlcy5pc19lcnIoKSwgImNoYXJnZSBvbiBhIGNhbmNlbGxlZCBzdWJzY3JpcHRpb24gbXVzdCByZXR1cm4gYW4gZXJyb3IiKTsKICAgICAgICBsZXQgZXJyID0gcmVzLnVud3JhcF9lcnIoKS51bndyYXAoKTsKICAgICAgICBwcm9wX2Fzc2VydF9lcShlcnIsIEZvcmdlRXJyb3I6OkludmFsaWRJbnB1dCwgImNhbmNlbGxlZCBzdWJzY3JpcHRpb24gbXVzdCBmYWlsIHdpdGggSW52YWxpZElucHV0Iik7CgogICAgICAgIGxldCBzdWJfYWZ0ZXJfZmFpbGVkX2NoYXJnZSA9IHcuY2xpZW50KCkuZ2V0X3N1YnNjcmlwdGlvbigmaWQpOwogICAgICAgIHByb3BfYXNzZXJ0X2VxKHN1Yl9hZnRlcl9mYWlsZWRfY2hhcmdlLnN0YXR1cywgU3Vic2NyaXB0aW9uU3RhdHVzOjpDYW5jZWxsZWQpOwogICAgfQoKICAgICNbdGVzdF0KICAgIGZuIHByb3BfZmFpbGVkX2NoYXJnZXNfYWR2YW5jZV9yZXRyeV9zdGF0ZV93aXRob3V0X21vdmluZ19iYWxhbmNlcygKICAgICAgICBhbW91bnQgaW4gMWkxMjguLj0xMDBfMDAwX2kxMjgsCiAgICAgICAgYmFsYW5jZV9wZXJjZW50IGluIDB1MzIuLjEwMF91MzIsCiAgICAgICAgcGVyaW9kIGluIDF1NjQuLj1NQVhfUEVSSU9ELAogICAgICAgIGZhaWx1cmVfY291bnQgaW4gMXUzMi4uPU1BWF9SRVRSSUVTLAogICAgKSB7CiAgICAgICAgbGV0IGluaXRpYWxfYmFsYW5jZSA9IGFtb3VudCAqIGJhbGFuY2VfcGVyY2VudCBhcyBpMTI4IC8gMTAwOwogICAgICAgIGxldCB3ID0gc2V0dXBfd29ybGQoaW5pdGlhbF9iYWxhbmNlKTsKICAgICAgICBsZXQgaWQgPSB3LnN1YnNjcmliZShhbW91bnQsIHBlcmlvZCk7CiAgICAgICAgbGV0IHRva2VuX2NsaWVudCA9IFN0ZWxsYXJBc3NldENsaWVudDo6bmV3KCZ3LmVudiwgJncu dG9rZW4pOwogICAgICAgIGxldCBwcm92aWRlcl9iYWxhbmNlID0gdG9rZW5fY2xpZW50LmJhbGFuY2UoJncucHJvdmlkZXIpOwogICAgICAgIHcuZW52LmxlZGdlcigpLnNldF90aW1lc3RhbXAoU1RBUlQgKyBwZXJpb2QpOwoKICAgICAgICBsZXQgbXV0IHByZXZpb3VzX2ZhaWxlZF9hdHRlbXB0cyA9IDA7CiAgICAgICAgZm9yIGZhaWx1cmUgaW4gMS4uPWZhaWx1cmVfY291bnQgewogICAgICAgICAgICBwcm9wX2Fzc2VydF9lcSh3LmNsaWVudCgpLmNoYXJnZSgmaWQpLCAwKTsKCiAgICAgICAgICAgIGxldCBzdWIgPSB3LmNsaWVudCgpLmdldF9zdWJzY3JpcHRpb24oJmlkKTsKICAgICAgICAgICAgbGV0IHN0YXR1cyA9IHN1Yi5zdGF0dXMuY2xvbmUoKTsKICAgICAgICAgICAgcHJvcF9hc3NlcnQoc3ViLmZhaWxlZF9hdHRlbXB0cyA+PSBwcmV2aW91c19mYWlsZWRfYXR0ZW1wdHMpOwogICAgICAgICAgICBwcm9wX2Fzc2VydF9lcShzdWIuZmFpbGVkX2F0dGVtcHRzLCBmYWlsdXJlKTsKICAgICAgICAgICAgcHJvcF9hc3NlcnRfZXEoCiAgICAgICAgICAgICAgICBzdGF0dXMuY2xvbmUoKSwKICAgICAgICAgICAgICAgIGlmIGZhaWx1cmUgPT0gTUFYX1JFVFJJRVMgewogICAgICAgICAgICAgICAgICAgIFN1YnNjcmlwdGlvblN0YXR1czo6Q2FuY2VsbGVkCiAgICAgICAgICAgICAgICB9IGVsc2UgewogICAgICAgICAgICAgICAgICAgIFN1YnNjcmlwdGlvblN0YXR1czo6UGFzdER1ZQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICApOwogICAgICAgICAgICBwcm9wX2Fzc2VydF9lcShzdWIubGFzdF9jaGFyZ2VkLCBTVEFSVCk7CiAgICAgICAgICAgIHByb3BfYXNzZXJ0X2VxKHRva2VuX2NsaWVudC5iYWxhbmNlKCZ3LnN1YnNjcmliZXIpLCBpbml0aWFsX2JhbGFuY2UpOwogICAgICAgICAgICBwcm9wX2Fzc2VydF9lcSh0b2tlbl9jbGllbnQuYmFsYW5jZSgmdzLcHJvdmlkZXIpLCBwcm92aWRlcl9iYWxhbmNlKTsKICAgICAgICAgICAgcHJldmlvdXNfZmFpbGVkX2F0dGVtcHRzID0gc3ViLmZhaWxlZF9hdHRlbXB0czsKCiAgICAgICAgICAgIGlmIHN0YXR1cyA9PSBTdWJzY3JpcHRpb25TdGF0dXM6OlBhc3REdWUgewogICAgICAgICAgICAgICAgbGV0IGJlZm9yZSA9IHN1YjsKICAgICAgICAgICAgICAgIGxldCBjYXRjaHVwID0gdy5jbGllbnQoKS50cnlfY2hhcmdlX2NhdGNodXAoJmlkLCAmMSk7CiAgICAgICAgICAgICAgICBsZXQgZXJyID0gY2F0Y2h1cC51bndyYXBfZXJyKCkudW53cmFwKCk7CiAgICAgICAgICAgICAgICBwcm9wX2Fzc2VydF9lcShlcnIsIEZvcmdlRXJyb3I6OkludmFsaWRJbnB1dCk7CiAgICAgICAgICAgICAgICBwcm9wX2Fzc2VydF9lcSh3LmNsaWVudCgpLmdldF9zdWJzY3JpcHRpb24oJmlkKSwgYmVmb3JlKTsKICAgICAgICAgICAgfQogICAgICAgIH0KICAgIH0KCiAgICAjW3Rlc3RdCiAgICBmbiBwcm9wX2NhdGNodXBfYmlsbHNfb25seV9kdWVfcGVyaW9kc193aXRoaW5fdGhlX2hhcmRfY2FwKAogICAgICAgIGFtb3VudCBpbiAxaTEyOC4uPTEwMF8wMDBfaTEyOCwKICAgICAgICBwZXJpb2QgaW4gMXU2NC4uPU1BWF9QRVJJT0QsCiAgICAgICAgZWxhcHNlZF9wZXJpb2RzIGluIDB1MzIuLj0oTUFYX0NBVENIVVBfUEVSSU9EUyAqIDIpLAogICAgICAgIGVsYXBzZWRfcmVtYWluZGVyIGluIDB1NjQuLj1NQVhfUEVSSU9ELAogICAgICAgIG1heF9wZXJpb2RzIGluIDB1MzIuLj0oTUFYX0NBVENIVVBfUEVSSU9EUyAqIDIpLAogICAgKSB7CiAgICAgICAgbGV0IGVsYXBzZWRfc2Vjb25kcyA9IHBlcmlvZCAqIGVsYXBzZWRfcGVyaW9kcyBhcyB1NjQgKyBlbGFwc2VkX3JlbWFpbmRlciAlIHBlcmlvZDsKICAgICAgICBpZiBlbGFwc2VkX3NlY29uZHMgPT0gMCB7CiAgICAgICAgICAgIHJldHVybiBPaygpOwogICAgICAgIH0KCiAgICAgICAgbGV0IG1pbnRfYW1vdW50ID0gYW1vdW50ICogTUFYX0NBVENIVVBfUEVSSU9EUyBhcyBpMTI4OwogICAgICAgIGxldCB3ID0gc2V0dXBfd29ybGQobWludF9hbW91bnQpOwogICAgICAgIGxldCBpZCA9IHcuc3Vic2NyaWJlKGFtb3VudCwgcGVyaW9kKTsKICAgICAgICBsZXQgZWxhcHNlZF93aG9sZV9wZXJpb2RzID0gKGVsYXBzZWRfc2Vjb25kcyAvIHBlcmlvZCkgYXMgdTMyOwogICAgICAgIHcuZW52LmxlZGdlcigpLnNldF90aW1lc3RhbXAoU1RBUlQgKyBlbGFwc2VkX3NlY29uZHMpOwogICAgICAgIGxldCB0b2tlbl9jbGllbnQgPSBTdGVsbGFyQXNzZXRDbGllbnQ6Om5ldygmdy5lbnYsICZ3LnRva2VuKTsKICAgICAgICBsZXQgZXhwZWN0ZWRfcGVyaW9kcyA9IGNvcmU6OmNtcDo6bWluKGVsYXBzZWRfd2hvbGVfcGVyaW9kcywgbWF4X3BlcmlvZHMpOwogICAgICAgIGxldCBiZWZvcmUgPSB3LmNsaWVudCgpLmdldF9zdWJzY3JpcHRpb24oJmlkKTsKCiAgICAgICAgaWYgbWF4X3BlcmlvZHMgPiBNQVhfQ0FUQ0hVUF9QRVJJT0RTIHsKICAgICAgICAgICAgbGV0IHJlc3VsdCA9IHcuY2xpZW50KCkudHJ5X2NoYXJnZV9jYXRjaHVwKCZpZCwgJm1heF9wZXJpb2RzKTsKICAgICAgICAgICAgbGV0IGVyciA9IHJlc3VsdC51bndyYXBfZXJyKCkudW53cmFwKCk7CiAgICAgICAgICAgIHByb3BfYXNzZXJ0X2VxKGVyciwgRm9yZ2VFcnJvcjo6SW52YWxpZElucHV0KTsKICAgICAgICAgICAgcHJvcF9hc3NlcnRfZXEody5jbGllbnQoKS5nZXRfc3Vic2NyaXB0aW9uKCZpZCksIGJlZm9yZSk7CiAgICAgICAgICAgIHByb3BfYXNzZXJ0X2VxKHRva2VuX2NsaWVudC5iYWxhbmNlKCZ3LnN1YnNjcmliZXIpLCBtaW50X2Ftb3VudCk7CiAgICAgICAgICAgIHByb3BfYXNzZXJ0X2VxKHRva2VuX2NsaWVudC5iYWxhbmNlKCZ3LnByb3ZpZGVyKSwgMCk7CiAgICAgICAgfSBlbHNlIHsKICAgICAgICAgICAgbGV0IGJpbGxlZCA9IHcuY2xpZW50KCkuY2hhcmdlX2NhdGNodXAoJmlkLCAmbWF4X3BlcmlvZHMpOwogICAgICAgICAgICBwcm9wX2Fzc2VydCEoZXhwZWN0ZWRfcGVyaW9kcyA8PSBlbGFwc2VkX3dob2xlX3BlcmlvZHMpOwogICAgICAgICAgICBwcm9wX2Fzc2VydCEoZXhwZWN0ZWRfcGVyaW9kcyA8PSBtYXhfcGVyaW9kcyk7CiAgICAgICAgICAgIHByb3BfYXNzZXJ0IShleHBlY3RlZF9wZXJpb2RzIDw9IE1BWF9DQVRDSFVQX1BFUklPRFMpOwogICAgICAgICAgICBwcm9wX2Fzc2VydF9lcShiaWxsZWQsIGFtb3VudCAqIGV4cGVjdGVkX3BlcmlvZHMgYXMgaTEyOCk7CgogICAgICAgICAgICBsZXQgYWZ0ZXIgPSB3LmNsaWVudCgpLmdldF9zdWJzY3JpcHRpb24oJmlkKTsKICAgICAgICAgICAgcHJvcF9hc3NlcnRfZXEoCiAgICAgICAgICAgICAgICBhZnRlci5sYXN0X2NoYXJnZWQsCiAgICAgICAgICAgICAgICBTVEFSVCArIHBlcmlvZCAqIGV4cGVjdGVkX3BlcmlvZHMgYXMgdTY0CiAgICAgICAgICAgICk7CiAgICAgICAgICAgIHByb3BfYXNzZXJ0X2VxKHRva2VuX2NsaWVudC5iYWxhbmNlKCZ3LnN1YnNjcmliZXIpLCBtaW50X2Ftb3VudCAtIGJpbGxlZCk7CiAgICAgICAgICAgIHByb3BfYXNzZXJ0X2VxKHRva2VuX2NsaWVudC5iYWxhbmNlKCZ3LnByb3ZpZGVyKSwgYmlsbGVkKTsKICAgICAgICB9CiAgICB9CgogICAgI1t0ZXN0XQogICAgZm4gcHJvcF9wYXVzZV9yZXN1bWVfY29uc2VydmVzX2R1ZV9kYXRlX2FuZF9uZXZlcl9jaGFyZ2VzX3doaWxlX3BhdXNlZCgKICAgICAgICBhbW91bnQgaW4gMWkxMjguLj0xMDBfMDAwX2kxMjgsCiAgICAgICAgcGVyaW9kIGluIDEwXzAwMHU2NC4uPU1BWF9QRVJJT0QsCiAgICAgICAgcGF1c2VfZHVyYXRpb24gaW4gMXU2NC4uPU1BWF9QRVJJT0QsCiAgICAgICAgYmV0d2Vlbl9jeWNsZXMgaW4gMH3NjQuLj0xMDBfdTY0LAogICAgICAgIGN5Y2xlcyBpbiAxdTMyLi49MTBfdTMyLAogICAgKSB7CiAgICAgICAgbGV0IG1pbnRfYW1vdW50ID0gYW1vdW50ICogKGN5Y2xlcyBhcyBpMTI4ICsgMSk7CiAgICAgICAgbGV0IHcgPSBzZXR1cF93b3JsZChtaW50X2Ftb3VudCk7CiAgICAgICAgbGV0IGlkID0gdy5zdWJzY3JpYmUoYW1vdW50LCBwZXJpb2QpOwogICAgICAgIGxldCB0b2tlbl9jbGllbnQgPSBTdGVsbGFyQXNzZXRDbGllbnQ6Om5ldygmdy5lbnYsICZ3LnRva2VuKTsKICAgICAgICBsZXQgbXV0IG5vdyA9IFNUQVJUOwogICAgICAgIGxldCBtdXQgZXhwZWN0ZWRfbGFzdF9jaGFyZ2VkID0gU1RBUlQ7CgogICAgICAgIGZvciBfIGluIDAuLmN5Y2xlcyB7CiAgICAgICAgICAgIHcuZW52LmxlZGdlcigpLnNldF90aW1lc3RhbXAobm93KTsKICAgICAgICAgICAgdy5jbGllbnQoKS5wYXVzZSgmaWQpOwogICAgICAgICAgICBsZXQgYmFsYW5jZV9iZWZvcmUgPSB0b2tlbl9jbGllbnQuYmFsYW5jZSgmdy5zdWJzY3JpYmVyKTsKCiAgICAgICAgICAgIG5vdyArPSBwYXVzZV9kdXJhdGlvbjsKICAgICAgICAgICAgdy5lbnYubGVkZ2VyKCkuc2V0X3RpbWVzdGFtcChub3cpOwogICAgICAgICAgICBsZXQgcmVzdWx0ID0gdy5jbGllbnQoKS50cnlfY2hhcmdlKCZpZCk7CiAgICAgICAgICAgIHByb3BfYXNzZXJ0IShyZXN1bHQuaXNfZXJyKCksICJjaGFyZ2UgbXVzdCBmYWlsIHdoaWxlIHBhdXNlZCIpOwogICAgICAgICAgICBwcm9wX2Fzc2VydF9lcShyZXN1bHQudW53cmFwX2Vy cigpLnVud3JhcCgpLCBGb3JnZUVycm9yOjpJbnZhbGlkSW5wdXQpOwogICAgICAgICAgICBsZXQgcGF1c2VkID0gdy5jbGllbnQoKS5nZXRfc3Vic2NyaXB0aW9uKCZpZCk7CiAgICAgICAgICAgIHByb3BfYXNzZXJ0X2VxKHBhdXNlZC5zdGF0dXMsIFN1YnNjcmlwdGlvblN0YXR1czo6UGF1c2VkKTsKICAgICAgICAgICAgcHJvcF9hc3NlcnRfZXEocGF1c2VkLmxhc3RfY2hhcmdlZCwgZXhwZWN0ZWRfbGFzdF9jaGFyZ2VkKTsKICAgICAgICAgICAgcHJvcF9hc3NlcnRfZXEodG9rZW5fY2xpZW50LmJhbGFuY2UoJncu c3Vic2NyaWJlciksIGJhbGFuY2VfYmVmb3JlKTsKCiAgICAgICAgICAgIHcuY2xpZW50KCkucmVzdW1lKCZpZCk7CiAgICAgICAgICAgIGV4cGVjdGVkX2xhc3RfY2hhcmdlZCArPSBwYXVzZV9kdXJhdGlvbjsKICAgICAgICAgICAgbGV0IHJlc3VtZWQgPSB3LmNsaWVudCgpLmdldF9zdWJzY3JpcHRpb24oJmlkKTsKICAgICAgICAgICAgcHJvcF9hc3NlcnRfZXEocmVzdW1lZC5zdGF0dXMsIFN1YnNjcmlwdGlvblN0YXR1czo6QWN0aXZlKTsKICAgICAgICAgICAgcHJvcF9hc3NlcnRfZXEocmVzdW1lZC5sYXN0X2NoYXJnZWQsIGV4cGVjdGVkX2xhc3RfY2hhcmdlZCk7CiAgICAgICAgICAgIG5vdyArPSBiZXR3ZWVuX2N5Y2xlczsKICAgICAgICB9CgogICAgICAgIGxldCBuZXh0X2R1ZSA9IGV4cGVjdGVkX2xhc3RfY2hhcmdlZCArIHBlcmlvZDsKICAgICAgICBwcm9wX2Fzc2VydCEobm93IDwgbmV4dF9kdWUpOwogICAgICAgIHcuZW52LmxlZGdlcigpLnNldF90aW1lc3RhbXAobm93KTsKICAgICAgICBwcm9wX2Fzc2VydF9lcSh3LmNsaWVudCgpLmNoYXJnZSgmaWQpLCAwKTsKICAgICAgICBwcm9wX2Fzc2VydF9lcSh3LmNsaWVudCgpLmdldF9zdWJzY3JpcHRpb24oJmlkKS5sYXN0X2NoYXJnZWQsIGV4cGVjdGVkX2xhc3RfY2hhcmdlZCk7CgogICAgICAgIHcuZW52LmxlZGdlcigpLnNldF90aW1lc3RhbXAobmV4dF9kdWUpOwogICAgICAgIHByb3BfYXNzZXJ0X2VxKHcuY2xpZW50KCkuY2hhcmdlKCZpZCksIGFtb3VudCk7CiAgICAgICAgcHJvcF9hc3NlcnRfZXEody5jbGllbnQoKS5nZXRfc3Vic2NyaXB0aW9uKCZpZCkubGFzdF9jaGFyZ2VkLCBuZXh0X2R1ZSk7CiAgICB9CgogICAgI1t0ZXN0XQogICAgZm4gcHJvcF9wcmVwYWlkX2NvbnNlcnZhdGlvbl9vdmVyX3JhbmRvbV9saWZlY3ljbGVfaW50ZXJsZWF2aW5ncygKICAgICAgICBhY3Rpb25zIGluIHByb3A6OmNvbGxlY3Rpb246OnZlYygoMH3NjQu42LCAxaTEyOC4uPTYwMCksIDEuLjYwKSwKICAgICkgewogICAgICAgIGxldCB3ID0gc2V0dXBfd29ybGQoMV8wMDBfMDAwKTsKICAgICAgICBsZXQgaWQgPSB3LnN1YnNjcmliZSgxMDAsIDEwKTsKICAgICAgICBsZXQgY2xpZW50ID0gdy5jbGllbnQoKTsKICAgICAgICBsZXQgdG9rZW4gPSBzb3JvYmFuX3Nkazp0b2tlbjo6Q2xpZW50OjpuZXcoJncuZW52LCAmdy50b2tlbik7CiAgICAgICAgbGV0IG11dCBkZXBvc2l0cyA9IDFfMDAwX2kxMjg7CiAgICAgICAgbGV0IG11dCBkZWJpdHMgPSAwX2kxMjg7CiAgICAgICAgbGV0IG11dCByZWZ1bmRzID0gMF9pMTI4OwogICAgICAgIGxldCBtdXQgYmFsYW5jZSA9IDFfMDAwX2kxMjg7CiAgICAgICAgbGV0IG11dCBzdGF0dXMgPSBTdWJzY3JpcHRpb25TdGF0dXM6OkFjdGl2ZTsKICAgICAgICBsZXQgbXV0IGxhc3RfY2hhcmdlZCA9IFNUQVJUOwogICAgICAgIGxldCBtdXQgcGF1c2VfYXQgPSBOb25lOwogICAgICAgIGxldCBtdXQgZmFpbGVkX2F0dGVtcHRzID0gMF91MzI7CiAgICAgICAgbGV0IG11dCBub3cgPSBTVEFSVDsKCiAgICAgICAgLy8gVGhlIGZpcnN0IHN1Y2Nlc3NmdWwgZGVwb3NpdCBvcHRzIGluOyBldmVyeSBnZW5lcmF0ZWQgYWN0aW9uIGJlbG93CiAgICAgICAgLy8gaXMgY2hlY2tlZCBhZ2FpbnN0IHRoaXMgaW5kZXBlbmRlbnQgbGVkZ2VyIG9mIGV4cGVjdGVkIGJhbGFuY2VzLgogICAgICAgIGZvciAoa2luZCwgcmF3KSBpbiBhY3Rpb25zIHsKICAgICAgICAgICAgbGV0IGFtb3VudCA9IHJhdyAlIDUwMCArIDE7CiAgICAgICAgICAgIG1hdGNoIGtpbmQgewogICAgICAgICAgICAgICAgMCA9PiB7CiAgICAgICAgICAgICAgICAgICAgLy8gQWR2YW5jZSB0aW1lIGJ5IGEgYm91bmRlZCBhbW91bnQuCiAgICAgICAgICAgICAgICAgICAgbm93ICs9IChyYXcgYXMgdTY0KSAlIDI1OwogICAgICAgICAgICAgICAgICAgIHcuZW52LmxlZGdlcigpLnNldF90aW1lc3RhbXAobm93KTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIDEgPT4gewogICAgICAgICAgICAgICAgICAgIC8vIEF0dGVtcHQgYSBjaGFyZ2UuCiAgICAgICAgICAgICAgICAgICAgaWYgc3RhdHVzID09IFN1YnNjcmlwdGlvblN0YXR1czo6QWN0aXZlIHsKICAgICAgICAgICAgICAgICAgICAgICAgbGV0IGR1ZSA9IG5vdyA+PSBsYXN0X2NoYXJnZWQgKyAxMDsKICAgICAgICAgICAgICAgICAgICAgICAgbGV0IHJlc3VsdCA9IGNsaWVudC50cnlfY2hhcmdlKCZpZCk7CiAgICAgICAgICAgICAgICAgICAgICAgIGlmIGR1ZSAmJiBiYWxhbmNlID49IDEwMCB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBsZXQgYmlsbGVkID0gcmVzdWx0LnVud3JhcCgpLnVud3JhcCgpOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgcHJvcF9hc3NlcnRfZXEoYmlsbGVkLCAxMDApOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgYmFsYW5jZSAtPSAxMDA7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBkZWJpdHMgKz0gMTAwOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgbGFzdF9jaGFyZ2VkICs9IDEwOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgZmFpbGVkX2F0dGVtcHRzID0gMDsKICAgICAgICAgICAgICAgICAgICAgICAgfSBlbHNlIGlmIGR1ZSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAvLyBJbnN1ZmZpY2llbnQgYmFsYW5jZTogY2hhcmdlIG11c3QgZmFpbCB3aXRob3V0IG1vdmluZyBmdW5kcy4KICAgICAgICAgICAgICAgICAgICAgICAgICAgIHByb3BfYXNzZXJ0IShyZXN1bHQuaXNfZXJyKCkpOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgZmFpbGVkX2F0dGVtcHRzICs9IDE7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBpZiBmYWlsZWRfYXR0ZW1wdHMgPj0gTUFYX1JFVFJJRVMgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHN0YXR1cyA9IFN1YnNjcmlwdGlvblN0YXR1czo6Q2FuY2VsbGVkOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgfSBlbHNlIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBzdGF0dXMgPSBTdWJzY3JpcHRpb25TdGF0dXM6OlBhc3REdWU7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBwcm9wX2Fzc2VydF9lcShyZXN1bHQudW53cmFwKCkudW53cmFwKCksIDApOwogICAgICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgMiA9PiB7CiAgICAgICAgICAgICAgICAgICAgLy8gQ2FuY2VsLgogICAgICAgICAgICAgICAgICAgIGlmIHN0YXR1cyA9PSBTdWJzY3JpcHRpb25TdGF0dXM6OkFjdGl2ZSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGNsaWVudC5jYW5jZWwoJmlkKTsKICAgICAgICAgICAgICAgICAgICAgICAgc3RhdHVzID0gU3Vic2NyaXB0aW9uU3RhdHVzOjpDYW5jZWxsZWQ7CiAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgMyA9PiB7CiAgICAgICAgICAgICAgICAgICAgLy8gUGF1c2UuCiAgICAgICAgICAgICAgICAgICAgaWYgc3RhdHVzID09IFN1YnNjcmlwdGlvblN0YXR1czo6QWN0aXZlIHsKICAgICAgICAgICAgICAgICAgICAgICAgY2xpZW50LnBhdXNlKCZpZCk7CiAgICAgICAgICAgICAgICAgICAgICAgIHN0YXR1cyA9IFN1YnNjcmlwdGlvblN0YXR1czo6UGF1c2VkOwogICAgICAgICAgICAgICAgICAgICAgICBwYXVzZV9hdCA9IFNvbWUobm93KTsKICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICA0ID0+IHsKICAgICAgICAgICAgICAgICAgICAvLyBSZXN1bWUuCiAgICAgICAgICAgICAgICAgICAgaWYgc3RhdHVzID09IFN1YnNjcmlwdGlvblN0YXR1czo6UGF1c2VkIHsKICAgICAgICAgICAgICAgICAgICAgICAgY2xpZW50LnJlc3VtZSgmaWQpOwogICAgICAgICAgICAgICAgICAgICAgICBzdGF0dXMgPSBTdWJzY3JpcHRpb25TdGF0dXM6OkFjdGl2ZTsKICAgICAgICAgICAgICAgICAgICAgICAgaWYgbGV0IFNvbWUocCkgPSBwYXVzZV9hdC50YWtlKCkgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgbGFzdF9jaGFyZ2VkICs9IG5vdyAtIHA7CiAgICAgICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBfID0+IHsKICAgICAgICAgICAgICAgICAgICAvLyBUb3AgdXAgdGhlIHN1YnNjcmliZXIgYmFsYW5jZS4KICAgICAgICAgICAgICAgICAgICBTdGVsbGFyQXNzZXRDbGllbnQ6Om5ldygmdy5lbnYsICZ3LnRva2VuKS5taW50KCZ3LnN1YnNjcmliZXIsICZhbW91bnQpOwogICAgICAgICAgICAgICAgICAgIGRlcG9zaXRzICs9IGFtb3VudDsKICAgICAgICAgICAgICAgICAgICBiYWxhbmNlICs9IGFtb3VudDsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgfQoKICAgICAgICAgICAgLy8gQ29uc2VydmF0aW9uOiB0aGUgc3Vic2NyaWJlcidzIHRva2VuIGJhbGFuY2UgYWx3YXlzIGVxdWFscyB0aGUKICAgICAgICAgICAgLy8gaW5kZXBlbmRlbnRseSB0cmFja2VkIGRlcG9zaXRzIG1pbnVzIGRlYml0cyBtaW51cyByZWZ1bmRzLgogICAgICAgICAgICBwcm9wX2Fzc2VydF9lcSh0b2tlbi5iYWxhbmNlKCZ3LnN1YnNjcmliZXIpLCBiYWxhbmNlKTsKICAgICAgICAgICAgcHJvcF9hc3NlcnRfZXEoZGVwb3NpdHMgLSBkZWJpdHMgLSByZWZ1bmRzLCBiYWxhbmNlKTsKICAgICAgICAgICAgcHJvcF9hc3NlcnRfZXEodG9rZW4uYmFsYW5jZSgmdzLcHJvdmlkZXIpLCBkZWJpdHMpOwogICAgICAgIH0KICAgIH0KfQo=
+//! Randomized invariant suite (proptest) for subscription payments.
+//!
+//! Exercised properties:
+//! 1. Monotonicity: `last_charged` is monotonic and advances by exactly one period
+//!    per successful charge.
+//! 2. No early bill: `charge` returns `0` and changes nothing before a full period
+//!    has elapsed.
+//! 3. Terminal safety: a `Cancelled` subscription never bills.
+
+use crate::{
+    SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus,
+    MAX_CATCHUP_PERIODS, MAX_RETRIES,
+};
+use proptest::prelude::*;
+use soroban_forge_shared_utils::ForgeError;
+use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::token::StellarAssetClient;
+use soroban_sdk::{Address, Env};
+
+const START: u64 = 1_000_000;
+const MAX_AMOUNT: i128 = 1_000_000_000_000;
+const MAX_PERIOD: u64 = 10 * 365 * 24 * 3600;
+
+struct World {
+    env: Env,
+    token: Address,
+    contract_id: Address,
+    subscriber: Address,
+    provider: Address,
+}
+
+fn setup_world(mint_amount: i128) -> World {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    env.ledger().set_timestamp(START);
+
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin);
+    let token = sac.address();
+
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token).mint(&subscriber, &mint_amount);
+
+    let contract_id = env.register(SubscriptionPayments, ());
+
+    World {
+        env,
+        token,
+        contract_id,
+        subscriber,
+        provider,
+    }
+}
+
+impl World {
+    fn client(&self) -> SorobanForgeSubscriptionPaymentsClient<'_> {
+        SorobanForgeSubscriptionPaymentsClient::new(&self.env, &self.contract_id)
+    }
+
+    fn subscribe(&self, amount: i128, period: u64) -> u64 {
+        self.client().subscribe(
+            &self.subscriber,
+            &self.provider,
+            &self.token,
+            &amount,
+            &period,
+        )
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn prop_last_charged_is_monotonic_and_advances_by_one_period(
+        amount in 1i128..=100_000_i128,
+        period in 1u64..=MAX_PERIOD,
+        charges_count in 1u32..=10_u32,
+    ) {
+        let mint_total = amount.saturating_mul(charges_count as i128);
+        let w = setup_world(mint_total);
+        let id = w.subscribe(amount, period);
+
+        let mut prev_last_charged = START;
+
+        for i in 1..=charges_count {
+            let target_time = START + period * (i as u64);
+            w.env.ledger().set_timestamp(target_time);
+
+            let billed = w.client().charge(&id);
+            prop_assert_eq!(billed, amount);
+
+            let sub = w.client().get_subscription(&id);
+            prop_assert!(sub.last_charged > prev_last_charged, "last_charged must be strictly monotonic");
+            prop_assert_eq!(sub.last_charged, START + period * (i as u64), "last_charged must advance by one period per charge");
+            prev_last_charged = sub.last_charged;
+        }
+    }
+
+    #[test]
+    fn prop_charge_returns_zero_before_period_elapses(
+        amount in 1i128..=MAX_AMOUNT,
+        period in 2u64..=MAX_PERIOD,
+        elapsed_delta in 1u64..=MAX_PERIOD,
+    ) {
+        let delta = elapsed_delta % period;
+        if delta == 0 {
+            return Ok(());
+        }
+
+        let w = setup_world(amount * 10);
+        let id = w.subscribe(amount, period);
+
+        w.env.ledger().set_timestamp(START + delta);
+
+        let billed = w.client().charge(&id);
+        prop_assert_eq!(billed, 0, "charge must return 0 before period elapses");
+
+        let sub = w.client().get_subscription(&id);
+        prop_assert_eq!(sub.last_charged, START, "last_charged must remain unchanged when charging early");
+    }
+
+    #[test]
+    fn prop_cancelled_subscription_never_bills(
+        amount in 1i128..=MAX_AMOUNT,
+        period in 1u64..=MAX_PERIOD,
+        cancel_delay in 0u64..=MAX_PERIOD,
+        charge_delay in 1u64..=MAX_PERIOD,
+    ) {
+        let w = setup_world(amount * 10);
+        let id = w.subscribe(amount, period);
+
+        w.env.ledger().set_timestamp(START + cancel_delay);
+        w.client().cancel(&id);
+
+        let sub_after_cancel = w.client().get_subscription(&id);
+        prop_assert_eq!(sub_after_cancel.status, SubscriptionStatus::Cancelled);
+
+        w.env.ledger().set_timestamp(START + cancel_delay + charge_delay);
+        let res = w.client().try_charge(&id);
+        prop_assert!(res.is_err(), "charge on a cancelled subscription must return an error");
+        let err = res.unwrap_err().unwrap();
+        prop_assert_eq!(err, ForgeError::InvalidInput, "cancelled subscription must fail with InvalidInput");
+
+        let sub_after_failed_charge = w.client().get_subscription(&id);
+        prop_assert_eq!(sub_after_failed_charge.status, SubscriptionStatus::Cancelled);
+    }
+
+    #[test]
+    fn prop_failed_charges_advance_retry_state_without_moving_balances(
+        amount in 1i128..=100_000_i128,
+        balance_percent in 0u32..100_u32,
+        period in 1u64..=MAX_PERIOD,
+        failure_count in 1u32..=MAX_RETRIES,
+    ) {
+        let initial_balance = amount * balance_percent as i128 / 100;
+        let w = setup_world(initial_balance);
+        let id = w.subscribe(amount, period);
+        let token_client = StellarAssetClient::new(&w.env, &w.token);
+        let provider_balance = token_client.balance(&w.provider);
+        w.env.ledger().set_timestamp(START + period);
+
+        let mut previous_failed_attempts = 0;
+        for failure in 1..=failure_count {
+            prop_assert_eq!(w.client().charge(&id), 0);
+
+            let sub = w.client().get_subscription(&id);
+            let status = sub.status.clone();
+            prop_assert!(sub.failed_attempts >= previous_failed_attempts);
+            prop_assert_eq!(sub.failed_attempts, failure);
+            prop_assert_eq!(
+                status.clone(),
+                if failure == MAX_RETRIES {
+                    SubscriptionStatus::Cancelled
+                } else {
+                    SubscriptionStatus::PastDue
+                }
+            );
+            prop_assert_eq!(sub.last_charged, START);
+            prop_assert_eq!(token_client.balance(&w.subscriber), initial_balance);
+            prop_assert_eq!(token_client.balance(&w.provider), provider_balance);
+            previous_failed_attempts = sub.failed_attempts;
+
+            if status == SubscriptionStatus::PastDue {
+                let before = sub;
+                let catchup = w.client().try_charge_catchup(&id, &1);
+                let err = catchup.unwrap_err().unwrap();
+                prop_assert_eq!(err, ForgeError::InvalidInput);
+                prop_assert_eq!(w.client().get_subscription(&id), before);
+            }
+        }
+    }
+
+    #[test]
+    fn prop_catchup_bills_only_due_periods_within_the_hard_cap(
+        amount in 1i128..=100_000_i128,
+        period in 1u64..=MAX_PERIOD,
+        elapsed_periods in 0u32..=(MAX_CATCHUP_PERIODS * 2),
+        elapsed_remainder in 0u64..=MAX_PERIOD,
+        max_periods in 0u32..=(MAX_CATCHUP_PERIODS * 2),
+    ) {
+        let elapsed_seconds = period * elapsed_periods as u64 + elapsed_remainder % period;
+        if elapsed_seconds == 0 {
+            return Ok(());
+        }
+
+        let mint_amount = amount * MAX_CATCHUP_PERIODS as i128;
+        let w = setup_world(mint_amount);
+        let id = w.subscribe(amount, period);
+        let elapsed_whole_periods = (elapsed_seconds / period) as u32;
+        w.env.ledger().set_timestamp(START + elapsed_seconds);
+        let token_client = StellarAssetClient::new(&w.env, &w.token);
+        let expected_periods = core::cmp::min(elapsed_whole_periods, max_periods);
+        let before = w.client().get_subscription(&id);
+
+        if max_periods > MAX_CATCHUP_PERIODS {
+            let result = w.client().try_charge_catchup(&id, &max_periods);
+            let err = result.unwrap_err().unwrap();
+            prop_assert_eq!(err, ForgeError::InvalidInput);
+            prop_assert_eq!(w.client().get_subscription(&id), before);
+            prop_assert_eq!(token_client.balance(&w.subscriber), mint_amount);
+            prop_assert_eq!(token_client.balance(&w.provider), 0);
+        } else {
+            let billed = w.client().charge_catchup(&id, &max_periods);
+            prop_assert!(expected_periods <= elapsed_whole_periods);
+            prop_assert!(expected_periods <= max_periods);
+            prop_assert!(expected_periods <= MAX_CATCHUP_PERIODS);
+            prop_assert_eq!(billed, amount * expected_periods as i128);
+
+            let after = w.client().get_subscription(&id);
+            prop_assert_eq!(
+                after.last_charged,
+                START + period * expected_periods as u64
+            );
+            prop_assert_eq!(token_client.balance(&w.subscriber), mint_amount - billed);
+            prop_assert_eq!(token_client.balance(&w.provider), billed);
+        }
+    }
+
+    #[test]
+    fn prop_pause_resume_conserves_due_date_and_never_charges_while_paused(
+        amount in 1i128..=100_000_i128,
+        period in 10_000u64..=MAX_PERIOD,
+        pause_duration in 1u64..=MAX_PERIOD,
+        between_cycles in 0u64..=100_u64,
+        cycles in 1u32..=10_u32,
+    ) {
+        let mint_amount = amount * (cycles as i128 + 1);
+        let w = setup_world(mint_amount);
+        let id = w.subscribe(amount, period);
+        let token_client = StellarAssetClient::new(&w.env, &w.token);
+        let mut now = START;
+        let mut expected_last_charged = START;
+
+        for _ in 0..cycles {
+            w.env.ledger().set_timestamp(now);
+            w.client().pause(&id);
+            let balance_before = token_client.balance(&w.subscriber);
+
+            now += pause_duration;
+            w.env.ledger().set_timestamp(now);
+            let result = w.client().try_charge(&id);
+            prop_assert!(result.is_err(), "charge must fail while paused");
+            prop_assert_eq!(result.unwrap_err().unwrap(), ForgeError::InvalidInput);
+            let paused = w.client().get_subscription(&id);
+            prop_assert_eq!(paused.status, SubscriptionStatus::Paused);
+            prop_assert_eq!(paused.last_charged, expected_last_charged);
+            prop_assert_eq!(token_client.balance(&w.subscriber), balance_before);
+
+            w.client().resume(&id);
+            expected_last_charged += pause_duration;
+            let resumed = w.client().get_subscription(&id);
+            prop_assert_eq!(resumed.status, SubscriptionStatus::Active);
+            prop_assert_eq!(resumed.last_charged, expected_last_charged);
+            now += between_cycles;
+        }
+
+        let next_due = expected_last_charged + period;
+        prop_assert!(now < next_due);
+        w.env.ledger().set_timestamp(now);
+        prop_assert_eq!(w.client().charge(&id), 0);
+        prop_assert_eq!(w.client().get_subscription(&id).last_charged, expected_last_charged);
+
+        w.env.ledger().set_timestamp(next_due);
+        prop_assert_eq!(w.client().charge(&id), amount);
+        prop_assert_eq!(w.client().get_subscription(&id).last_charged, next_due);
+    }
+
+    #[test]
+    fn prop_prepaid_conservation_over_random_lifecycle_interleavings(
+        actions in prop::collection::vec((0u8..6, 1i128..=600), 1..60),
+    ) {
+        let w = setup_world(1_000_000);
+        let id = w.subscribe(100, 10);
+        let client = w.client();
+        let token = soroban_sdk::token::Client::new(&w.env, &w.token);
+        let mut deposits = 1_000_i128;
+        let mut debits = 0_i128;
+        let mut refunds = 0_i128;
+        let mut balance = 1_000_i128;
+        let mut status = SubscriptionStatus::Active;
+        let mut last_charged = START;
+        let mut pause_at = None;
+        let mut failed_attempts = 0_u32;
+        let mut now = START;
+
+        // The first successful deposit opts in; every generated action below
+        // is checked against this independent arithmetic/state mirror.
+        client.deposit(&id, &balance);
+        for (action, amount) in actions {
+            now += 10;
+            w.env.ledger().set_timestamp(now);
+            if status != SubscriptionStatus::Cancelled {
+                match action {
+                    0 => {
+                        client.deposit(&id, &amount);
+                        deposits += amount;
+                        balance += amount;
+                    }
+                    1 if status != SubscriptionStatus::Paused => {
+                        let actual = client.charge(&id);
+                        if balance >= 100 {
+                            prop_assert_eq!(actual, 100);
+                            balance -= 100;
+                            debits += 100;
+                            last_charged += 10;
+                            failed_attempts = 0;
+                            status = SubscriptionStatus::Active;
+                        } else {
+                            prop_assert_eq!(actual, 0);
+                            failed_attempts += 1;
+                            status = if failed_attempts >= MAX_RETRIES {
+                                SubscriptionStatus::Cancelled
+                            } else {
+                                SubscriptionStatus::PastDue
+                            };
+                            if status == SubscriptionStatus::Cancelled {
+                                refunds += balance;
+                                balance = 0;
+                            }
+                        }
+                    }
+                    2 if status == SubscriptionStatus::Active => {
+                        client.pause(&id);
+                        status = SubscriptionStatus::Paused;
+                        pause_at = Some(now);
+                    }
+                    3 if status == SubscriptionStatus::Paused => {
+                        client.resume(&id);
+                        last_charged += now - pause_at.unwrap_or(now);
+                        status = SubscriptionStatus::Active;
+                        pause_at = None;
+                    }
+                    4 if amount <= balance => {
+                        let before = balance;
+                        assert_eq!(client.withdraw_balance(&id, &amount), before - amount);
+                        balance -= amount;
+                        refunds += amount;
+                    }
+                    5 => {
+                        client.cancel(&id);
+                        refunds += balance;
+                        balance = 0;
+                        status = SubscriptionStatus::Cancelled;
+                    }
+                    _ => {}
+                }
+            }
+
+            let sub = client.get_subscription(&id);
+            prop_assert_eq!(sub.prepaid_balance, Some(balance));
+            prop_assert_eq!(sub.status, status.clone());
+            prop_assert_eq!(sub.last_charged, last_charged);
+            prop_assert_eq!(deposits - debits - refunds, balance);
+            prop_assert_eq!(token.balance(&w.contract_id), balance);
+            prop_assert_eq!(token.balance(&w.provider), debits);
+        }
+    }
+}

@@ -967,8 +967,7 @@ fn a_failed_settlement_publishes_no_metering_events() {
 
 #[test]
 fn charge_transfers_the_derived_amount_from_subscriber_to_provider() {
-    let (env, _token, _tc, client, accounts, subscription_id) =
-        setup_with_quotas!(calls_and_bytes);
+    let (env, _token, _tc, client, accounts, subscription_id) = setup_with_quotas!(calls_and_bytes);
     client.record_usage(&subscription_id, &Symbol::new(&env, CALLS), &11_001);
 
     let provider = client.get_subscription(&subscription_id).provider;
@@ -984,10 +983,7 @@ fn charge_transfers_the_derived_amount_from_subscriber_to_provider() {
         token_balance(&client, &accounts.user1),
         subscriber_before - charged
     );
-    assert_eq!(
-        token_balance(&client, &provider),
-        provider_before + charged
-    );
+    assert_eq!(token_balance(&client, &provider), provider_before + charged);
 }
 
 #[test]
@@ -1017,8 +1013,7 @@ fn failed_transfer_reverts_state_and_leaves_balances_untouched() {
 
 #[test]
 fn multiple_charges_across_periods_conserve_value() {
-    let (env, _token, _tc, client, accounts, subscription_id) =
-        setup_with_quotas!(calls_and_bytes);
+    let (env, _token, _tc, client, accounts, subscription_id) = setup_with_quotas!(calls_and_bytes);
     let calls = Symbol::new(&env, CALLS);
     let provider = client.get_subscription(&subscription_id).provider;
     let subscriber_before = token_balance(&client, &accounts.user1);

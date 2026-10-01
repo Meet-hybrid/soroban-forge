@@ -1904,7 +1904,6 @@ fn transfer_from_contract(
     }
 }
 
-
 /// Split a non-negative amount by basis points without overflowing an
 /// intermediate `amount * seller_bps` multiplication.
 fn split_amount(amount: i128, seller_bps: u32) -> Result<(i128, i128), ForgeError> {
@@ -1967,7 +1966,10 @@ fn bump_entry(env: &Env, key: &DataKey) {
     // workspace uses the exact same threshold/extend-to policy. The
     // helper is constructed per call because `Storage` is a cheap handle
     // and the threshold is a compile-time constant.
-    let helper = TTLHelper::new(env.storage(), soroban_forge_shared_utils::ttl::BUMP_THRESHOLD);
+    let helper = TTLHelper::new(
+        env.storage(),
+        soroban_forge_shared_utils::ttl::BUMP_THRESHOLD,
+    );
     // `bump` is infallible for a well-formed key; the escrow contract
     // never constructs a malformed `DataKey`, so the `Result` is
     // discarded here. Callers that need the error surface (e.g. the
