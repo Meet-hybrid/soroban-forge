@@ -3,23 +3,23 @@
 //! # Soroban Forge — DAO Governance contract
 //!
 //! A minimal on-chain governance primitive: members create proposals, cast one
-//! vote each (`for`/`against`, tallied as voter counts), and a
-//! proposal is finalised once voting ends — passing when its category's
-//! quorum and approval threshold are both met.
+//! vote each (`for`/`against`, tallied in governance-token units), and a
+//! proposal is finalised once voting ends — passing when it has a strict
+//! majority of `for` votes.
 //!
 //! Lifecycle:
 //!
 //! ```text
 //! propose (voting_ends = now + duration)
 //!   --> Active --vote × n--> voting ends
-//!   --> execute: quorum + category threshold ? Succeeded : Defeated
+//!   --> execute: for > against ? Succeeded : Defeated
 //!   --> execute (on Succeeded): target.execute(action) --> Executed (terminal)
 //!   --> cancel (proposer only): Cancelled (terminal)
 //! ```
 //!
 //! When voting ends, calling `execute` finalises the vote tally:
-//! - If quorum and the configured approval share are met, it becomes `Succeeded`.
-//! - Otherwise, it becomes `Defeated`.
+//! - If `for_votes > against_votes`, the proposal becomes `Succeeded`.
+//! - Otherwise, the proposal becomes `Defeated`.
 //!
 //! Once a proposal is `Succeeded`, calling `execute` performs a real
 //! cross-contract call (`target.execute(action)`) using `env.try_invoke_contract`.
@@ -30,6 +30,24 @@
 //!
 //! `Defeated`, `Executed`, `Cancelled`, and still-`Active` proposals cannot be
 //! executed; a second `execute` on an `Executed` proposal is rejected.
+//!
+//! ## Proposal dependencies
+//!
+//! `propose` may store `requires` edges (all must reach `Executed`) and one
+//! `conflicts_with` edge (execution blocks this proposal). The first execute
+//! after voting can still finalise a passed proposal to `Succeeded`; later
+//! dispatch is checked before any target invocation or bond movement. Missing
+//! requirements return `DeadlineReached`, executed conflicts return
+//! `InvalidInput`, and cancelled/defeated requirements return
+//! `ContractInvocationFailed`. A dependent stranded by cancellation remains
+//! `Succeeded` with its bond held; there is no automatic cancellation.
+//!
+//! Proposal-time cycle detection is iterative DFS over `requires` edges. It
+//! uses an explicit Soroban `Vec` stack and a visited set, with O(V + E)
+//! work over the reachable subgraph and no recursion depth growth. Dependency
+//! records are stored on each persistent proposal; no top-level storage key
+//! is added. A future `Queued` timelock composes after dependencies resolve,
+//! but neither queueing nor time-based gating is implemented here.
 //!
 //! ## Proposal bonds (token custody)
 //!
@@ -63,9 +81,10 @@
 //!   no admin key exists. Per-proposal self-serve bond amounts were rejected:
 //!   a proposer who picks their own amount defeats the anti-spam purpose.
 //!
-//! A contract missing either its bond or category rules rejects `propose`
-//! with [`ForgeError::NotInitialized`]. Bond-less proposals are never
-//! accepted, so an incomplete deployment is unusable rather than spam-prone.
+//! An unconfigured contract rejects `propose` with
+//! [`ForgeError::NotInitialized`] — bond-less proposals are never accepted,
+//! so a deployment that forgets to configure is unusable rather than
+//! spam-prone.
 //!
 //! ## Ordering discipline (load-bearing)
 //!
@@ -93,28 +112,37 @@
 //!   not-yet-executed proposal; the refund runs in that same call.
 //! - `get_proposal` and `get_bond_config` are read-only views.
 //!
-//! Category rules are configured once before the first proposal. The
-//! `Queued` state remains reserved for a separate timelock state machine;
-//! category execution delays are enforced through `execute_after`.
-//! Weighted voting by governance-token balance is intentionally out of
-//! scope for this iteration: the contract tracks proposals, votes, and timing,
-//! not balances. A bond is custody, not vote weight — it never enters the
-//! tally (weighted voting is tracked separately as issue #59).
+//! The `Queued` state is reserved for an optional timelock that lands in a
+//! follow-up; it is not reachable through the current public interface.
+//! `initialize` configures the SEP-41 governance token once. Each accepted
+//! vote is weighted by the voter's token balance at vote time; the balance is
+//! not snapshotted, so moving tokens between votes can change influence.
+//! Proposal bonds are separate custody and never enter the vote tally.
 
 #[cfg(test)]
 extern crate std;
-use soroban_forge_shared_utils::{
-    bump_entry as shared_bump_entry, ForgeError, BUMP_AMOUNT, BUMP_THRESHOLD,
-};
 
+use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Bytes,
-    Env, IntoVal, Symbol, Val,
+    Env, IntoVal, Map, Symbol, Val,
 };
 
 /// Public interface for the Soroban Forge DAO governance contract.
 #[contractclient(name = "SorobanForgeDaoGovernanceClient")]
 pub trait SorobanForgeDaoGovernance {
+    /// Configure the SEP-41 governance token for weighted voting.
+    ///
+    /// Permissionless and one-time; the first caller fixes the token.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::AlreadyInitialized`] — governance token is already set.
+    fn initialize(
+        env: Env,
+        governance_token: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
     /// Configure the proposal bond for the first and only time.
     ///
     /// Records the SEP-41 `token` every `propose` must post, the `amount` of
@@ -139,29 +167,6 @@ pub trait SorobanForgeDaoGovernance {
         treasury: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
-    /// Configure all four category rules exactly once, before proposals are
-    /// created. The deployment caller supplies the voting period, minimum
-    /// voter quorum, approval threshold in basis points, and execution delay
-    /// for each category.
-    ///
-    /// # Errors
-    ///
-    /// * [`ForgeError::AlreadyInitialized`] — rules have already been set.
-    /// * [`ForgeError::InvalidInput`] — rules are incomplete, duplicated, or
-    ///   contain invalid thresholds or periods.
-    fn configure_category_rules(
-        env: Env,
-        rules: soroban_sdk::Vec<CategoryRules>,
-    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
-
-    /// Read the immutable rules for a proposal category.
-    ///
-    /// * [`ForgeError::NotInitialized`] — category rules have not been set.
-    fn get_category_rules(
-        env: Env,
-        category: ProposalCategory,
-    ) -> Result<CategoryRules, soroban_forge_shared_utils::ForgeError>;
-
     /// Read the bond configuration (read-only view).
     ///
     /// # Errors
@@ -172,9 +177,7 @@ pub trait SorobanForgeDaoGovernance {
 
     /// Create a new proposal with a target contract and encoded action payload.
     ///
-    /// This compatibility entrypoint creates a Standard-category proposal;
-    /// `duration` must equal that category's configured voting period.
-    /// Use `propose_with_category` to select another category. Returns the
+    /// `duration` (seconds) defines how long voting stays open. Returns the
     /// stable proposal id.
     ///
     /// Posting the bond is part of creation: `amount` of the configured
@@ -183,38 +186,44 @@ pub trait SorobanForgeDaoGovernance {
     ///
     /// # Errors
     ///
-    /// * [`ForgeError::InvalidInput`] — `duration == 0` or it does not match
-    ///   the configured Standard voting period.
-    /// * [`ForgeError::NotInitialized`] — bond or category rules are missing.
+    /// * [`ForgeError::InvalidInput`] — `duration == 0`.
+    /// * [`ForgeError::NotInitialized`] — no bond configuration; free
+    ///   proposals are never accepted.
     /// * [`ForgeError::TokenTransferFailed`] — the bond pull failed
     ///   (insufficient proposer balance, deauthorized token, undeployed
     ///   token contract); no proposal, no counter increment.
     /// * [`ForgeError::ArithmeticOverflow`] — the id counter or the
     ///   running bond-custody total would overflow.
+    /// * [`ForgeError::NotFound`] — a dependency id does not exist.
+    /// * [`ForgeError::InvalidInput`] — a self edge, duplicate edge, consumed
+    ///   proposal reference, or dependency cycle is supplied.
     fn propose(
         env: Env,
         proposer: Address,
         target: Address,
         action: Bytes,
         duration: u64,
+        requires: soroban_sdk::Vec<u64>,
+        conflicts_with: Option<u64>,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
-    /// Create a proposal using the selected category's configured voting period.
+    /// Read the execution-order and conflict edges for a proposal.
+    fn get_dependencies(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<DependencyView, soroban_forge_shared_utils::ForgeError>;
+
+    /// Cast `voter`'s balance-weighted vote (for/against) on `proposal_id`.
+    /// The SEP-41 balance is read at vote time; zero balance is rejected.
+    /// One vote per voter regardless of balance.
     ///
     /// # Errors
     ///
-    /// * [`ForgeError::NotInitialized`] — bond or category rules are missing.
-    /// * [`ForgeError::TokenTransferFailed`] — the proposal bond could not be
-    ///   pulled from the proposer.
-    fn propose_with_category(
-        env: Env,
-        proposer: Address,
-        target: Address,
-        action: Bytes,
-        category: ProposalCategory,
-    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
-
-    /// Cast `voter`'s vote (for/against) on `proposal_id`. One vote per voter.
+    /// * [`ForgeError::NotInitialized`] — governance token has not been set.
+    /// * [`ForgeError::InvalidInput`] — proposal inactive, duplicate vote, or
+    ///   voter has zero governance-token balance.
+    /// * [`ForgeError::DeadlineReached`] — voting has closed.
+    /// * [`ForgeError::ArithmeticOverflow`] — adding the weight overflows.
     fn vote(
         env: Env,
         proposal_id: u64,
@@ -236,6 +245,11 @@ pub trait SorobanForgeDaoGovernance {
     ///   proposal is already terminal.
     /// * [`ForgeError::ContractInvocationFailed`] — the target reverted;
     ///   the proposal stays `Succeeded` and the bond stays in custody.
+    /// * [`ForgeError::DeadlineReached`] — a required proposal has not yet
+    ///   executed; the succeeded proposal and bond remain unchanged.
+    /// * [`ForgeError::InvalidInput`] — the conflicting proposal executed.
+    /// * [`ForgeError::ContractInvocationFailed`] — a required proposal was
+    ///   cancelled or defeated, permanently blocking this proposal.
     /// * [`ForgeError::TokenTransferFailed`] — the bond refund/forfeit
     ///   transfer failed; the proposal state is untouched (still retryable).
     fn execute(env: Env, proposal_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
@@ -286,6 +300,9 @@ pub trait SorobanForgeDaoGovernance {
     ///
     /// * [`ForgeError::NotFound`] — no proposal with this id.
     fn touch_ttl(env: Env, proposal_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read how many active proposals `proposer` currently has in flight (read-only view).
+    fn get_active_proposal_count(env: Env, proposer: Address) -> u32;
 }
 
 /// Lifecycle state of a governance proposal.
@@ -304,35 +321,6 @@ pub enum ProposalState {
     Queued,
     /// Withdrawn by the proposer before execution; terminal and immutable.
     Cancelled,
-}
-
-/// Governance rule set selected when a proposal is created.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProposalCategory {
-    /// Routine parameter and operational changes.
-    Standard,
-    /// Treasury movements and other financial decisions.
-    Financial,
-    /// Changes to governance itself.
-    Governance,
-    /// Time-sensitive emergency actions.
-    Emergency,
-}
-
-/// Immutable voting and execution parameters for one proposal category.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CategoryRules {
-    pub category: ProposalCategory,
-    /// Voting period in seconds.
-    pub voting_period: u64,
-    /// Minimum number of votes cast, for or against, required for quorum.
-    pub quorum_threshold: i128,
-    /// Minimum share of votes cast in favor, in basis points (0-10,000).
-    pub approval_threshold_bps: u32,
-    /// Seconds between the end of voting and permissionless execution.
-    pub execution_delay: u64,
 }
 
 /// Lifecycle state of the bond posted for a proposal.
@@ -379,16 +367,12 @@ pub struct Proposal {
     pub target: Address,
     /// Encoded action to execute on success.
     pub action: Bytes,
-    /// Category whose immutable rules govern this proposal.
-    pub category: ProposalCategory,
-    /// Number of voters supporting this proposal.
+    /// Tally of "for" votes (in governance-token units).
     pub for_votes: i128,
-    /// Number of voters opposing this proposal.
+    /// Tally of "against" votes (in governance-token units).
     pub against_votes: i128,
     /// Ledger timestamp at which voting closes.
     pub voting_ends: u64,
-    /// Earliest timestamp at which a successful proposal may execute.
-    pub execute_after: u64,
     /// Current state.
     pub state: ProposalState,
     /// SEP-41 token this proposal's bond was posted in (the configured
@@ -400,32 +384,30 @@ pub struct Proposal {
     /// Lifecycle of this proposal's bond. Moves in the same frame as the
     /// terminal proposal state, exactly once.
     pub bond_state: BondState,
+    /// Proposals that must execute before this one.
+    pub requires: soroban_sdk::Vec<u64>,
+    /// Proposal whose execution blocks this one.
+    pub conflicts_with: Option<u64>,
+}
+
+/// Dependency edges exposed to indexers independently of the full proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DependencyView {
+    /// Proposals that must execute first.
+    pub requires: soroban_sdk::Vec<u64>,
+    /// Proposal whose execution blocks this proposal.
+    pub conflicts_with: Option<u64>,
 }
 
 /// Bump a persistent entry's TTL to the workspace policy's 30-day horizon
 /// when it falls inside its one-day threshold — see
 /// `soroban_forge_shared_utils::ttl`.
 ///
-/// Thin wrapper over [`TTLHelper::bump`] — the canonical helper (issue
-/// #127); the policy lives there.
+/// Thin wrapper over [`soroban_forge_shared_utils::bump_entry`] — the
+/// canonical helper (issue #127); the policy lives there.
 fn bump_entry(env: &Env, key: &DataKey) {
-    TTLHelper::new(env.storage(), DEFAULT_TTL).bump(key);
-}
-
-/// Bump the contract instance's TTL to the workspace policy's 30-day horizon
-/// when it falls inside its one-day threshold.
-///
-/// The per-voter double-vote marks (`DataKey::Vote`) live in **instance**
-/// storage, whose lifetime is the contract instance's own TTL — there is no
-/// per-key TTL for instance entries. This is the instance-storage mirror of
-/// [`bump_entry`]: it applies the same threshold/extend policy
-/// (`BUMP_THRESHOLD`/`BUMP_AMOUNT`) to the instance entry so the marks
-/// enforcing one-vote-per-voter are guaranteed to outlive the proposal's
-/// managed persistent horizon (issue #170).
-fn bump_instance(env: &Env) {
-    env.storage()
-        .instance()
-        .extend_ttl(BUMP_THRESHOLD, BUMP_AMOUNT);
+    shared_bump_entry(env, key);
 }
 
 /// Instance and persistent storage keys.
@@ -434,10 +416,6 @@ enum DataKey {
     /// The proposal record for `u64` id (persistent storage).
     Proposal(u64),
     /// Marks that `voter` has already voted on `proposal_id`.
-    ///
-    /// Instance storage: the mark's lifetime is the contract instance's TTL,
-    /// which `vote` and `touch_ttl` extend to the same 30-day horizon as the
-    /// proposal record (issue #170).
     Vote(u64, Address),
     /// Monotonic proposal id counter.
     Count,
@@ -448,11 +426,14 @@ enum DataKey {
     /// or forfeit; must always equal this contract's balance of the
     /// configured token while proposals are live.
     BondHeld,
-    /// The immutable rules for a configured category.
-    CategoryRules(ProposalCategory),
-    /// Marks that all four category rules were configured.
-    CategoriesConfigured,
+    /// Immutable SEP-41 governance token used to weight votes (instance storage).
+    GovernanceToken,
+    /// Number of concurrent active proposals currently in flight for a proposer.
+    ActiveProposalCount(Address),
 }
+
+/// Maximum number of concurrent active proposals a single proposer may have by default.
+pub const DEFAULT_MAX_ACTIVE_PROPOSALS: u32 = 5;
 
 /// The deployable DAO governance contract.
 #[contract]
@@ -460,67 +441,14 @@ pub struct DaoGovernance;
 
 #[contractimpl]
 impl DaoGovernance {
-    /// Store all category rules as an immutable one-shot configuration.
-    pub fn configure_category_rules(
-        env: Env,
-        rules: soroban_sdk::Vec<CategoryRules>,
-    ) -> Result<(), ForgeError> {
-        if env.storage().instance().has(&DataKey::CategoriesConfigured) {
+    /// Configure the governance token exactly once.
+    pub fn initialize(env: Env, governance_token: Address) -> Result<(), ForgeError> {
+        let storage = env.storage().instance();
+        if storage.has(&DataKey::GovernanceToken) {
             return Err(ForgeError::AlreadyInitialized);
         }
-        if rules.len() != 4 {
-            return Err(ForgeError::InvalidInput);
-        }
-
-        let mut seen = soroban_sdk::Vec::<ProposalCategory>::new(&env);
-        for rule in rules.iter() {
-            if rule.voting_period == 0
-                || rule.quorum_threshold <= 0
-                || rule.approval_threshold_bps == 0
-                || rule.approval_threshold_bps > 10_000
-                || seen.contains(&rule.category)
-            {
-                return Err(ForgeError::InvalidInput);
-            }
-            seen.push_back(rule.category.clone());
-        }
-        for category in [
-            ProposalCategory::Standard,
-            ProposalCategory::Financial,
-            ProposalCategory::Governance,
-            ProposalCategory::Emergency,
-        ] {
-            if !seen.contains(&category) {
-                return Err(ForgeError::InvalidInput);
-            }
-        }
-        if env
-            .storage()
-            .instance()
-            .get::<_, u64>(&DataKey::Count)
-            .unwrap_or(0)
-            != 0
-        {
-            return Err(ForgeError::InvalidInput);
-        }
-
-        for rule in rules.iter() {
-            env.storage()
-                .instance()
-                .set(&DataKey::CategoryRules(rule.category.clone()), &rule);
-        }
-        env.storage()
-            .instance()
-            .set(&DataKey::CategoriesConfigured, &true);
+        storage.set(&DataKey::GovernanceToken, &governance_token);
         Ok(())
-    }
-
-    /// Read configured category rules.
-    pub fn get_category_rules(
-        env: Env,
-        category: ProposalCategory,
-    ) -> Result<CategoryRules, ForgeError> {
-        Self::category_rules_impl(&env, &category)
     }
 
     /// Configure the proposal bond for the first and only time.
@@ -579,46 +507,18 @@ impl DaoGovernance {
         target: Address,
         action: Bytes,
         duration: u64,
-    ) -> Result<u64, ForgeError> {
-        Self::propose_impl(
-            env,
-            proposer,
-            target,
-            action,
-            duration,
-            ProposalCategory::Standard,
-        )
-    }
-
-    /// Create a proposal using the selected category's configured voting period.
-    pub fn propose_with_category(
-        env: Env,
-        proposer: Address,
-        target: Address,
-        action: Bytes,
-        category: ProposalCategory,
-    ) -> Result<u64, ForgeError> {
-        let rules = Self::category_rules_impl(&env, &category)?;
-        Self::propose_impl(env, proposer, target, action, rules.voting_period, category)
-    }
-
-    fn propose_impl(
-        env: Env,
-        proposer: Address,
-        target: Address,
-        action: Bytes,
-        duration: u64,
-        category: ProposalCategory,
+        requires: soroban_sdk::Vec<u64>,
+        conflicts_with: Option<u64>,
     ) -> Result<u64, ForgeError> {
         if duration == 0 {
             return Err(ForgeError::InvalidInput);
         }
         proposer.require_auth();
-        let bond = Self::bond_config_impl(&env)?;
-        let rules = Self::category_rules_impl(&env, &category)?;
-        if duration != rules.voting_period {
-            return Err(ForgeError::InvalidInput);
+        let active_count = Self::active_proposal_count(&env, &proposer);
+        if active_count >= DEFAULT_MAX_ACTIVE_PROPOSALS {
+            return Err(ForgeError::ProposerCooldown);
         }
+        let bond = Self::bond_config_impl(&env)?;
 
         // Pure validation first: id, deadline, and custody arithmetic are
         // all checked before a single token moves or a single key is
@@ -626,13 +526,11 @@ impl DaoGovernance {
         // running custody total.
         let count: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
         let proposal_id = count.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;
+        Self::validate_dependencies(&env, proposal_id, &requires, conflicts_with)?;
         let voting_ends = env
             .ledger()
             .timestamp()
             .checked_add(duration)
-            .ok_or(ForgeError::ArithmeticOverflow)?;
-        let execute_after = voting_ends
-            .checked_add(rules.execution_delay)
             .ok_or(ForgeError::ArithmeticOverflow)?;
         let held = Self::bond_held(&env);
         let next_held = held
@@ -646,27 +544,84 @@ impl DaoGovernance {
 
         let proposal = Proposal {
             proposal_id,
-            proposer,
+            proposer: proposer.clone(),
             target,
             action,
-            category,
             for_votes: 0,
             against_votes: 0,
             voting_ends,
-            execute_after,
             state: ProposalState::Active,
             bond_token: bond.token.clone(),
             bond_amount: bond.amount,
             bond_state: BondState::Posted,
+            requires,
+            conflicts_with,
         };
         let key = DataKey::Proposal(proposal_id);
         env.storage().instance().set(&DataKey::Count, &proposal_id);
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
         env.storage().instance().set(&DataKey::BondHeld, &next_held);
+        Self::inc_active_proposals(&env, &proposer)?;
         events::proposed(&env, &proposal);
         events::bond_posted(&env, proposal_id, &bond.token, bond.amount);
         Ok(proposal_id)
+    }
+
+    fn validate_dependencies(
+        env: &Env,
+        proposal_id: u64,
+        requires: &soroban_sdk::Vec<u64>,
+        conflicts_with: Option<u64>,
+    ) -> Result<(), ForgeError> {
+        let mut seen = Map::<u64, bool>::new(env);
+        for id in requires.iter().chain(conflicts_with) {
+            if id == proposal_id || seen.contains_key(id) {
+                return Err(ForgeError::InvalidInput);
+            }
+            seen.set(id, true);
+            let dependency = Self::get_proposal_impl(env, id)?;
+            if matches!(
+                dependency.state,
+                ProposalState::Executed | ProposalState::Defeated | ProposalState::Cancelled
+            ) {
+                return Err(ForgeError::InvalidInput);
+            }
+        }
+        // Iterative DFS with an explicit stack avoids recursive Soroban stack growth.
+        let mut stack = requires.clone();
+        let mut visited = Map::<u64, bool>::new(env);
+        while let Some(id) = stack.pop_back() {
+            if id == proposal_id {
+                return Err(ForgeError::InvalidInput);
+            }
+            if visited.contains_key(id) {
+                continue;
+            }
+            visited.set(id, true);
+            for parent in Self::get_proposal_impl(env, id)?.requires.iter() {
+                stack.push_back(parent);
+            }
+        }
+        Ok(())
+    }
+
+    fn check_dependencies(env: &Env, proposal: &Proposal) -> Result<(), ForgeError> {
+        for id in proposal.requires.iter() {
+            match Self::get_proposal_impl(env, id)?.state {
+                ProposalState::Executed => {}
+                ProposalState::Cancelled | ProposalState::Defeated => {
+                    return Err(ForgeError::ContractInvocationFailed)
+                }
+                _ => return Err(ForgeError::DeadlineReached),
+            }
+        }
+        if let Some(id) = proposal.conflicts_with {
+            if Self::get_proposal_impl(env, id)?.state == ProposalState::Executed {
+                return Err(ForgeError::InvalidInput);
+            }
+        }
+        Ok(())
     }
 
     /// Cast a vote on an active proposal.
@@ -679,6 +634,11 @@ impl DaoGovernance {
         voter: Address,
         support: bool,
     ) -> Result<(), ForgeError> {
+        let governance_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernanceToken)
+            .ok_or(ForgeError::NotInitialized)?;
         let mut proposal = Self::get_proposal_impl(&env, proposal_id)?;
         if proposal.state != ProposalState::Active {
             return Err(ForgeError::InvalidInput);
@@ -693,28 +653,30 @@ impl DaoGovernance {
             return Err(ForgeError::InvalidInput);
         }
 
+        // soroban-sdk 27.0.6's generated SEP-41 token client exposes
+        // `balance(Address) -> i128` (the same interface used by escrow and
+        // the other token-integrated contracts).
+        let weight = token::TokenClient::new(&env, &governance_token).balance(&voter);
+        if weight == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+
         if support {
             proposal.for_votes = proposal
                 .for_votes
-                .checked_add(1)
+                .checked_add(weight)
                 .ok_or(ForgeError::ArithmeticOverflow)?;
         } else {
             proposal.against_votes = proposal
                 .against_votes
-                .checked_add(1)
+                .checked_add(weight)
                 .ok_or(ForgeError::ArithmeticOverflow)?;
         }
         let key = DataKey::Proposal(proposal_id);
         env.storage().instance().set(&vote_key, &true);
-        // The mark lives in instance storage, so its lifetime is the
-        // contract instance's TTL. Extend it to the same 30-day horizon the
-        // proposal record gets, so the mark outlives the proposal's managed
-        // horizon and `has_voted` cannot go stale while the proposal is
-        // still votable (issue #170).
-        bump_instance(&env);
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
-        events::vote_cast(&env, proposal_id, &voter, support);
+        events::vote_cast(&env, proposal_id, &voter, support, weight);
         Ok(())
     }
 
@@ -724,9 +686,10 @@ impl DaoGovernance {
     /// — on the paths that release a bond — permissionless in the token
     /// sense too: contract self-authorization covers the outgoing transfer.
     ///
-    /// - An `Active` proposal past deadline transitions to `Succeeded` when
-    ///   its quorum and approval threshold are met; otherwise it is `Defeated`
-    ///   and its bond is forfeited to the treasury before the state write.
+    /// - An `Active` proposal past deadline transitions to `Succeeded` on a
+    ///   strict majority of `for` votes (the bond stays in custody until a
+    ///   terminal transition), or to `Defeated` otherwise — forfeiting the
+    ///   bond to the treasury **before** the state write.
     /// - A `Succeeded` proposal performs a real cross-contract call to `target`
     ///   with `action` (`target.execute(action)`). On successful invocation,
     ///   it refunds the bond to the proposer, then transitions to the
@@ -748,17 +711,7 @@ impl DaoGovernance {
         match proposal.state {
             ProposalState::Active => {
                 let key = DataKey::Proposal(proposal_id);
-                let rules = Self::category_rules_impl(&env, &proposal.category)?;
-                let total_votes = proposal
-                    .for_votes
-                    .checked_add(proposal.against_votes)
-                    .ok_or(ForgeError::ArithmeticOverflow)?;
-                let approval_met = meets_approval_threshold(
-                    proposal.for_votes,
-                    total_votes,
-                    rules.approval_threshold_bps,
-                )?;
-                if total_votes >= rules.quorum_threshold && approval_met {
+                if proposal.for_votes > proposal.against_votes {
                     proposal.state = ProposalState::Succeeded;
                     env.storage().persistent().set(&key, &proposal);
                     bump_entry(&env, &key);
@@ -790,6 +743,7 @@ impl DaoGovernance {
                     env.storage().persistent().set(&key, &proposal);
                     bump_entry(&env, &key);
                     env.storage().instance().set(&DataKey::BondHeld, &next_held);
+                    Self::dec_active_proposals(&env, &proposal.proposer);
                     events::finalised(
                         &env,
                         proposal_id,
@@ -809,9 +763,10 @@ impl DaoGovernance {
                 }
             }
             ProposalState::Succeeded => {
-                if env.ledger().timestamp() < proposal.execute_after {
-                    return Err(ForgeError::InvalidInput);
-                }
+                // Finalisation is independent from dispatch ordering: a
+                // passed dependent may become Succeeded while it waits, but
+                // the target call and bond release stay gated here.
+                Self::check_dependencies(&env, &proposal)?;
                 let target = &proposal.target;
                 let payload_val: Val = proposal.action.clone().into_val(&env);
                 let args = soroban_sdk::vec![&env, payload_val];
@@ -846,6 +801,7 @@ impl DaoGovernance {
                 env.storage().persistent().set(&key, &proposal);
                 bump_entry(&env, &key);
                 env.storage().instance().set(&DataKey::BondHeld, &next_held);
+                Self::dec_active_proposals(&env, &proposal.proposer);
                 events::finalised(
                     &env,
                     proposal_id,
@@ -912,6 +868,7 @@ impl DaoGovernance {
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
         env.storage().instance().set(&DataKey::BondHeld, &next_held);
+        Self::dec_active_proposals(&env, &proposal.proposer);
         events::bond_released(
             &env,
             proposal_id,
@@ -926,6 +883,15 @@ impl DaoGovernance {
     /// Read a stored proposal by id (read-only view).
     pub fn get_proposal(env: Env, proposal_id: u64) -> Result<Proposal, ForgeError> {
         Self::get_proposal_impl(&env, proposal_id)
+    }
+
+    /// Return a proposal's dependency edges for indexers.
+    pub fn get_dependencies(env: Env, proposal_id: u64) -> Result<DependencyView, ForgeError> {
+        let proposal = Self::get_proposal_impl(&env, proposal_id)?;
+        Ok(DependencyView {
+            requires: proposal.requires,
+            conflicts_with: proposal.conflicts_with,
+        })
     }
 
     /// Return the total number of proposals created (read-only view).
@@ -990,16 +956,6 @@ impl DaoGovernance {
             .ok_or(ForgeError::NotInitialized)
     }
 
-    fn category_rules_impl(
-        env: &Env,
-        category: &ProposalCategory,
-    ) -> Result<CategoryRules, ForgeError> {
-        env.storage()
-            .instance()
-            .get(&DataKey::CategoryRules(category.clone()))
-            .ok_or(ForgeError::NotInitialized)
-    }
-
     /// The running total of bonds currently in custody. Absent only if the
     /// configuration itself is absent (then `bond_config_impl` fails first).
     fn bond_held(env: &Env) -> i128 {
@@ -1019,81 +975,51 @@ impl DaoGovernance {
     /// Permissionless keeper: bump the proposal entry's TTL without changing
     /// any state. The existence check is deliberate — touching a missing
     /// id must fail loudly with `ForgeError::NotFound`.
-    ///
-    /// The proposal's vote marks live in instance storage, so the keeper
-    /// extends the contract instance's TTL alongside the proposal record:
-    /// keeping a proposal alive keeps the marks enforcing one-vote-per-voter
-    /// alive with it (issue #170).
     pub fn touch_ttl(env: Env, proposal_id: u64) -> Result<(), ForgeError> {
         let key = DataKey::Proposal(proposal_id);
         if !env.storage().persistent().has(&key) {
             return Err(ForgeError::NotFound);
         }
         bump_entry(&env, &key);
-        bump_instance(&env);
-
         Ok(())
     }
-}
 
-fn meets_approval_threshold(
-    for_votes: i128,
-    total_votes: i128,
-    threshold_bps: u32,
-) -> Result<bool, ForgeError> {
-    if total_votes == 0 {
-        return Ok(false);
+    /// Read how many active proposals `proposer` currently has in flight (read-only view).
+    pub fn get_active_proposal_count(env: Env, proposer: Address) -> u32 {
+        Self::active_proposal_count(&env, &proposer)
     }
-    let threshold = i128::from(threshold_bps);
-    let whole = (total_votes / 10_000)
-        .checked_mul(threshold)
-        .ok_or(ForgeError::ArithmeticOverflow)?;
-    let remainder = (total_votes % 10_000)
-        .checked_mul(threshold)
-        .ok_or(ForgeError::ArithmeticOverflow)?;
-    let fractional = remainder
-        .checked_add(9_999)
-        .ok_or(ForgeError::ArithmeticOverflow)?
-        / 10_000;
-    let required_for_votes = whole
-        .checked_add(fractional)
-        .ok_or(ForgeError::ArithmeticOverflow)?;
-    Ok(for_votes >= required_for_votes)
-}
 
-#[cfg(test)]
-fn test_category_rules(env: &Env, standard_period: u64) -> soroban_sdk::Vec<CategoryRules> {
-    soroban_sdk::vec![
-        env,
-        CategoryRules {
-            category: ProposalCategory::Standard,
-            voting_period: standard_period,
-            quorum_threshold: 1,
-            approval_threshold_bps: 5_001,
-            execution_delay: 0,
-        },
-        CategoryRules {
-            category: ProposalCategory::Financial,
-            voting_period: 172_800,
-            quorum_threshold: 2,
-            approval_threshold_bps: 6_667,
-            execution_delay: 3_600,
-        },
-        CategoryRules {
-            category: ProposalCategory::Governance,
-            voting_period: 604_800,
-            quorum_threshold: 3,
-            approval_threshold_bps: 7_500,
-            execution_delay: 86_400,
-        },
-        CategoryRules {
-            category: ProposalCategory::Emergency,
-            voting_period: 3_600,
-            quorum_threshold: 1,
-            approval_threshold_bps: 5_001,
-            execution_delay: 0,
-        },
-    ]
+    fn active_proposal_count(env: &Env, proposer: &Address) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ActiveProposalCount(proposer.clone()))
+            .unwrap_or(0)
+    }
+
+    fn inc_active_proposals(env: &Env, proposer: &Address) -> Result<(), ForgeError> {
+        let current = Self::active_proposal_count(env, proposer);
+        let next = current
+            .checked_add(1)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveProposalCount(proposer.clone()), &next);
+        Ok(())
+    }
+
+    fn dec_active_proposals(env: &Env, proposer: &Address) {
+        let current = Self::active_proposal_count(env, proposer);
+        let next = current.saturating_sub(1);
+        if next == 0 {
+            env.storage()
+                .instance()
+                .remove(&DataKey::ActiveProposalCount(proposer.clone()));
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::ActiveProposalCount(proposer.clone()), &next);
+        }
+    }
 }
 
 /// Move `amount` of `token` from `from` into this contract.
@@ -1163,6 +1089,7 @@ mod events {
         pub proposal_id: u64,
         pub voter: Address,
         pub support: bool,
+        pub weight: i128,
     }
 
     #[contractevent]
@@ -1203,11 +1130,12 @@ mod events {
         .publish(env);
     }
 
-    pub fn vote_cast(env: &Env, proposal_id: u64, voter: &Address, support: bool) {
+    pub fn vote_cast(env: &Env, proposal_id: u64, voter: &Address, support: bool, weight: i128) {
         VoteCast {
             proposal_id,
             voter: voter.clone(),
             support,
+            weight,
         }
         .publish(env);
     }
@@ -1260,7 +1188,6 @@ mod events {
 mod tests {
     use super::*;
     use soroban_forge_test_utils::{MockTarget, MockTargetClient, RevertingTarget, TestAccounts};
-    use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{Bytes, Env};
@@ -1293,8 +1220,8 @@ mod tests {
             let contract_id = env.register(DaoGovernance, ());
             let client = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
             let accounts = TestAccounts::generate(&env);
+            client.initialize(&token);
             client.configure_bond(&token, &BOND, &accounts.deployer);
-            client.configure_category_rules(&test_category_rules(&env, DURATION));
             for who in [
                 &accounts.user1,
                 &accounts.user2,
@@ -1335,8 +1262,14 @@ mod tests {
         () => {{
             let (env, _token, _token_client, _contract_id, client, accounts, target_id) =
                 fresh_bond!();
-            let proposal_id =
-                client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+            let proposal_id = client.propose(
+                &accounts.user1,
+                &target_id,
+                &payload(&env),
+                &DURATION,
+                &soroban_sdk::Vec::new(&env),
+                &None,
+            );
             (env, client, accounts, proposal_id, target_id)
         }};
     }
@@ -1531,8 +1464,22 @@ mod tests {
     #[test]
     fn propose_assigns_distinct_ids() {
         let (env, client, accounts, _id, target_id) = setup!();
-        let id2 = client.propose(&accounts.user2, &target_id, &payload(&env), &DURATION);
-        let id3 = client.propose(&accounts.user3, &target_id, &payload(&env), &DURATION);
+        let id2 = client.propose(
+            &accounts.user2,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let id3 = client.propose(
+            &accounts.user3,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         assert_ne!(id2, id3);
     }
 
@@ -1540,85 +1487,247 @@ mod tests {
     fn propose_rejects_zero_duration() {
         let (env, client, accounts, _id, target_id) = setup!();
         let err = client
-            .try_propose(&accounts.user1, &target_id, &payload(&env), &0_u64)
+            .try_propose(
+                &accounts.user1,
+                &target_id,
+                &payload(&env),
+                &0_u64,
+                &soroban_sdk::Vec::new(&env),
+                &None,
+            )
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
     }
 
     #[test]
-    fn categorized_proposal_uses_category_voting_period_and_delay() {
-        let (env, _token, _token_client, _contract_id, client, accounts) = bonded_env!();
-        let target_id = env.register(MockTarget, ());
-        let proposal_id = client.propose_with_category(
-            &accounts.user1,
-            &target_id,
-            &payload(&env),
-            &ProposalCategory::Financial,
-        );
-        let proposal = client.get_proposal(&proposal_id);
-        assert_eq!(proposal.category, ProposalCategory::Financial);
-        assert_eq!(proposal.voting_ends, START + 172_800);
-        assert_eq!(proposal.execute_after, START + 176_400);
-    }
-
-    #[test]
-    fn governance_category_requires_supermajority_and_quorum() {
-        let (env, _token, _token_client, _contract_id, client, accounts) = bonded_env!();
-        let target_id = env.register(MockTarget, ());
-        let proposal_id = client.propose_with_category(
-            &accounts.user1,
-            &target_id,
-            &payload(&env),
-            &ProposalCategory::Governance,
-        );
-        client.vote(&proposal_id, &accounts.user2, &true);
-        client.vote(&proposal_id, &accounts.user3, &true);
-        client.vote(&proposal_id, &accounts.validator, &false);
-
-        env.ledger().set_timestamp(START + 604_800);
-        client.execute(&proposal_id);
+    fn propose_rejects_self_unknown_and_consumed_dependencies() {
+        let (env, client, accounts, first, target) = setup!();
+        let self_ref = soroban_sdk::vec![&env, first + 1];
         assert_eq!(
-            client.get_proposal(&proposal_id).state,
-            ProposalState::Defeated
-        );
-    }
-
-    #[test]
-    fn financial_category_enforces_execution_delay() {
-        let (env, _token, _token_client, _contract_id, client, accounts) = bonded_env!();
-        let target_id = env.register(MockTarget, ());
-        let mock_target = MockTargetClient::new(&env, &target_id);
-        let proposal_id = client.propose_with_category(
-            &accounts.user1,
-            &target_id,
-            &payload(&env),
-            &ProposalCategory::Financial,
-        );
-        client.vote(&proposal_id, &accounts.user2, &true);
-        client.vote(&proposal_id, &accounts.user3, &true);
-
-        env.ledger().set_timestamp(START + 172_800);
-        client.execute(&proposal_id);
-        assert_eq!(
-            client.get_proposal(&proposal_id).state,
-            ProposalState::Succeeded
-        );
-        let before_delay = START + 176_399;
-        env.ledger().set_timestamp(before_delay);
-        assert_eq!(
-            client.try_execute(&proposal_id).unwrap_err().unwrap(),
+            client
+                .try_propose(
+                    &accounts.user2,
+                    &target,
+                    &payload(&env),
+                    &DURATION,
+                    &self_ref,
+                    &None
+                )
+                .unwrap_err()
+                .unwrap(),
             ForgeError::InvalidInput
         );
-        assert_eq!(mock_target.count(), 0);
-
-        env.ledger().set_timestamp(START + 176_400);
-        client.execute(&proposal_id);
+        let unknown = soroban_sdk::vec![&env, first + 100];
         assert_eq!(
-            client.get_proposal(&proposal_id).state,
+            client
+                .try_propose(
+                    &accounts.user2,
+                    &target,
+                    &payload(&env),
+                    &DURATION,
+                    &unknown,
+                    &None
+                )
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+        client.cancel_proposal(&first, &accounts.user1);
+        let consumed = soroban_sdk::vec![&env, first];
+        assert_eq!(
+            client
+                .try_propose(
+                    &accounts.user2,
+                    &target,
+                    &payload(&env),
+                    &DURATION,
+                    &consumed,
+                    &None
+                )
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        let executed = client.propose(
+            &accounts.user2,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.vote(&executed, &accounts.user3, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&executed);
+        client.execute(&executed);
+        let consumed = soroban_sdk::vec![&env, executed];
+        assert_eq!(
+            client
+                .try_propose(
+                    &accounts.user3,
+                    &target,
+                    &payload(&env),
+                    &DURATION,
+                    &consumed,
+                    &None
+                )
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+    }
+
+    #[test]
+    fn propose_rejects_cycle_using_iterative_dependency_walk() {
+        let (env, _token, _tc, contract_id, client, accounts) = bonded_env!();
+        let target = env.register(MockTarget, ());
+        let first = client.propose(
+            &accounts.user1,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let second = client.propose(
+            &accounts.user2,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        // Simulate malformed stored edges forming candidate -> #1 -> #2 ->
+        // candidate. Normal calls cannot create forward edges because
+        // unknown ids are rejected; this exercises a length-three cycle.
+        let mut first_record = client.get_proposal(&first);
+        first_record.requires = soroban_sdk::vec![&env, second];
+        let mut second_record = client.get_proposal(&second);
+        second_record.requires = soroban_sdk::vec![&env, second + 1];
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Proposal(first), &first_record);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Proposal(second), &second_record);
+        });
+        let edge = soroban_sdk::vec![&env, first];
+        assert_eq!(
+            client
+                .try_propose(
+                    &accounts.user2,
+                    &target,
+                    &payload(&env),
+                    &DURATION,
+                    &edge,
+                    &None
+                )
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+    }
+
+    #[test]
+    fn dependency_guard_orders_execution_and_keeps_failed_state_untouched() {
+        let (env, client, accounts, dependency, target) = setup!();
+        let requires = soroban_sdk::vec![&env, dependency];
+        let consumer = client.propose(
+            &accounts.user2,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &requires,
+            &None,
+        );
+        assert_eq!(client.get_dependencies(&consumer).requires, requires);
+        client.vote(&dependency, &accounts.user2, &true);
+        client.vote(&consumer, &accounts.user3, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&consumer); // vote finalisation is allowed while waiting
+        assert_eq!(
+            client.get_proposal(&consumer).state,
+            ProposalState::Succeeded
+        );
+        assert_eq!(
+            client.try_execute(&consumer).unwrap_err().unwrap(),
+            ForgeError::DeadlineReached
+        );
+        assert_eq!(
+            client.get_proposal(&consumer).state,
+            ProposalState::Succeeded
+        );
+        client.execute(&dependency);
+        client.execute(&dependency);
+        client.execute(&consumer);
+        assert_eq!(
+            client.get_proposal(&consumer).state,
             ProposalState::Executed
         );
-        assert_eq!(mock_target.count(), 1);
+    }
+
+    #[test]
+    fn cancelled_dependency_permanently_blocks_succeeded_consumer() {
+        let (env, client, accounts, dependency, target) = setup!();
+        let requires = soroban_sdk::vec![&env, dependency];
+        let consumer = client.propose(
+            &accounts.user2,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &requires,
+            &None,
+        );
+        client.vote(&consumer, &accounts.user3, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&consumer);
+        assert_eq!(
+            client.get_proposal(&consumer).state,
+            ProposalState::Succeeded
+        );
+        client.cancel_proposal(&dependency, &accounts.user1);
+        assert_eq!(
+            client.try_execute(&consumer).unwrap_err().unwrap(),
+            ForgeError::ContractInvocationFailed
+        );
+        assert_eq!(
+            client.get_proposal(&consumer).state,
+            ProposalState::Succeeded
+        );
+    }
+
+    #[test]
+    fn executed_conflict_blocks_dispatch() {
+        let (env, client, accounts, first, target) = setup!();
+        let consumer = client.propose(
+            &accounts.user2,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &Some(first),
+        );
+        client.vote(&first, &accounts.user2, &true);
+        client.vote(&consumer, &accounts.user3, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&consumer);
+        assert_eq!(
+            client.get_proposal(&consumer).state,
+            ProposalState::Succeeded
+        );
+        client.execute(&first);
+        client.execute(&first);
+        assert_eq!(
+            client.try_execute(&consumer).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(
+            client.get_proposal(&consumer).state,
+            ProposalState::Succeeded
+        );
     }
 
     #[test]
@@ -1626,7 +1735,7 @@ mod tests {
         let (_env, client, accounts, proposal_id, _target_id) = setup!();
         client.vote(&proposal_id, &accounts.user2, &true);
         let proposal = client.get_proposal(&proposal_id);
-        assert_eq!(proposal.for_votes, 1);
+        assert_eq!(proposal.for_votes, FUNDS);
         assert_eq!(proposal.against_votes, 0);
     }
 
@@ -1636,7 +1745,7 @@ mod tests {
         client.vote(&proposal_id, &accounts.user2, &false);
         let proposal = client.get_proposal(&proposal_id);
         assert_eq!(proposal.for_votes, 0);
-        assert_eq!(proposal.against_votes, 1);
+        assert_eq!(proposal.against_votes, FUNDS);
     }
 
     #[test]
@@ -1648,6 +1757,108 @@ mod tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn initialize_is_one_time_and_vote_requires_initialization() {
+        let (env, client, accounts, target_id) = unbonded!();
+        let admin = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(admin);
+        let token = sac.address();
+        let token_admin = StellarAssetClient::new(&env, &token);
+        client.configure_bond(&token, &BOND, &accounts.deployer);
+        token_admin.mint(&accounts.user1, &FUNDS);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let err = client
+            .try_vote(&proposal_id, &accounts.user2, &true)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::NotInitialized);
+
+        client.initialize(&token);
+        assert_eq!(
+            client
+                .try_initialize(&Address::generate(&env))
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::AlreadyInitialized
+        );
+    }
+
+    #[test]
+    fn vote_weight_uses_unequal_token_balances() {
+        let (env, token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+        let token_admin = StellarAssetClient::new(&env, &token);
+        // Existing fixture mints FUNDS to user2 and user3. Add unequal
+        // balances to demonstrate that the weight is read from SEP-41.
+        token_admin.mint(&accounts.user2, &17);
+        token_admin.mint(&accounts.user3, &43);
+        let id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.vote(&id, &accounts.user2, &true);
+        client.vote(&id, &accounts.user3, &false);
+        let proposal = client.get_proposal(&id);
+        assert_eq!(proposal.for_votes, FUNDS + 17);
+        assert_eq!(proposal.against_votes, FUNDS + 43);
+    }
+
+    #[test]
+    fn vote_rejects_zero_balance() {
+        let (_env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+        let id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&_env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&_env),
+            &None,
+        );
+        let voter = Address::generate(&_env);
+        assert_eq!(
+            client.try_vote(&id, &voter, &true).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert!(!client.has_voted(&id, &voter));
+    }
+
+    #[test]
+    fn vote_weight_overflow_is_rejected() {
+        let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+        let id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let mut proposal = client.get_proposal(&id);
+        proposal.for_votes = i128::MAX;
+        env.as_contract(&_contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Proposal(id), &proposal);
+        });
+        assert_eq!(
+            client
+                .try_vote(&id, &accounts.user2, &true)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::ArithmeticOverflow
+        );
     }
 
     #[test]
@@ -1766,7 +1977,14 @@ mod tests {
     #[test]
     fn cancel_immediately_after_propose_succeeds() {
         let (env, client, accounts, _id, target_id) = setup!();
-        let fresh_id = client.propose(&accounts.user3, &target_id, &payload(&env), &DURATION);
+        let fresh_id = client.propose(
+            &accounts.user3,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         client.cancel_proposal(&fresh_id, &accounts.user3);
         assert_eq!(
             client.get_proposal(&fresh_id).state,
@@ -1785,7 +2003,7 @@ mod tests {
             client.get_proposal(&proposal_id).state,
             ProposalState::Cancelled
         );
-        assert_eq!(client.get_proposal(&proposal_id).for_votes, 2);
+        assert_eq!(client.get_proposal(&proposal_id).for_votes, FUNDS * 2);
     }
 
     #[test]
@@ -1898,6 +2116,8 @@ mod tests {
             &reverting_target_id,
             &payload(&env),
             &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
         );
 
         client.vote(&proposal_id, &accounts.user2, &true);
@@ -1950,8 +2170,14 @@ mod tests {
         let (env, _token, _tc, _contract_id, client, accounts) = bonded_env!();
         let auth_target_id = env.register(AuthCheckingTarget, ());
 
-        let proposal_id =
-            client.propose(&accounts.user1, &auth_target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &auth_target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
 
@@ -1992,7 +2218,14 @@ mod tests {
         // 1. propose emits the SAC transfer, then Proposed then BondPosted —
         //    creation and the bond join are one transaction, both keyed by
         //    proposal_id, and the pull is observable as the token's event
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         assert_eq!(env.events().all().events().len(), 3); // transfer + 2
         assert_transfer_event(&env, &accounts.user1, &contract_id, BOND);
         let events = dao_events(&env, &contract_id);
@@ -2029,6 +2262,21 @@ mod tests {
             &ScVal::Symbol("vote_cast".try_into().unwrap())
         );
         assert_eq!(body.topics.get(1).unwrap(), &ScVal::U64(proposal_id));
+        let ScVal::Map(Some(map)) = &body.data else {
+            panic!("VoteCast data must be a map");
+        };
+        let weight = map
+            .iter()
+            .find(|entry| entry.key == ScVal::Symbol("weight".try_into().unwrap()))
+            .map(|entry| entry.val.clone())
+            .unwrap();
+        assert_eq!(
+            weight,
+            ScVal::I128(xdr::Int128Parts {
+                hi: 0,
+                lo: FUNDS as u64
+            })
+        );
 
         // 3. Negative assertion: failed duplicate vote emits no events
         let err = client
@@ -2096,7 +2344,14 @@ mod tests {
         let (env, token, _tc, contract_id, client, accounts) = bonded_env!();
         let target_id = env.register(MockTarget, ());
 
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         client.vote(&proposal_id, &accounts.user2, &false);
 
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -2143,7 +2398,14 @@ mod tests {
 
         // 2. Create 5 proposals
         for _ in 0..5 {
-            client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+            client.propose(
+                &accounts.user1,
+                &target_id,
+                &payload(&env),
+                &DURATION,
+                &soroban_sdk::Vec::new(&env),
+                &None,
+            );
         }
         assert_eq!(client.get_proposal_count(), 5);
 
@@ -2256,7 +2518,14 @@ mod tests {
     fn propose_without_bond_configuration_is_rejected() {
         let (env, client, accounts, target_id) = unbonded!();
         let err = client
-            .try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION)
+            .try_propose(
+                &accounts.user1,
+                &target_id,
+                &payload(&env),
+                &DURATION,
+                &soroban_sdk::Vec::new(&env),
+                &None,
+            )
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::NotInitialized);
@@ -2279,7 +2548,14 @@ mod tests {
         assert_eq!(tc.balance(&accounts.user1), FUNDS);
         assert_eq!(tc.balance(&contract_id), 0);
 
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
 
         assert_eq!(tc.balance(&accounts.user1), FUNDS - BOND);
         assert_eq!(tc.balance(&contract_id), BOND);
@@ -2299,7 +2575,14 @@ mod tests {
         StellarAssetClient::new(&env, &token).mint(&poor, &(BOND - 1));
 
         let err = client
-            .try_propose(&poor, &target_id, &payload(&env), &DURATION)
+            .try_propose(
+                &poor,
+                &target_id,
+                &payload(&env),
+                &DURATION,
+                &soroban_sdk::Vec::new(&env),
+                &None,
+            )
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::TokenTransferFailed);
@@ -2324,7 +2607,14 @@ mod tests {
         set_bond_held(&env, &contract_id, i128::MAX);
 
         let err = client
-            .try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION)
+            .try_propose(
+                &accounts.user1,
+                &target_id,
+                &payload(&env),
+                &DURATION,
+                &soroban_sdk::Vec::new(&env),
+                &None,
+            )
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::ArithmeticOverflow);
@@ -2346,7 +2636,14 @@ mod tests {
     #[test]
     fn executed_proposal_refunds_the_bond() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         client.vote(&proposal_id, &accounts.user2, &true);
 
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -2372,7 +2669,14 @@ mod tests {
     #[test]
     fn cancelled_proposal_refunds_the_bond() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         assert_eq!(tc.balance(&contract_id), BOND);
 
         client.cancel_proposal(&proposal_id, &accounts.user1);
@@ -2401,7 +2705,14 @@ mod tests {
     #[test]
     fn defeated_proposal_forfeits_the_bond_to_the_treasury() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         client.vote(&proposal_id, &accounts.user2, &false);
 
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -2428,9 +2739,30 @@ mod tests {
 
         // One proposal per terminal path: executed (refund), cancelled
         // (refund), defeated (forfeit).
-        let executed = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
-        let cancelled = client.propose(&accounts.user2, &target_id, &payload(&env), &DURATION);
-        let defeated = client.propose(&accounts.user3, &target_id, &payload(&env), &DURATION);
+        let executed = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let cancelled = client.propose(
+            &accounts.user2,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let defeated = client.propose(
+            &accounts.user3,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         client.vote(&executed, &accounts.user2, &true);
         client.vote(&defeated, &accounts.user2, &false);
 
@@ -2479,7 +2811,14 @@ mod tests {
     #[test]
     fn bond_cannot_be_released_twice() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&proposal_id); // Active -> Succeeded
@@ -2509,7 +2848,14 @@ mod tests {
     fn failed_bond_refund_reverts_the_whole_execution() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
         let mock_target = MockTargetClient::new(&env, &target_id);
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&proposal_id); // Active -> Succeeded, bond still held
@@ -2540,7 +2886,14 @@ mod tests {
     #[test]
     fn bond_release_underflow_is_arithmetic_overflow_and_changes_nothing() {
         let (env, _token, tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         assert_eq!(bond_held(&env, &contract_id), BOND);
 
         // Drive the custody total to the i128 boundary: the release's
@@ -2572,7 +2925,14 @@ mod tests {
         use soroban_sdk::xdr::{self, ScVal};
 
         let (env, token, _tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
 
         client.cancel_proposal(&proposal_id, &accounts.user1);
         // Cancellation emits no state event today; its bond release is the
@@ -2602,7 +2962,14 @@ mod tests {
     #[test]
     fn touch_ttl_extends_and_keeps_state_intact() {
         let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
         assert_eq!(client.touch_ttl(&proposal_id), ());
         let proposal = client.get_proposal(&proposal_id);
         assert_eq!(proposal.proposal_id, proposal_id);
@@ -2616,114 +2983,125 @@ mod tests {
         assert_eq!(err, ForgeError::NotFound);
     }
 
-    // -------------------------------------------------------------------
-    // Vote-mark TTL discipline (Issue 170)
-    // -------------------------------------------------------------------
-
-    /// The contract instance's current TTL, read from inside the contract
-    /// frame (instance entries have no per-key TTL).
-    fn instance_ttl(env: &Env, contract_id: &Address) -> u32 {
-        env.as_contract(contract_id, || env.storage().instance().get_ttl())
-    }
-
-    /// The proposal record's persistent TTL, read from inside the contract
-    /// frame.
-    fn proposal_ttl(env: &Env, contract_id: &Address, proposal_id: u64) -> u32 {
-        env.as_contract(contract_id, || {
-            env.storage()
-                .persistent()
-                .get_ttl(&DataKey::Proposal(proposal_id))
-        })
-    }
-
-    /// A vote mark's lifetime is the instance TTL, and `vote` extends it to
-    /// the same 30-day horizon the proposal record gets — so the mark is
-    /// guaranteed to outlive the proposal's managed horizon.
     #[test]
-    fn vote_extends_instance_ttl_to_the_proposal_horizon() {
-        let (env, _token, _tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
-
-        // Cross the bump threshold so the next write is decisive.
-        env.ledger()
-            .with_mut(|l| l.sequence_number += BUMP_THRESHOLD + 1);
-
-        client.vote(&proposal_id, &accounts.user2, &true);
-
-        // Both halves of the vote now share the same 30-day horizon.
-        assert_eq!(instance_ttl(&env, &contract_id), BUMP_AMOUNT);
-        assert_eq!(proposal_ttl(&env, &contract_id, proposal_id), BUMP_AMOUNT);
-        assert!(client.has_voted(&proposal_id, &accounts.user2));
-    }
-
-    /// `touch_ttl` — the keeper entrypoint — extends the instance TTL
-    /// alongside the proposal record, so keeping a proposal alive keeps its
-    /// vote marks alive with it.
-    #[test]
-    fn touch_ttl_extends_instance_ttl_with_the_proposal() {
-        let (env, _token, _tc, contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
-        client.vote(&proposal_id, &accounts.user2, &true);
-
-        env.ledger()
-            .with_mut(|l| l.sequence_number += BUMP_THRESHOLD + 1);
-
-        client.touch_ttl(&proposal_id);
-
-        assert_eq!(instance_ttl(&env, &contract_id), BUMP_AMOUNT);
-        assert_eq!(proposal_ttl(&env, &contract_id, proposal_id), BUMP_AMOUNT);
-        // The mark survived the extension and still reports truthfully.
-        assert!(client.has_voted(&proposal_id, &accounts.user2));
-    }
-
-    /// A double-vote attempt after `touch_ttl` extended a proposal's horizon
-    /// is still rejected with `ForgeError::InvalidInput`, and the mark stays
-    /// truthful.
-    #[test]
-    fn revote_after_touch_ttl_is_rejected() {
+    fn proposer_cooldown_enforced_at_boundary() {
         let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
-        client.vote(&proposal_id, &accounts.user2, &true);
+        assert_eq!(client.get_active_proposal_count(&accounts.user1), 0);
 
-        // Extend the proposal's horizon well past the original deadline.
-        env.ledger()
-            .with_mut(|l| l.sequence_number += BUMP_THRESHOLD + 1);
-        client.touch_ttl(&proposal_id);
-
-        // Still inside the voting window: the second vote must be rejected.
-        assert!(env.ledger().timestamp() < client.get_proposal(&proposal_id).voting_ends);
+        for _ in 0..DEFAULT_MAX_ACTIVE_PROPOSALS {
+            client.propose(
+                &accounts.user1,
+                &target_id,
+                &payload(&env),
+                &DURATION,
+                &soroban_sdk::Vec::new(&env),
+                &None,
+            );
+        }
         assert_eq!(
-            client
-                .try_vote(&proposal_id, &accounts.user2, &false)
-                .unwrap_err()
-                .unwrap(),
-            ForgeError::InvalidInput
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS
         );
-        assert!(client.has_voted(&proposal_id, &accounts.user2));
-        // The rejected vote did not move the tally.
-        assert_eq!(client.get_proposal(&proposal_id).for_votes, 1);
-        assert_eq!(client.get_proposal(&proposal_id).against_votes, 0);
+
+        // Exceeding the concurrent active proposals limit is rejected with ProposerCooldown.
+        let err = client
+            .try_propose(
+                &accounts.user1,
+                &target_id,
+                &payload(&env),
+                &DURATION,
+                &soroban_sdk::Vec::new(&env),
+                &None,
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::ProposerCooldown);
+
+        // Another proposer is unaffected by user1's limit.
+        assert_eq!(client.get_active_proposal_count(&accounts.user2), 0);
+        let id_u2 = client.propose(
+            &accounts.user2,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        assert_eq!(client.get_active_proposal_count(&accounts.user2), 1);
+        assert!(id_u2 > 0);
     }
 
-    /// `has_voted` is truthful before and after a `touch_ttl` extension: a
-    /// voter who has not voted still reports `false`, and a voter who has
-    /// still reports `true`.
     #[test]
-    fn has_voted_is_truthful_across_ttl_extensions() {
+    fn proposer_cooldown_decrements_on_cancel_and_execute() {
         let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
-        let proposal_id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+        let mut ids = std::vec::Vec::new();
+        for _ in 0..DEFAULT_MAX_ACTIVE_PROPOSALS {
+            ids.push(client.propose(
+                &accounts.user1,
+                &target_id,
+                &payload(&env),
+                &DURATION,
+                &soroban_sdk::Vec::new(&env),
+                &None,
+            ));
+        }
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS
+        );
 
-        assert!(!client.has_voted(&proposal_id, &accounts.user2));
-        assert!(!client.has_voted(&proposal_id, &accounts.user3));
+        // Cancel one proposal: active count decreases by 1.
+        client.cancel_proposal(&ids[0], &accounts.user1);
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS - 1
+        );
 
-        client.vote(&proposal_id, &accounts.user2, &true);
+        // Now proposer can create a new proposal.
+        let new_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS
+        );
+        client.vote(&new_id, &accounts.user2, &true);
 
-        env.ledger()
-            .with_mut(|l| l.sequence_number += BUMP_THRESHOLD + 1);
-        client.touch_ttl(&proposal_id);
+        // Defeat one proposal: vote against, advance past deadline, execute.
+        client.vote(&ids[1], &accounts.user2, &false);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&ids[1]); // becomes Defeated
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS - 1
+        );
 
-        assert!(client.has_voted(&proposal_id, &accounts.user2));
-        assert!(!client.has_voted(&proposal_id, &accounts.user3));
+        // Proposer can create another proposal.
+        let _another_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS
+        );
+
+        // Execute new_id: since vote was cast and deadline elapsed, finalize and dispatch.
+        client.execute(&new_id); // Active -> Succeeded
+        client.execute(&new_id); // Succeeded -> Executed
+        assert_eq!(
+            client.get_active_proposal_count(&accounts.user1),
+            DEFAULT_MAX_ACTIVE_PROPOSALS - 1
+        );
     }
 }
 
@@ -2737,3 +3115,6 @@ mod authz;
 // and finalization-outcome invariants (issue #62).
 #[cfg(test)]
 mod props;
+
+#[cfg(test)]
+mod indexer_fixtures;

@@ -6,7 +6,7 @@
 //!   authorization covers the nested royalty transfer to the recipient).
 //! - `settle_sale` requires the collection and the payer.
 
-use crate::{MarketplaceRoyalties, SorobanForgeMarketplaceRoyaltiesClient, SplitOverride};
+use crate::{MarketplaceRoyalties, SorobanForgeMarketplaceRoyaltiesClient};
 use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::token::StellarAssetClient;
 use soroban_sdk::{Address, Env, IntoVal, InvokeError};
@@ -103,6 +103,7 @@ fn set_royalty_rejects_signature_from_non_collection() {
 #[test]
 fn distribute_accepts_collection_and_payer_signatures() {
     let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
+
     client.set_royalty(&collection, &recipient, &BPS);
 
     // Two frames: the collection authorizes the entrypoint, and the payer
@@ -257,7 +258,7 @@ fn settle_sale_accepts_collection_and_payer_signatures_and_records_auth_tree() {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "settle_sale",
-                args: (&collection, &1_u64, &token, &payer, &seller, AMOUNT).into_val(&env),
+                args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
                 sub_invokes: &[],
             },
         },
@@ -266,14 +267,14 @@ fn settle_sale_accepts_collection_and_payer_signatures_and_records_auth_tree() {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "settle_sale",
-                args: (&collection, &1_u64, &token, &payer, &seller, AMOUNT).into_val(&env),
+                args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
                 sub_invokes: &transfer_sub_invokes,
             },
         },
     ]);
 
     let res = client
-        .try_settle_sale(&collection, &1_u64, &token, &payer, &seller, &AMOUNT)
+        .try_settle_sale(&collection, &token, &payer, &seller, &AMOUNT)
         .expect("outer ok")
         .expect("contract ok");
 
@@ -291,12 +292,12 @@ fn settle_sale_rejects_missing_collection_signature() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "settle_sale",
-            args: (&collection, &1_u64, &token, &payer, &seller, AMOUNT).into_val(&env),
+            args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_settle_sale(&collection, &1_u64, &token, &payer, &seller, &AMOUNT);
+    let res = client.try_settle_sale(&collection, &token, &payer, &seller, &AMOUNT);
     assert_auth_abort!(res);
 }
 
@@ -310,12 +311,12 @@ fn settle_sale_rejects_missing_payer_signature() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "settle_sale",
-            args: (&collection, &1_u64, &token, &payer, &seller, AMOUNT).into_val(&env),
+            args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_settle_sale(&collection, &1_u64, &token, &payer, &seller, &AMOUNT);
+    let res = client.try_settle_sale(&collection, &token, &payer, &seller, &AMOUNT);
     assert_auth_abort!(res);
 }
 
@@ -330,7 +331,7 @@ fn settle_sale_rejects_non_party_signature_in_place_of_payer() {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "settle_sale",
-                args: (&collection, &1_u64, &token, &payer, &seller, AMOUNT).into_val(&env),
+                args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
                 sub_invokes: &[],
             },
         },
@@ -339,13 +340,13 @@ fn settle_sale_rejects_non_party_signature_in_place_of_payer() {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "settle_sale",
-                args: (&collection, &1_u64, &token, &payer, &seller, AMOUNT).into_val(&env),
+                args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
                 sub_invokes: &[],
             },
         },
     ]);
 
-    let res = client.try_settle_sale(&collection, &1_u64, &token, &payer, &seller, &AMOUNT);
+    let res = client.try_settle_sale(&collection, &token, &payer, &seller, &AMOUNT);
     assert_auth_abort!(res);
 }
 
@@ -362,7 +363,7 @@ fn settle_sale_rejects_replayed_signature_with_altered_args() {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "settle_sale",
-                args: (&collection, &1_u64, &token, &payer, &seller, AMOUNT).into_val(&env),
+                args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
                 sub_invokes: &[],
             },
         },
@@ -371,20 +372,13 @@ fn settle_sale_rejects_replayed_signature_with_altered_args() {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "settle_sale",
-                args: (&collection, &1_u64, &token, &payer, &seller, AMOUNT).into_val(&env),
+                args: (&collection, &token, &payer, &seller, AMOUNT).into_val(&env),
                 sub_invokes: &[],
             },
         },
     ]);
 
-    let res = client.try_settle_sale(
-        &collection,
-        &1_u64,
-        &token,
-        &payer,
-        &seller,
-        &altered_amount,
-    );
+    let res = client.try_settle_sale(&collection, &token, &payer, &seller, &altered_amount);
     assert_auth_abort!(res);
 }
 
@@ -494,31 +488,4 @@ fn settle_sales_auth_failure_leaves_summary_and_balances_untouched() {
         client.try_get_settlement_summary(&collection),
         initial_summary
     );
-}
-
-#[test]
-fn settle_sale_override_requires_collection_and_payer_authorization() {
-    let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
-    client.set_royalty(&collection, &recipient, &BPS);
-    let split = Some(SplitOverride {
-        recipient: recipient.clone(),
-        bps: BPS,
-    });
-    env.mock_auths(&[MockAuth {
-        address: &collection,
-        invoke: &MockAuthInvoke {
-            contract: &contract_id,
-            fn_name: "settle_sale_with_split",
-            args: (&collection, &token, &payer, &seller, AMOUNT, split.clone()).into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-    assert_auth_abort!(client.try_settle_sale_with_split(
-        &collection,
-        &token,
-        &payer,
-        &seller,
-        &AMOUNT,
-        &split
-    ));
 }
