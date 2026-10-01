@@ -314,4 +314,8 @@ at your option.
 
 Built for the Stellar developer community.
 
+## Deployment
+
+See [docs/deployment-and-storage.md](docs/deployment-and-storage.md).
+
 <div id="task-207"></div>
