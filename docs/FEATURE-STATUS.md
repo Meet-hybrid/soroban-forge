@@ -39,13 +39,6 @@ treasury at a terminal transition.
 | `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** of remaining balance |
 | `dispute` | ✅ Implemented | Claimant (buyer or seller) authorized, `Funded` only — see [design notes](KNOWN-LIMITATIONS.md#design-notes-not-limitations-but-worth-knowing) |
 | `resolve` | ✅ Implemented | Arbiter-only, final; pays **remaining balance** either direction via **real token transfer** |
-| `cancel` | ✅ Implemented | Buyer, `Pending` only |
-| `get_status` / `get_escrow` | ✅ Implemented | Read-only; `get_escrow` now exposes `released` + derived `remaining`; `get_status` resolves either record kind (single-token or basket) by id |
-| `touch_ttl` | ✅ Implemented | Permissionless TTL keeper; covers both record kinds (a basket is extended as a unit) |
-| **Basket entrypoints** | ✅ Implemented | Additive multi-asset escrows: `create_basket` / `deposit_basket` / `release_basket` / `release_partial_basket` / `refund_basket` / `dispute_basket` / `resolve_basket` / `cancel_basket` / `get_basket`. `Vec<EscrowAsset>` legs (1..=8, duplicates rejected, list order + assets bound into the approved invocation), shared id sequence + participant index with the single-token path, all-or-nothing deposit, per-leg `released` accounting (Completed only when **every** leg exhausts), dispute freezes all legs, TTL per escrow. Non-breaking: `EscrowData`/`DataKey::Escrow(id)` and all single-token events unchanged. See [docs/contracts/escrow.md](contracts/escrow.md#multi-asset-baskets) |
-| Events | ✅ Implemented | Single-token: `EscrowCreated`, `Deposited`, `Released`, `PartiallyReleased`, `Refunded`, `Disputed`, `Resolved`, `Cancelled`; baskets (additive): `BasketCreated`, `BasketDeposited`, `BasketReleased`, `BasketPartiallyReleased` (token + partial amount), `BasketRefunded`, `BasketDisputed`, `BasketResolved`, `BasketCancelled`; id as topic |
-| Storage | ✅ Persistent + TTL | Per-id persistent entries under `DataKey::Escrow(id)` (single-token) and `DataKey::Basket(id)` (baskets); instance storage only for the shared id counter; **backward-compatible schema migration** via `EscrowDataV1` fallback decode (old records default `released = 0`) |
-| Tests | ✅ 122 | Full lifecycle, dispute paths, failure ordering, conservation property, partial-release (valid/multi/final/zero/negative/over-remaining/non-Funded/after-completion/→refund/→dispute→resolve, storage compat, conservation), **multi-asset baskets**: all-or-nothing deposit rollback, per-leg partial/completion, dispute freeze, resolve both directions, duplicate/empty/oversize rejection, shared id/index (`get_status`/`touch_ttl` dispatch; `get_escrow`/`get_basket` kind separation), **randomized property suite** (proptest, P1-P7): conservation over random single-token paths + partial sequences, tamper-resilient pool conservation, fund safety over arbitrary sequences, basket conservation over random terminal paths + per-leg partial sequences (P4), dispute freeze (P5), failed-deposit rollback (P6), shared id/index invariants (P7); **negative-auth suite** (`authz.rs`): per-entrypoint wrong-signer rejection across both record kinds, `release_partial`/`release_partial_basket` seller-only auth + mutation test, per-leg deposit authorization chain, altered-basket / other-leg signature replay rejection, `env.auths()` authorization-tree assertions |
 | `cancel` | ✅ Implemented | Buyer, `Pending` only; removes id from each distinct participant index after validation/auth |
 | `get_status` / `get_escrow` / `escrows_for_participant` | ✅ Implemented | Read-only views; participant index excludes cancelled ids but retains other terminal records; live offset pagination, restart at cursor 0 after cancellation |
 | `touch_ttl` | ✅ Implemented | Permissionless TTL keeper for the escrow's persistent entry |
@@ -65,20 +58,20 @@ treasury at a terminal transition.
 | `claimable`                   | ✅ Implemented     | Read-only                                                                                                                                                                                                                            |
 | `get_status`                  | ✅ Implemented     | Read-only; derived from ledger time + claimed amount, so it is current between claims                                                                                                                                                |
 | `get_schedule`                | ✅ Implemented     | Read-only record view of the linear schedule (issue #125), mirroring `get_tranche_schedule` and the other crates' record views; `NotFound` for unknown ids and tranche ids; no auth, no state change; `claimed` reflects completed claims |
-| `revoke`                      | ✅ Implemented     | Creator-authorized; policy-based clawback (`FullClawback` returns all tokens, `KeepUnvested` returns only the unvested portion); enforces cliff (rejected before cliff); rejected once fully vested or already revoked; **real token transfer** contract → creator before the state write; emits `Revoked` with the clawed-back amount; `Revoked` status now functional |
+| `reassign_beneficiary`        | ✅ Implemented     | Funder-only; snapshots vested value at the reassignment ledger, preserves the old beneficiary's vested-but-unclaimed balance, and leaves the original start/cliff/duration/total unchanged; unlimited and counted |
+| `claim_for` / `claimable_for` | ✅ Implemented     | Explicit beneficiary-scoped access for former assignments; frozen balances are keyed per schedule and beneficiary, while `claim` / `claimable` address the current beneficiary |
+| Revocation                    | ✅ Implemented     | Funder-only; freezes vesting at the revoke timestamp; reassignment is rejected after revocation, and prior frozen balances remain claimable if revocation follows reassignment |
+| Events                        | ✅ Implemented     | `BeneficiaryReassignedFrom` and `BeneficiaryReassignedTo` identify both parties and include vested-unclaimed amount and reassignment count |
+| Reassignment count            | ✅ Implemented     | Exposed in `VestingSchedule.reassignment_count` through `get_schedule` |
+| Storage                       | ✅ Instance-only   | Schedule-scoped former-beneficiary balances; linear schema additions are storage-breaking; no migration to persistent storage |
+| Tests                         | ✅ Implemented     | Exact same-ledger split, token settlement, schedule isolation, timeline invariants, auth rejection, event count, and revoke interaction |
 | `VestingSchedule.token` field | ✅ Wired           | Read by `claim` for the SEP-41 payout                                                                                                                                                                                                |
-| Events                        | ✅ Implemented     | `ScheduleCreated` and `Claimed` (`schedule_id` as topic); zero claims are silent                                                                                                                                                      |
 
 ## Multi-Sig Wallet (`crates/multi-sig-wallet`)
 
 | Entrypoint                                         | Status         | Notes                                                                                                                                                                                                                   |
 | -------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `initialize`                                       | ✅ Implemented | Owner set + threshold validation                                                                                                                                                                                        |
-| `submit`                                           | ✅ Implemented | Creates pending transaction record in **persistent storage** (TTL-bumped on write)                                                                                                                                      |
-| `confirm`                                          | ✅ Implemented | One-confirmation-per-owner enforced; tx record re-bumped in persistent storage                                                                                                                                          |
-| `reject`                                           | ✅ Implemented | Any owner may veto a pending tx; one rejection makes it terminal `Rejected`; confirmations are retained, `TxRejected` is emitted, and `get_tx` remains queryable |
-| `execute`                                          | ✅ Implemented | Threshold check + cross-contract `try_invoke_contract` to recorded `target`; status flip **after** invocation; target revert surfaces as `ForgeError::ContractInvocationFailed` and leaves tx `Pending`; events emitted |
-| `get_threshold` / `get_tx`                         | ✅ Implemented | Read-only; `get_tx` reads from persistent storage                                                                                                                                                                       |
 | `submit` / `submit_call`                           | ✅ Implemented | Creates pending transaction record with optional expiry deadline in **persistent storage** (TTL-bumped on write); supports opaque payloads and typed calls                                                               |
 | `confirm`                                          | ✅ Implemented | One-confirmation-per-owner enforced; tx record re-bumped in persistent storage; boundary-pinned rejection (`ForgeError::DeadlineReached`) at or after expiry                                                             |
 | `execute`                                          | ✅ Implemented | Threshold check + cross-contract `try_invoke_contract` to recorded `target`; status flip **after** invocation; target revert surfaces as `ForgeError::ContractInvocationFailed` and leaves tx `Pending`; reaching threshold before expiry remains executable after deadline |
@@ -91,30 +84,6 @@ treasury at a terminal transition.
 | `add_owner` / `remove_owner` / `set_threshold`     | ✅ Implemented | Owner-set and threshold governance via typed-tx machinery: `TxKind::AddOwner` / `RemoveOwner` / `SetThreshold`; must cross threshold before `execute` applies them                                                      |
 | `get_owners` / `is_owner` / `get_confirmations` / `get_rejections` / `get_tx_count` / `get_transactions` / `get_transactions_by_status` | ✅ Implemented | Read-only views; `get_transactions_by_status` includes `TxStatus::Expired`                                                                                                             |
 | Storage                                            | ✅ Persistent + TTL | `DataKey::Tx` records in persistent storage (migrated from instance) with 30-day TTL maintenance; owners, threshold, and limits remain instance storage                                                                |
-| Tests                                              | ✅ 109         | Full lifecycle, threshold/quorum, withdrawal + limit-change paths, keeper TTL tests, failure ordering, negative-auth suite (`authz.rs`)                                                                                  |
-| `submit`                                           | ✅ Implemented | Creates pending transaction record with opaque payload                                                                                                                                                                  |
-| `submit_call`                                      | ✅ Implemented | Creates pending typed cross-contract call with target address, function name, and arguments                                                                                                                             |
-| `confirm`                                          | ✅ Implemented | One-confirmation-per-owner enforced                                                                                                                                                                                     |
-| `execute`                                          | ✅ Implemented | Threshold check + cross-contract `try_invoke_contract`; supports opaque payloads and typed calls; status flip **after** invocation; target revert surfaces as `ForgeError::ContractInvocationFailed` and leaves tx `Pending` |
-| `get_threshold` / `get_tx`                         | ✅ Implemented | Read-only                                                                                                                                                                                                               |
-| `submit_withdrawal`                                | ✅ Implemented | Typed `TxKind::Withdrawal` tx; balance validated at execution (transfer first, state second); per-token rolling limit enforced at submission                                                                            |
-| `deposit` / `balance` / `touch_ttl`                | ✅ Implemented | Per-token persistent balance entries; permissionless TTL keeper                                                                                                                                                         |
-| `set_withdrawal_limit` / `remove_withdrawal_limit` | ✅ Implemented | `TxKind::LimitChange` txs on the same threshold+confirmation machinery; no effect below threshold                                                                                                                       |
-| `get_withdrawal_limit` / `get_withdrawal_window` / `get_window_usage` / `check_withdrawal` | ✅ Implemented | Read-only; missing limit/window reads as `None`/empty; simulation reports initialization, amount, limit, and custody-balance outcomes; no storage mutation |
-| Entrypoint | Status | Notes |
-|---|---|---|
-| `initialize` | ✅ Implemented | Owner set + threshold validation |
-| `submit` | ✅ Implemented | Creates pending transaction record |
-| `confirm` | ✅ Implemented | One-confirmation-per-owner enforced |
-| `reject` | ✅ Implemented | Any owner vetoes a pending tx; terminal `Rejected` state with retained confirmations and `TxRejected` event |
-| `execute` | ✅ Implemented | Threshold check + cross-contract `try_invoke_contract` to recorded `target`; status flip **after** invocation; target revert surfaces as `ForgeError::ContractInvocationFailed` and leaves tx `Pending`; events emitted |
-| `get_threshold` / `get_tx` | ✅ Implemented | Read-only |
-| `submit_withdrawal` | ✅ Implemented | Typed `TxKind::Withdrawal` tx; balance validated at execution (transfer first, state second); per-token rolling limit enforced at submission |
-| `deposit` / `balance` / `touch_ttl` | ✅ Implemented | Per-token persistent balance entries; permissionless TTL keeper |
-| `set_withdrawal_limit` / `remove_withdrawal_limit` | ✅ Implemented | `TxKind::LimitChange` txs on the same threshold+confirmation machinery; no effect below threshold |
-| `get_withdrawal_limit` / `get_window_usage` | ✅ Implemented | Read-only; `None`/`0` when no limit is configured |
-| `add_owner` / `remove_owner` / `set_threshold` | ✅ Implemented | Owner-set and threshold governance via the same typed-tx machinery: `TxKind::AddOwner` / `RemoveOwner` / `SetThreshold` must cross the **current** threshold before `execute` applies them; submission and execution both re-validate the resulting state; removed-owner confirmations are scrubbed from still-pending txs; `remove_owner` guards the final owner and `set_threshold` requires `1 <= t <= owners.len()` |
-| `get_owners` / `is_owner` / `get_confirmations` / `get_rejections` / `get_tx_count` / `get_transactions` / `get_transactions_by_status` | ✅ Implemented | Read-only views |
 | Tests                                              | ✅ 155         | Full lifecycle, threshold/quorum, withdrawal + limit-change paths, per-tx expiry with lazily evaluated Expired state and boundary-pinned confirmations, keeper TTL tests, negative-auth suite (`authz.rs`), proptest suite (`props.rs`) |
 
 ## DAO Governance (`crates/dao-governance`)
@@ -137,27 +106,6 @@ treasury at a terminal transition.
 
 ## Subscription Payments (`crates/subscription-payments`)
 
-| Entrypoint         | Status             | Notes                                                                   |
-| ------------------ | ------------------ | ----------------------------------------------------------------------- |
-| `subscribe`        | ✅ Implemented     | Plan validation, periodic scheduling                                    |
-| `charge`           | ✅ Implemented     | Real SEP-41 transfer for one period; failed transfers enter `PastDue`   |
-| `charge_catchup`   | ✅ Implemented     | Atomically settles up to 32 elapsed periods per call; refuses `PastDue` |
-| `cancel`           | ✅ Implemented     | Subscriber or owner                                                     |
-| `get_subscription` | ✅ Implemented     | Read-only                                                               |
-| Storage / `touch_ttl` | ✅ Implemented | Subscription records use persistent storage with 30-day TTL bumps; counter and indexes stay in instance storage |
-| Plan management    | ❌ Not implemented | Follow-up                                                               |
-
-## Marketplace Royalties (`crates/marketplace-royalties`)
-
-| Entrypoint               | Status             | Notes                                                                                                                 |
-| ------------------------ | ------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `set_royalty`            | ✅ Implemented     | Basis-point caps validated                                                                                            |
-| `disable_royalty` / `enable_royalty` | ✅ Implemented | Collection-authorized status transitions preserve stored bps and recipient |
-| `distribute`             | ⚠️ Computes only   | Pure split math; **pays no recipients** (use `settle_sale`)                                                           |
-| `settle_sale`            | ✅ Implemented     | **Real token transfers** payer → seller, then payer → royalty recipient; transfer-before-state, totals committed last |
-| `get_royalty`            | ✅ Implemented     | Read-only                                                                                                             |
-| `get_settlement_summary` | ✅ Implemented     | Read-only; cumulative sales, volume, and royalties per collection                                                     |
-| Multi-recipient splits   | ❌ Not implemented | Follow-up                                                                                                             |
 | Entrypoint | Status | Notes |
 |---|---|---|
 | `subscribe` | ✅ Implemented | Validates `amount > 0` / `period > 0` before auth; subscriber-authorized; record + sequential id + both subscriber/provider indexes written atomically |
@@ -173,7 +121,6 @@ treasury at a terminal transition.
 | Prepaid balance | ✅ Implemented | Per-subscription optional balance (`None` is unchanged pull mode; `Some(0)` remains prepaid); one-period charge only, catch-up rejected; `Deposited`, `BalanceDebited`, `BalanceRefunded`; conservation property tested against independent lifecycle mirror |
 | `cancel` | ✅ Implemented | Subscriber-authorized from `Active` / `Paused` / `PastDue`; refunds exact remaining prepaid balance before `Cancelled`; rejects already-`Cancelled` |
 | `get_subscription` / `get_subscription_count` / `subscriptions_for_subscriber` / `subscriptions_for_provider` | ✅ Implemented | Read-only views; paged by `offset`/`limit` with `limit == 0` → `InvalidInput`; empty index yields an empty page, not an error |
-| Plan management | ✅ Implemented | `create_plan(provider, token, amount, period, quotas)` → `plan_id`; `subscribe_to_plan(plan_id, subscriber)` → `subscription_id`; `get_plan(plan_id)` → `Plan`; `plan_count()` → `u64`; plan ids from a separate monotonic counter; a subscriber may hold multiple subscriptions to the same plan (each a distinct record); plan quotas copied verbatim into the subscription on join |
 | Plan management | ❌ Not implemented | Follow-up |
 | `PastDue` lifecycle | ✅ Implemented | Time-derived lapsed state (`Active → PastDue → Active`); `PastDueEntered` event per transition; recoverable only through a successful catch-up charge (never reverts by time alone); `cancel` from `PastDue` and `pause`/`resume` interactions defined and tested; one-period-per-call invariant preserved with overflow-safe `checked_add` due math |
 
@@ -181,15 +128,12 @@ treasury at a terminal transition.
 
 | Entrypoint | Status | Notes |
 |---|---|---|
-| `set_royalty` | ✅ Implemented | Basis-point caps validated; new `accrual` flag opts the collection into recoupment-ledger mode (`set_royalty(collection, recipient, bps, accrual)`). The flag is immutable once the collection has settlement/accrual history; flipping it returns `InvalidState` |
-| `distribute` | ✅ Implemented | **Real SEP-41 royalty payout** in payout mode; in accrual mode credits the `(collection, token)` ledger. Returns the seller's net; `Disabled`/zero-bps config transfers nothing |
-| `settle_sale` | ✅ Implemented | **Real token transfers** payer → seller, then payer → royalty recipient (payout) or payer → contract custody (accrual); transfer-before-state, totals committed last |
-| `settle_sales` | ✅ Implemented | **Atomic batch settlement**: up to 20 sales per call; per-sale seller-then-recipient/custody order; aggregate summary and ledger committed once after all transfers; any failure rolls the whole batch back |
-|| `distribute_accrued` | ✅ Implemented | **Atomic sweep** of the `(collection, token)` accrual ledger to the configured recipient; ledger debited before transfer, rolled back on failure to prevent double sweep; collection-authorized |
-|| `get_royalty` | ✅ Implemented | Read-only; returns the new `accrual` field |
-|| `get_settlement_summary` | ✅ Implemented | Read-only; cumulative sales, volume, and actual royalty payouts per collection |
-|| `get_accrued` | ✅ Implemented | Read-only; total accrued balance for `(collection, token)` |
-|| `get_recipient_accrued` | ✅ Implemented | Read-only; accrued balance credited to a recipient for `(collection, token)` |
+| `set_royalty` | ✅ Implemented | Basis-point caps validated |
+| `distribute` | ✅ Implemented | **Real SEP-41 royalty payout**: `distribute(collection, token, payer, seller, amount)` transfers `amount * bps / 10_000` from the payer to the configured recipient and returns the seller's net; a `Disabled`/zero-bps config transfers nothing; standalone settlement for sales handled outside `settle_sale`, the seller's net is not transferred here |
+| `settle_sale` | ✅ Implemented | **Real token transfers** payer → seller, then payer → royalty recipient; transfer-before-state, totals committed last |
+| `settle_sales` | ✅ Implemented | **Atomic batch settlement**: up to 20 sales per call against one collection + one payer authorization; every validation (cap, amounts, aggregate split math) before the first transfer, per-sale seller-then-recipient order, aggregate summary committed exactly once; any failure rolls the whole batch back |
+| `get_royalty` | ✅ Implemented | Read-only |
+| `get_settlement_summary` | ✅ Implemented | Read-only; cumulative sales, volume, and royalties per collection |
 | `quote_sale` | ✅ Implemented | Read-only per-sale quote (issue #126): the exact split a settlement would apply (`gross`, effective `royalty_bps`, `royalty_amount`, `seller_net`) via the same `effective_bps` + `split` resolution the settlement entrypoints run; settle-parity including floor rounding, `royalty_amount + seller_net == gross`; disabled collections quote at 0 bps like `settle_sale` settles in full; `NotFound` when unregistered, `InvalidInput` for `amount <= 0`; no auth, no storage mutation, no events |
 | `touch_ttl` | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a collection's royalty + summary records; `NotFound` when unregistered |
 | Storage | ✅ Persistent + TTL | `Royalty` and `SettlementSummary` records in persistent storage with 30-day TTL maintenance |
@@ -202,18 +146,16 @@ treasury at a terminal transition.
 | Concern | Status | Notes |
 |---|---|---|
 | Checked arithmetic | ✅ Workspace-wide | Overflow-safe; vesting guards documented |
-| `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting (including `revoke` creator-only authority), DAO governance, and marketplace royalties proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other two: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
-| Events | ✅ Escrow + Multi-Sig + DAO + Marketplace | Full lifecycle events on escrow, multi-sig wallet, DAO governance, and marketplace royalties |
+| `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, DAO governance, and marketplace royalties proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other two: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
+| Events | ✅ Escrow + Multi-Sig + DAO + Marketplace + Vesting | Full lifecycle events on escrow, multi-sig wallet, DAO governance, marketplace royalties, and vesting beneficiary reassignment |
 | Persistent storage + TTL | ✅ Escrow + Royalties + Multi-Sig + DAO | Per-record persistent entries with `touch_ttl`/`touch_tx_ttl` keepers on escrow, marketplace royalties (royalty + summary), multi-sig (transactions), and DAO (proposals); vesting and subscriptions remain instance-only. TTL policy constants + `bump_entry` helper consolidated in shared-utils (issue #127) and consumed by all four |
-Kim| SEP-41 token settlement | ✅ Escrow + royalties + multi-sig + vesting + subscriptions | Real transfers with transfer-before-state ordering on escrow (`deposit`/`release`/`refund`/`resolve`) and vesting (`claim`); marketplace `settle_sale`/`settle_sales`/`distribute` settle splits; DAO `propose` pulls the proposal bond and refunds/forfeits it on settlement; multi-sig `execute` performs cross-contract `try_invoke_contract` calls on opaque payloads; subscriptions still store amounts only |
-| Shared SEP-41 transfer helpers | ✅ `shared-utils` | `transfer_to_contract`, `transfer_from_contract`, and `transfer_tokens` consolidated into `soroban-forge-shared-utils::token`; all settlement crates (escrow, vesting, multi-sig-wallet, marketplace-royalties, dao-governance) call the canonical implementations; local copies deleted; helpers carry unit tests covering both directions and the `TokenTransferFailed` failure path |
 | SEP-41 token settlement | ✅ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Transfers use transfer-before-state ordering; subscription pull-mode charges pay subscriber → provider, while opt-in prepaid subscriptions custody deposits and pay exact debits/refunds |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
 | Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
 | TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
-| Provenance + verification | ✅ CLI | `soroban-forge verify` checks a WASM artifact / expected hash against a deterministic rebuild using `provenance-manifest.json` |
+| Provenance + verification | ✅ CLI | `soroban-forge verify` checks a WASM artifact / expected hash against a deterministic rebuild using `provenance-manifest.json` | 
 | `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, and DAO governance proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other three: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
-| Events | ⚠️ Escrow + Multi-Sig + DAO | Full lifecycle events on escrow, multi-sig wallet, and DAO governance |
+| Events | ✅ Escrow + Multi-Sig + DAO + Marketplace + Vesting | Full lifecycle events on escrow, multi-sig wallet, DAO governance, marketplace royalties, and vesting beneficiary reassignment |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
 | SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Real transfers with transfer-before-state ordering on escrow, vesting, marketplace, DAO, and subscriptions; prepaid subscriptions add contract custody, exact balance debits, and cancellation refunds |
 | Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |

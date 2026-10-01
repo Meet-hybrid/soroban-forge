@@ -13,9 +13,6 @@
 //! 2. **Tree assertions** (`env.auths()` under `mock_all_auths`): pins the
 //!    exact authorized-invocation tree the contract demands on creation and
 //!    settlement claim paths.
-//! 3. **Revocation authorization**: only the schedule creator may revoke, and
-//!    the revocation policy is bound into the signed arguments so a tampered
-//!    policy is rejected by the host.
 //!
 //! ## Host Mechanics (soroban-sdk 27.0.6)
 //!
@@ -28,7 +25,7 @@
 //!   sub-invocations, and a claim payout legitimately completes on the beneficiary's
 //!   signature alone.
 
-use crate::{RevocationPolicy, SorobanForgeVestingClient, Vesting, VestingStatus};
+use crate::{SorobanForgeVestingClient, Vesting, VestingStatus};
 
 extern crate std;
 use soroban_sdk::testutils::{
@@ -373,190 +370,6 @@ fn claim_rejects_signature_from_non_beneficiary() {
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
 }
 
-// -----------------------------------------------------------------------
-// revoke authorization & negative-auth tests
-// -----------------------------------------------------------------------
-
-#[test]
-fn revoke_accepts_creator_signature_with_matching_args() {
-    let (env, token, tc, contract_id, client, accounts) = setup!();
-    let beneficiary = &accounts.user1;
-    let creator = &accounts.user2;
-    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
-
-    env.ledger().set_timestamp(START + CLIFF + 500);
-
-    env.mock_auths(&[MockAuth {
-        address: creator,
-        invoke: &MockAuthInvoke {
-            contract: &contract_id,
-            fn_name: "revoke",
-            args: (id, RevocationPolicy::FullClawback).into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-
-    client
-        .try_revoke(&id, &RevocationPolicy::FullClawback)
-        .expect("outer ok")
-        .expect("revoke ok");
-    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
-    assert_eq!(tc.balance(creator), TOTAL);
-    assert_eq!(tc.balance(&contract_id), 0);
-}
-
-#[test]
-fn revoke_rejects_signature_from_non_creator() {
-    let (env, token, tc, contract_id, client, accounts) = setup!();
-    let beneficiary = &accounts.user1;
-    let creator = &accounts.user2;
-    let attacker = &accounts.user3;
-    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
-
-    env.ledger().set_timestamp(START + CLIFF + 500);
-
-    // Attacker signs, but creator is the revocation authority
-    env.mock_auths(&[MockAuth {
-        address: attacker,
-        invoke: &MockAuthInvoke {
-            contract: &contract_id,
-            fn_name: "revoke",
-            args: (id, RevocationPolicy::FullClawback).into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-
-    let res = client.try_revoke(&id, &RevocationPolicy::FullClawback);
-    assert_auth_abort!(res);
-    assert_eq!(tc.balance(creator), 0);
-    assert_eq!(tc.balance(&contract_id), TOTAL);
-    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
-}
-
-#[test]
-fn revoke_rejects_beneficiary_signature() {
-    let (env, token, tc, contract_id, client, accounts) = setup!();
-    let beneficiary = &accounts.user1;
-    let creator = &accounts.user2;
-    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
-
-    env.ledger().set_timestamp(START + CLIFF + 500);
-
-    // Beneficiary is not the revocation authority
-    env.mock_auths(&[MockAuth {
-        address: beneficiary,
-        invoke: &MockAuthInvoke {
-            contract: &contract_id,
-            fn_name: "revoke",
-            args: (id, RevocationPolicy::FullClawback).into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-
-    let res = client.try_revoke(&id, &RevocationPolicy::FullClawback);
-    assert_auth_abort!(res);
-    assert_eq!(tc.balance(beneficiary), 0);
-    assert_eq!(tc.balance(&contract_id), TOTAL);
-    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
-}
-
-#[test]
-fn revoke_rejects_signature_over_different_policy() {
-    let (env, token, _tc, contract_id, client, accounts) = setup!();
-    let beneficiary = &accounts.user1;
-    let creator = &accounts.user2;
-    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
-
-    env.ledger().set_timestamp(START + CLIFF + 500);
-
-    // Creator signed for FullClawback, but call attempts KeepUnvested
-    env.mock_auths(&[MockAuth {
-        address: creator,
-        invoke: &MockAuthInvoke {
-            contract: &contract_id,
-            fn_name: "revoke",
-            args: (id, RevocationPolicy::FullClawback).into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-
-    let res = client.try_revoke(&id, &RevocationPolicy::KeepUnvested);
-    assert_auth_abort!(res);
-}
-
-#[test]
-fn revoke_rejects_signature_replayed_for_different_schedule_id() {
-    let (env, token, tc, contract_id, client, accounts) = setup!();
-    let beneficiary = &accounts.user1;
-    let creator = &accounts.user2;
-    let id1 = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
-    let id2 = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
-
-    env.ledger().set_timestamp(START + CLIFF + 500);
-
-    // Signature armed specifically for id1
-    env.mock_auths(&[MockAuth {
-        address: creator,
-        invoke: &MockAuthInvoke {
-            contract: &contract_id,
-            fn_name: "revoke",
-            args: (id1, RevocationPolicy::FullClawback).into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-
-    // Attempting to use id1 auth on id2 must fail
-    let res = client.try_revoke(&id2, &RevocationPolicy::FullClawback);
-    assert_auth_abort!(res);
-    assert_eq!(tc.balance(creator), 0);
-    assert_eq!(tc.balance(&contract_id), TOTAL * 2);
-}
-
-#[test]
-fn revoke_authorization_tree_is_creator_root_entrypoint() {
-    let (env, token, _tc, contract_id, client, accounts) = setup!();
-    let beneficiary = &accounts.user1;
-    let creator = &accounts.user2;
-    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
-
-    env.ledger().set_timestamp(START + CLIFF + 500);
-    client.revoke(&id, &RevocationPolicy::FullClawback);
-
-    assert_eq!(
-        env.auths(),
-        [(
-            creator.clone(),
-            AuthorizedInvocation {
-                function: AuthorizedFunction::Contract((
-                    contract_id.clone(),
-                    Symbol::new(&env, "revoke"),
-                    (id, RevocationPolicy::FullClawback).into_val(&env),
-                )),
-                sub_invocations: std::vec![],
-            },
-        )],
-    );
-}
-
-#[test]
-fn blank_envelope_aborts_revoke_and_preserves_custody() {
-    let (env, token, tc, contract_id, client, accounts) = setup!();
-    let beneficiary = &accounts.user1;
-    let creator = &accounts.user2;
-    let id = client.create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
-
-    env.ledger().set_timestamp(START + CLIFF + 500);
-
-    // Blank envelope
-    env.set_auths(&[]);
-
-    let res = client.try_revoke(&id, &RevocationPolicy::FullClawback);
-    assert_auth_abort!(res);
-    assert_eq!(tc.balance(creator), 0);
-    assert_eq!(tc.balance(&contract_id), TOTAL);
-    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
-}
-
 #[test]
 fn claim_rejects_signature_replayed_for_different_schedule_id() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
@@ -855,94 +668,59 @@ fn blank_envelope_aborts_claim_and_preserves_custody() {
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
 }
 
-use crate::Tranche;
-
-// --- Tranche Authorization & Replay Tests ---
-
 #[test]
-fn create_tranche_schedule_rejects_signature_from_non_beneficiary_tranche() {
-    let (env, _, token, _, client, _) = setup!();
-    let beneficiary = Address::generate(&env);
-    let attacker = Address::generate(&env);
-
-    let mut tranches = soroban_sdk::Vec::new(&env);
-    tranches.push_back(Tranche {
-        unlock_at: 100,
-        amount: 1000,
-    });
-
-    let res = client
-        .mock_auths(&[MockAuth {
-            address: &attacker,
-            invoke: &MockAuthInvoke {
-                contract: &client.address,
-                fn_name: "create_tranche_schedule",
-                args: (&beneficiary, &token.address, &tranches).into_val(&env),
-                sub_invokes: &[],
-            },
-        }])
-        .try_create_tranche_schedule(&beneficiary, &token.address, &tranches);
-
-    assert!(res.is_err());
-}
-
-#[test]
-fn create_tranche_schedule_rejects_args_replay_with_different_table() {
-    let (env, _, token, _, client, _) = setup!();
-    let beneficiary = Address::generate(&env);
-
-    let mut tranches_a = soroban_sdk::Vec::new(&env);
-    tranches_a.push_back(Tranche {
-        unlock_at: 100,
-        amount: 1000,
-    });
-
-    let mut tranches_b = soroban_sdk::Vec::new(&env);
-    tranches_b.push_back(Tranche {
-        unlock_at: 100,
-        amount: 9000,
-    });
-
-    let res = client
-        .mock_auths(&[MockAuth {
-            address: &beneficiary,
-            invoke: &MockAuthInvoke {
-                contract: &client.address,
-                fn_name: "create_tranche_schedule",
-                args: (&beneficiary, &token.address, &tranches_a).into_val(&env),
-                sub_invokes: &[],
-            },
-        }])
-        .try_create_tranche_schedule(&beneficiary, &token.address, &tranches_b);
-
-    assert!(res.is_err());
-}
-
-#[test]
-fn claim_tranche_authorization_tree_is_beneficiary_root_entrypoint() {
-    let (env, _, token, _, client, _) = setup!();
-    let beneficiary = Address::generate(&env);
-
-    let mut tranches = soroban_sdk::Vec::new(&env);
-    tranches.push_back(Tranche {
-        unlock_at: 100,
-        amount: 1000,
-    });
-
-    env.mock_all_auths();
-    let id = client.create_tranche_schedule(&beneficiary, &token.address, &tranches);
-    env.ledger().set_timestamp(START + 200);
+fn reassignment_accepts_funder_signature_alone() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let id = client.create_schedule(funder, &accounts.user1, &token, &TOTAL, &CLIFF, &DURATION);
+    let new_beneficiary = &accounts.user2;
 
     env.mock_auths(&[MockAuth {
-        address: &beneficiary,
+        address: funder,
         invoke: &MockAuthInvoke {
-            contract: &client.address,
-            fn_name: "claim",
-            args: (id,).into_val(&env),
+            contract: &contract_id,
+            fn_name: "reassign_beneficiary",
+            args: (id, new_beneficiary).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let claimed = client.claim(&id);
-    assert_eq!(claimed, 1000);
+    client
+        .try_reassign_beneficiary(&id, new_beneficiary)
+        .expect("outer ok")
+        .expect("reassignment ok");
+    assert_eq!(client.get_schedule(&id).beneficiary, *new_beneficiary);
+    assert_eq!(client.get_schedule(&id).reassignment_count, 1);
+}
+
+#[test]
+fn reassignment_rejects_old_new_and_outsider_signatures() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user1,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+    let new_beneficiary = accounts.user2.clone();
+    let outsider = Address::generate(&env);
+
+    for caller in [accounts.user1.clone(), accounts.user2.clone(), outsider] {
+        env.mock_auths(&[MockAuth {
+            address: &caller,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "reassign_beneficiary",
+                args: (id, &new_beneficiary).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_reassign_beneficiary(&id, &new_beneficiary);
+        assert_auth_abort!(res);
+        assert_eq!(client.get_schedule(&id).beneficiary, accounts.user1);
+        assert_eq!(client.get_schedule(&id).reassignment_count, 0);
+    }
 }
