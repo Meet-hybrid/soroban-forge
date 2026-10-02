@@ -20,15 +20,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli
+      # soroban-sdk 28 requires a spec-shaking build system (stellar-cli
+      # 25.2+); plain `cargo build --target wasm32v1-none` is rejected by the
+      # SDK build script.
       - name: Build contracts to WASM
         run: |
-          cargo build --locked --release --target wasm32v1-none \
-            -p soroban-forge-escrow \
-            -p soroban-forge-vesting \
-            -p soroban-forge-multi-sig-wallet \
-            -p soroban-forge-dao-governance \
-            -p soroban-forge-subscription-payments \
-            -p soroban-forge-marketplace-royalties
+          # The workspace's cdylib crates are exactly the contract crates.
+          stellar contract build --locked --profile release --optimize=false
       - name: Collect artifacts
         run: |
           mkdir -p artifacts
