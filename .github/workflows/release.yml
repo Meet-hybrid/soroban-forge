@@ -21,7 +21,16 @@ jobs:
         with:
           key: release
       - name: Install stellar-cli
-        run: cargo install --locked stellar-cli
+        # Pinned prebuilt binary: unpinned `cargo install` compiles for ~10
+        # minutes and tracks latest (28.1.0 needs libdbus, absent on runners).
+        # 28.0.0 matches the locally verified build toolchain.
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            https://github.com/stellar/stellar-cli/releases/download/v28.0.0/stellar-cli-28.0.0-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/stellar" --version
       # soroban-sdk 28 requires a spec-shaking build system (stellar-cli
       # 25.2+); plain `cargo build --target wasm32v1-none` is rejected by the
       # SDK build script.
