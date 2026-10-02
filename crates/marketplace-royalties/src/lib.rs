@@ -70,11 +70,9 @@
 #[cfg(test)]
 extern crate std;
 
-use soroban_forge_shared_utils::{
-    bump_entry as shared_bump_entry, transfer_tokens, ForgeError, TTLHelper,
-};
+use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
 use soroban_sdk::{
-    contract, contractclient, contractevent, contractimpl, contracttype, Address, Env,
+    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env,
 };
 
 /// Maximum number of sales one `settle_sales` invocation may settle,
@@ -115,18 +113,6 @@ pub trait SorobanForgeMarketplaceRoyalties {
         bps: u32,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
-    /// Disable royalty enforcement while retaining the configured recipient and rate.
-    fn disable_royalty(
-        env: Env,
-        collection: Address,
-    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
-
-    /// Re-enable a previously disabled royalty configuration.
-    fn enable_royalty(
-        env: Env,
-        collection: Address,
-    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
-
     /// Atomically replace all recipients in the collection's split.
     fn set_royalty_splits(
         env: Env,
@@ -155,7 +141,6 @@ pub trait SorobanForgeMarketplaceRoyalties {
     fn settle_sale(
         env: Env,
         collection: Address,
-        token_id: u64,
         token: Address,
         payer: Address,
         seller: Address,
@@ -195,33 +180,6 @@ pub trait SorobanForgeMarketplaceRoyalties {
         env: Env,
         collection: Address,
     ) -> Result<Royalty, soroban_forge_shared_utils::ForgeError>;
-
-    /// Register or update the royalty override for a specific `token_id`.
-    /// Token overrides take precedence over the collection config.
-    fn set_token_royalty(
-        env: Env,
-        collection: Address,
-        token_id: u64,
-        recipient: Address,
-        bps: u32,
-    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
-
-    /// Clear the royalty override for a specific `token_id`, falling back
-    /// to the collection config.
-    fn clear_token_royalty(
-        env: Env,
-        collection: Address,
-        token_id: u64,
-    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
-
-    /// Read the royalty override for a specific `token_id`.
-    /// Returns `Ok(Some(Royalty))` if an override is set, or `Ok(None)` if
-    /// there is no override.
-    fn get_token_royalty(
-        env: Env,
-        collection: Address,
-        token_id: u64,
-    ) -> Result<Option<Royalty>, soroban_forge_shared_utils::ForgeError>;
 
     /// Read the cumulative settlement totals for `collection` (read-only
     /// view); `NotFound` until the first successful settlement.
@@ -267,9 +225,6 @@ pub trait SorobanForgeMarketplaceRoyalties {
         env: Env,
         collection: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
-
-    /// Read the TTL helper's configured minimum TTL threshold (read-only view).
-    fn get_ttl_min(env: Env) -> u32;
 }
 
 /// Lifecycle state of a registered royalty configuration.
@@ -361,9 +316,6 @@ fn bump_entry(env: &Env, key: &DataKey) {
 enum DataKey {
     /// The royalty configuration for `Address` collection (persistent storage).
     Royalty(Address),
-    /// The per-token royalty override for a specific token in `Address` collection.
-    TokenRoyalty(Address, u64),
-    /// The cumulative settlement totals for `Address` collection.
     /// The cumulative settlement totals for `Address` collection (persistent storage).
     Summary(Address),
     /// Split vector. Older deployments may not have this key. Appended to
@@ -452,49 +404,6 @@ impl MarketplaceRoyalties {
         Ok(())
     }
 
-    /// Disable royalties for `collection`, retaining its stored configuration.
-    pub fn disable_royalty(env: Env, collection: Address) -> Result<(), ForgeError> {
-        Self::transition_status(
-            &env,
-            &collection,
-            RoyaltyStatus::Active,
-            RoyaltyStatus::Disabled,
-        )
-    }
-
-    /// Re-enable royalties for `collection` with its original recipient and rate.
-    pub fn enable_royalty(env: Env, collection: Address) -> Result<(), ForgeError> {
-        Self::transition_status(
-            &env,
-            &collection,
-            RoyaltyStatus::Disabled,
-            RoyaltyStatus::Active,
-        )
-    }
-
-    fn transition_status(
-        env: &Env,
-        collection: &Address,
-        expected: RoyaltyStatus,
-        next: RoyaltyStatus,
-    ) -> Result<(), ForgeError> {
-        let key = DataKey::Royalty(collection.clone());
-        let mut royalty: Royalty = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ForgeError::NotFound)?;
-        if royalty.status != expected {
-            return Err(ForgeError::InvalidInput);
-        }
-        collection.require_auth();
-        royalty.status = next;
-        env.storage().persistent().set(&key, &royalty);
-        bump_entry(env, &key);
-        Ok(())
-    }
-
-    /// Compute the royalty split for a sale.
     /// Distribute the royalty share of `amount` from a sale of `collection`
     /// in `token`.
     ///
@@ -592,13 +501,16 @@ impl MarketplaceRoyalties {
     pub fn settle_sale(
         env: Env,
         collection: Address,
-        token_id: u64,
         token: Address,
         payer: Address,
         seller: Address,
         amount: i128,
     ) -> Result<Settlement, ForgeError> {
-        let royalty = active_royalty(&env, &collection, token_id)?;
+        let royalty: Royalty = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Royalty(collection.clone()))
+            .ok_or(ForgeError::NotFound)?;
         if amount <= 0 {
             return Err(ForgeError::InvalidInput);
         }
@@ -616,7 +528,7 @@ impl MarketplaceRoyalties {
         // and the royalty recipient last, so the protected party is only
         // ever paid when everything before it already succeeded.
         if seller_net > 0 {
-            transfer_tokens(&env, &token, &payer, &seller, seller_net)?;
+            transfer(&env, &token, &payer, &seller, seller_net)?;
         }
         for (index, recipient) in recipients.iter().enumerate() {
             let share = shares.get(index as u32).ok_or(ForgeError::InvalidInput)?;
@@ -735,7 +647,7 @@ impl MarketplaceRoyalties {
             let (seller, amount) = sales.get(i).ok_or(ForgeError::InvalidInput)?;
             let settlement = settlements.get(i).ok_or(ForgeError::InvalidInput)?;
             if settlement.seller_net > 0 {
-                transfer_tokens(&env, &token, &payer, &seller, settlement.seller_net)?;
+                transfer(&env, &token, &payer, &seller, settlement.seller_net)?;
             }
             let shares = per_sale_shares.get(i).ok_or(ForgeError::InvalidInput)?;
             for (index, recipient) in recipients.iter().enumerate() {
@@ -789,25 +701,6 @@ impl MarketplaceRoyalties {
         }
         bump_entry(&env, &summary_key);
 
-        // Emit one `SaleSettled` per sale, mirroring `settle_sale`, so
-        // off-chain indexers see identical events whether a sale settled
-        // alone or as part of a batch.
-        for i in 0..count {
-            let (seller, amount) = sales.get(i).ok_or(ForgeError::InvalidInput)?;
-            let settlement = settlements.get(i).ok_or(ForgeError::InvalidInput)?;
-            events::sale_settled(
-                &env,
-                &collection,
-                &token,
-                &payer,
-                &seller,
-                &royalty.recipient,
-                amount,
-                settlement.seller_net,
-                settlement.royalty_share,
-            );
-        }
-
         Ok(settlements)
     }
 
@@ -817,60 +710,6 @@ impl MarketplaceRoyalties {
             .persistent()
             .get(&DataKey::Royalty(collection))
             .ok_or(ForgeError::NotFound)
-    }
-
-    /// Register or update a royalty override for a specific token.
-    ///
-    /// Token overrides take absolute precedence over the collection config.
-    /// Re-registration updates the existing token override in place.
-    pub fn set_token_royalty(
-        env: Env,
-        collection: Address,
-        token_id: u64,
-        recipient: Address,
-        bps: u32,
-    ) -> Result<(), ForgeError> {
-        if bps > 10_000 {
-            return Err(ForgeError::InvalidInput);
-        }
-        collection.require_auth();
-
-        let royalty = Royalty {
-            collection: collection.clone(),
-            recipient,
-            bps,
-            status: RoyaltyStatus::Active,
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::TokenRoyalty(collection, token_id), &royalty);
-        Ok(())
-    }
-
-    /// Clear a royalty override for a specific token, restoring the collection config.
-    pub fn clear_token_royalty(
-        env: Env,
-        collection: Address,
-        token_id: u64,
-    ) -> Result<(), ForgeError> {
-        collection.require_auth();
-        env.storage()
-            .instance()
-            .remove(&DataKey::TokenRoyalty(collection, token_id));
-        Ok(())
-    }
-
-    /// Read the royalty override for a specific token (read-only view).
-    /// Returns `Ok(Some(Royalty))` if an override is set, or `Ok(None)` if not.
-    pub fn get_token_royalty(
-        env: Env,
-        collection: Address,
-        token_id: u64,
-    ) -> Result<Option<Royalty>, ForgeError> {
-        Ok(env
-            .storage()
-            .instance()
-            .get(&DataKey::TokenRoyalty(collection, token_id)))
     }
 
     /// Read the cumulative settlement totals for `collection` (read-only
@@ -943,22 +782,6 @@ impl MarketplaceRoyalties {
             bump_entry(&env, &summary_key);
         }
         Ok(())
-    }
-}
-
-/// Helper to resolve the active royalty config (token override > collection config).
-fn active_royalty(env: &Env, collection: &Address, token_id: u64) -> Result<Royalty, ForgeError> {
-    if let Some(token_royalty) = env
-        .storage()
-        .instance()
-        .get::<_, Royalty>(&DataKey::TokenRoyalty(collection.clone(), token_id))
-    {
-        Ok(token_royalty)
-    } else {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Royalty(collection.clone()))
-            .ok_or(ForgeError::NotFound)
     }
 }
 
@@ -1078,6 +901,32 @@ fn next_summary(
         },
     };
     Ok(summary)
+}
+
+/// Move `amount` of `token` from `from` to `to`.
+///
+/// Same typed-error bucketing as escrow: a client receiving
+/// `Error(Contract, #N)` cannot know whether `N` came from the token or this
+/// contract, so every token-side failure collapses into
+/// [`ForgeError::TokenTransferFailed`] and the raw discriminant is
+/// discarded; the root cause remains visible in the transaction's
+/// diagnostic events. The payer's authorization on the calling entrypoint
+/// covers the nested token invocation — no allowance is needed for a
+/// `transfer` pull when the holder authorizes the call.
+fn transfer(
+    env: &Env,
+    token: &Address,
+    from: &Address,
+    to: &Address,
+    amount: i128,
+) -> Result<(), ForgeError> {
+    match token::TokenClient::new(env, token).try_transfer(from, to, &amount) {
+        Ok(Ok(())) => Ok(()),
+        // Token returned a typed error (insufficient balance, missing
+        // trustline, custom token logic) or the host aborted (most commonly
+        // an undeployed token address).
+        _ => Err(ForgeError::TokenTransferFailed),
+    }
 }
 
 /// Lifecycle events emitted by the marketplace royalties contract.
@@ -1203,39 +1052,6 @@ mod tests {
         assert_eq!(royalty.recipient, accounts.user2);
         assert_eq!(royalty.bps, 500);
         assert_eq!(royalty.status, RoyaltyStatus::Active);
-    }
-
-    #[test]
-    fn royalty_can_be_disabled_and_reenabled_without_losing_config() {
-        let (_env, client, accounts) = setup!();
-        let original = client.get_royalty(&accounts.arbiter);
-        client.disable_royalty(&accounts.arbiter);
-        let disabled = client.get_royalty(&accounts.arbiter);
-        assert_eq!(disabled.status, RoyaltyStatus::Disabled);
-        assert_eq!(
-            client
-                .try_disable_royalty(&accounts.arbiter)
-                .unwrap_err()
-                .unwrap(),
-            ForgeError::InvalidInput
-        );
-        client.enable_royalty(&accounts.arbiter);
-        assert_eq!(
-            client.get_royalty(&accounts.arbiter).status,
-            RoyaltyStatus::Active
-        );
-        assert_eq!(
-            client.get_royalty(&accounts.arbiter).recipient,
-            original.recipient
-        );
-        assert_eq!(client.get_royalty(&accounts.arbiter).bps, original.bps);
-        assert_eq!(
-            client
-                .try_enable_royalty(&accounts.arbiter)
-                .unwrap_err()
-                .unwrap(),
-            ForgeError::InvalidInput
-        );
     }
 
     #[test]
@@ -1540,67 +1356,6 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // per-token royalties
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn token_royalty_override_precedence_and_clear() {
-        let (_env, client, accounts) = setup!();
-        let token_id = 42_u64;
-
-        // Verify no override initially
-        assert!(client
-            .get_token_royalty(&accounts.arbiter, &token_id)
-            .is_none());
-
-        // Set token override to 10% (1_000 bps) for user3
-        client.set_token_royalty(&accounts.arbiter, &token_id, &accounts.user3, &1_000_u32);
-        let token_royalty = client
-            .get_token_royalty(&accounts.arbiter, &token_id)
-            .unwrap();
-        assert_eq!(token_royalty.recipient, accounts.user3);
-        assert_eq!(token_royalty.bps, 1_000);
-
-        // Update in-place to 20%
-        client.set_token_royalty(&accounts.arbiter, &token_id, &accounts.user3, &2_000_u32);
-        let updated = client
-            .get_token_royalty(&accounts.arbiter, &token_id)
-            .unwrap();
-        assert_eq!(updated.bps, 2_000);
-        assert_eq!(updated.recipient, accounts.user3);
-
-        // Clear restores the None state (settlements fall back to the
-        // collection config; override precedence at settlement time is
-        // covered by settle_sale_applies_token_royalty_override).
-        client.clear_token_royalty(&accounts.arbiter, &token_id);
-        assert!(client
-            .get_token_royalty(&accounts.arbiter, &token_id)
-            .is_none());
-    }
-
-    #[test]
-    fn token_royalty_on_unregistered_collection_is_allowed() {
-        let (_env, client, accounts) = setup!();
-        let token_id = 42_u64;
-        // accounts.validator has no collection config
-
-        client.set_token_royalty(&accounts.validator, &token_id, &accounts.user3, &1_000_u32);
-
-        // The override is stored and readable even without a collection config
-        let token_royalty = client
-            .get_token_royalty(&accounts.validator, &token_id)
-            .unwrap();
-        assert_eq!(token_royalty.recipient, accounts.user3);
-        assert_eq!(token_royalty.bps, 1_000);
-
-        // Clearing removes it entirely
-        client.clear_token_royalty(&accounts.validator, &token_id);
-        assert!(client
-            .get_token_royalty(&accounts.validator, &token_id)
-            .is_none());
-    }
-
-    // -------------------------------------------------------------------
     // settle_sale — atomic SEP-41 settlement against a real token
     // -------------------------------------------------------------------
 
@@ -1612,7 +1367,7 @@ mod tests {
         let seller = &accounts.user3;
         let collection = &accounts.arbiter;
 
-        let settled = client.settle_sale(collection, &1_u64, &token, payer, seller, &1_000_i128);
+        let settled = client.settle_sale(collection, &token, payer, seller, &1_000_i128);
 
         // 5% of 1000 = 50 for the recipient, 950 for the seller — exact.
         assert_eq!(settled.royalty_share, 50);
@@ -1637,9 +1392,9 @@ mod tests {
         let seller = &accounts.user3;
         let collection = &accounts.arbiter;
 
-        client.settle_sale(collection, &1_u64, &token, payer, seller, &1_000_i128);
+        client.settle_sale(collection, &token, payer, seller, &1_000_i128);
         StellarAssetClient::new(&env, &token).mint(payer, &1_000_i128);
-        client.settle_sale(collection, &2_u64, &token, payer, seller, &1_000_i128);
+        client.settle_sale(collection, &token, payer, seller, &1_000_i128);
 
         let summary = client.get_settlement_summary(collection);
         assert_eq!(summary.sales, 2);
@@ -1656,7 +1411,7 @@ mod tests {
         let collection = &accounts.arbiter;
         client.set_royalty(collection, recipient, &0_u32);
 
-        let settled = client.settle_sale(collection, &1_u64, &token, payer, seller, &1_000_i128);
+        let settled = client.settle_sale(collection, &token, payer, seller, &1_000_i128);
 
         assert_eq!(settled.royalty_share, 0);
         assert_eq!(settled.seller_net, 1_000);
@@ -1667,32 +1422,15 @@ mod tests {
 
     #[test]
     fn settle_disabled_config_settles_in_full_to_seller() {
-        let (_env, token, tc, _contract_id, client, accounts) = setup_settlement!();
-        let payer = &accounts.user1;
-        let recipient = &accounts.user2;
-        let seller = &accounts.user3;
-        let collection = &accounts.arbiter;
-
-        client.disable_royalty(collection);
-
-        let settled = client.settle_sale(collection, &1_u64, &token, payer, seller, &1_000_i128);
-
-        assert_eq!(settled.royalty_share, 0);
-        assert_eq!(settled.seller_net, 1_000);
-        assert_eq!(tc.balance(seller), 1_000);
-        assert_eq!(tc.balance(recipient), 0);
-    }
-
-    #[test]
-    fn settle_disabled_collection_with_active_token_override() {
         let (env, token, tc, contract_id, client, accounts) = setup_settlement!();
         let payer = &accounts.user1;
         let recipient = &accounts.user2;
         let seller = &accounts.user3;
         let collection = &accounts.arbiter;
-        let token_id = 42_u64;
 
-        // Disable collection
+        // `set_royalty` has no public "disable" switch (it always stores
+        // `Active`), so write the `Disabled` record directly — the same gap
+        // the compute-only `distribute` suite documents.
         let disabled = Royalty {
             collection: collection.clone(),
             recipient: recipient.clone(),
@@ -1705,16 +1443,11 @@ mod tests {
                 .set(&DataKey::Royalty(collection.clone()), &disabled);
         });
 
-        // Set active override for token_id to 10% (1_000 bps) to validator
-        // (distinct from the fixture's seller, who is also user3).
-        client.set_token_royalty(collection, &token_id, &accounts.validator, &1_000_u32);
+        let settled = client.settle_sale(collection, &token, payer, seller, &1_000_i128);
 
-        let settled = client.settle_sale(collection, &token_id, &token, payer, seller, &1_000_i128);
-
-        assert_eq!(settled.royalty_share, 100);
-        assert_eq!(settled.seller_net, 900);
-        assert_eq!(tc.balance(seller), 900);
-        assert_eq!(tc.balance(&accounts.validator), 100);
+        assert_eq!(settled.royalty_share, 0);
+        assert_eq!(settled.seller_net, 1_000);
+        assert_eq!(tc.balance(seller), 1_000);
         assert_eq!(tc.balance(recipient), 0);
     }
 
@@ -1727,7 +1460,7 @@ mod tests {
         let collection = &accounts.arbiter;
         client.set_royalty(collection, recipient, &10_000_u32);
 
-        let settled = client.settle_sale(collection, &1_u64, &token, payer, seller, &1_000_i128);
+        let settled = client.settle_sale(collection, &token, payer, seller, &1_000_i128);
 
         assert_eq!(settled.royalty_share, 1_000);
         assert_eq!(settled.seller_net, 0);
@@ -1744,7 +1477,7 @@ mod tests {
 
         for amount in [0_i128, -100] {
             let err = client
-                .try_settle_sale(collection, &1_u64, &token, payer, seller, &amount)
+                .try_settle_sale(collection, &token, payer, seller, &amount)
                 .unwrap_err()
                 .unwrap();
             assert_eq!(err, ForgeError::InvalidInput);
@@ -1760,7 +1493,7 @@ mod tests {
         let unregistered = &accounts.validator; // never configured
 
         let err = client
-            .try_settle_sale(unregistered, &1_u64, &token, payer, seller, &1_000_i128)
+            .try_settle_sale(unregistered, &token, payer, seller, &1_000_i128)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::NotFound);
@@ -1778,7 +1511,7 @@ mod tests {
 
         // Split math avoids the overflowing intermediate multiplication.
         let err = client
-            .try_settle_sale(collection, &1_u64, &token, payer, seller, &i128::MAX)
+            .try_settle_sale(collection, &token, payer, seller, &i128::MAX)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::TokenTransferFailed);
@@ -1840,7 +1573,7 @@ mod tests {
         // The payer holds 1_000; a 10_000 sale needs 9_500 for the seller
         // first, so the very first transfer already fails at the token.
         let err = client
-            .try_settle_sale(collection, &1_u64, &token, payer, seller, &10_000_i128)
+            .try_settle_sale(collection, &token, payer, seller, &10_000_i128)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::TokenTransferFailed);
@@ -1868,7 +1601,7 @@ mod tests {
         // The host aborts inside `try_transfer`; the failure is bucketed
         // exactly like escrow's undeployed-token path.
         let err = client
-            .try_settle_sale(collection, &1_u64, &not_a_token, payer, seller, &1_000_i128)
+            .try_settle_sale(collection, &not_a_token, payer, seller, &1_000_i128)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::TokenTransferFailed);
@@ -1900,7 +1633,7 @@ mod tests {
         // payment, no settlement state, and the invocation rollback
         // restores the payer's and seller's balances.
         let err = client
-            .try_settle_sale(collection, &1_u64, &token, payer, seller, &1_030_i128)
+            .try_settle_sale(collection, &token, payer, seller, &1_030_i128)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::TokenTransferFailed);
@@ -2030,7 +1763,6 @@ mod tests {
             };
             single.push_back(client_a.settle_sale(
                 &accounts_a.arbiter,
-                &1_u64,
                 &token_a,
                 &accounts_a.user1,
                 seller,
@@ -2080,7 +1812,7 @@ mod tests {
 
         let batch = sales_of(&env, &[(seller_a.clone(), 200), (seller_b.clone(), 100)]);
         client.settle_sales(collection, &token, payer, &batch);
-        client.settle_sale(collection, &1_u64, &token, payer, seller_a, &400_i128);
+        client.settle_sale(collection, &token, payer, seller_a, &400_i128);
 
         let summary = client.get_settlement_summary(collection);
         assert_eq!(summary.sales, 3);
@@ -2273,7 +2005,7 @@ mod tests {
         let collection = &accounts.arbiter;
         client.set_royalty(collection, recipient, &0_u32);
 
-        client.settle_sale(collection, &1_u64, &token, payer, seller, &100_i128);
+        client.settle_sale(collection, &token, payer, seller, &100_i128);
 
         // At 0 bps the split of `i128::MAX` is exact (share 0), so the
         // failure can only come from the aggregate check against the stored
@@ -2445,7 +2177,6 @@ mod tests {
         let collection = &accounts.arbiter;
         client.settle_sale(
             collection,
-            &1_u64,
             &token,
             &accounts.user1,
             &accounts.user3,
@@ -2474,7 +2205,6 @@ mod tests {
         client.set_royalty(collection, &accounts.user2, &500_u32);
         client.settle_sale(
             collection,
-            &1_u64,
             &token,
             &accounts.user1,
             &accounts.user3,
@@ -2504,7 +2234,6 @@ mod tests {
 
         let settlement = client.settle_sale(
             collection,
-            &1_u64,
             &token,
             &accounts.user1,
             &accounts.user3,
@@ -2536,7 +2265,6 @@ mod tests {
 
             let settlement = client.settle_sale(
                 collection,
-                &1_u64,
                 &token,
                 &accounts.user1,
                 &accounts.user3,
@@ -2620,7 +2348,6 @@ mod tests {
 
         let settlement = client.settle_sale(
             collection,
-            &1_u64,
             &token,
             &accounts.user1,
             &accounts.user3,

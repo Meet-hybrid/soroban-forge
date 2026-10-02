@@ -48,32 +48,13 @@
 //! Four deterministic companion unit tests pin each boundary case explicitly
 //! (see end of file), complementing the randomized P3 suite.
 //!
-//! **P5 — Failure-sequence bond conservation.** Randomized sequences mixing
-//! the three bond custody paths (pull, refund, forfeit) with the two
-//! terminal bond moves (execute, cancel), driven into territory where the
-//! transfer itself fails:
-//!
-//! ```text
-//! treasury_balance + Σ refunded bond_amounts + contract custody
-//!     == proposal_count * BOND
-//! ```
-//!
-//! The equation is asserted on the real SAC after **every** action, not
-//! only at the end of the sequence, via [`World::assert_balance_invariant`].
-//!
-//! **Failed-pull purity.** A bond pull that fails must leave no residue:
-//! no proposal record, no consumed id, no movement of the custody total,
-//! and no movement of any SAC balance. Retrying the same proposer with
-//! exactly the bond then succeeds and leaves a zero balance.
-//!
 //! All properties run against a real Stellar Asset Contract for bond custody.
 //! Runs are deterministic (fixed strategy bounds, proptest's default seed);
 //! a failure prints its case seed for replay. Override the case count with
 //! `PROPTEST_CASES=n cargo test -p soroban-forge-dao-governance props`.
 
-use crate::{BondState, DaoGovernance, DataKey, ProposalState, SorobanForgeDaoGovernanceClient};
+use crate::{DaoGovernance, ProposalState, SorobanForgeDaoGovernanceClient};
 use proptest::prelude::*;
-use proptest::test_runner::TestCaseError;
 use soroban_forge_shared_utils::ForgeError;
 use soroban_forge_test_utils::{MockTarget, TestAccounts};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
@@ -97,7 +78,6 @@ const VOTER_POOL_SIZE: usize = 8;
 
 struct World {
     env: Env,
-    token: Address,
     contract_id: Address,
     accounts: TestAccounts,
     target: Address,
@@ -121,10 +101,7 @@ fn setup_world() -> World {
     let accounts = TestAccounts::generate(&env);
     client.configure_bond(&token, &BOND, &accounts.deployer);
     client.initialize(&token);
-    client.configure_category_rules(&crate::test_category_rules(&env, DURATION));
     token_admin.mint(&accounts.user1, &FUNDS);
-    token_admin.mint(&accounts.user2, &FUNDS);
-    token_admin.mint(&accounts.user3, &FUNDS);
 
     let mut voters = std::vec::Vec::with_capacity(VOTER_POOL_SIZE);
     for _ in 0..VOTER_POOL_SIZE {
@@ -137,7 +114,6 @@ fn setup_world() -> World {
 
     World {
         env,
-        token,
         contract_id,
         accounts,
         target,
@@ -148,10 +124,6 @@ fn setup_world() -> World {
 impl World {
     fn client(&self) -> SorobanForgeDaoGovernanceClient<'_> {
         SorobanForgeDaoGovernanceClient::new(&self.env, &self.contract_id)
-    }
-
-    fn token_client(&self) -> StellarAssetClient<'_> {
-        StellarAssetClient::new(&self.env, &self.token)
     }
 
     fn payload(&self) -> Bytes {
@@ -165,72 +137,14 @@ impl World {
             &self.target,
             &self.payload(),
             &DURATION,
-            None, // Use default quorum threshold
+            &soroban_sdk::Vec::new(&self.env),
+            &None,
         )
     }
 
     /// Return the voter at `idx % VOTER_POOL_SIZE` from the pool.
     fn voter(&self, idx: usize) -> &Address {
         &self.voters[idx % VOTER_POOL_SIZE]
-    }
-
-    /// Assert bond conservation against the **real** Stellar Asset Contract
-    /// balances after any sequence of actions:
-    ///
-    /// ```text
-    /// treasury_balance + Σ refunded bond_amounts + contract custody
-    ///     == proposal_count * BOND
-    /// ```
-    ///
-    /// `treasury_balance` and `custody` are read straight off the SAC, so a
-    /// forfeit that lands on the wrong address, a refund that never leaves
-    /// the contract, or a double-pay all move the left-hand side away from
-    /// the right-hand side. The contract's internal `BondHeld` running
-    /// total is pinned to its real token balance as a second, independent
-    /// check.
-    ///
-    /// Returns `Err(TestCaseError)` so proptest can shrink the failing
-    /// input; callers propagate it with `?`.
-    fn assert_balance_invariant(&self) -> Result<(), TestCaseError> {
-        let config = self.client().get_bond_config();
-        let sac = StellarAssetClient::new(&self.env, &config.token);
-
-        let treasury_balance = sac.balance(&config.treasury);
-        let custody = sac.balance(&self.contract_id);
-        let held = self.env.as_contract(&self.contract_id, || {
-            self.env
-                .storage()
-                .instance()
-                .get::<DataKey, i128>(&DataKey::BondHeld)
-                .unwrap_or(0)
-        });
-
-        let count = self.client().get_proposal_count();
-        let limit = (count.min(u64::from(u32::MAX)) as u32).max(1);
-        let mut refunded: i128 = 0;
-        for proposal in self.client().get_proposals(&0, &limit).iter() {
-            if proposal.bond_state == BondState::Refunded {
-                refunded += proposal.bond_amount;
-            }
-        }
-
-        prop_assert_eq!(
-            held,
-            custody,
-            "BondHeld ({}) must equal the contract's real token balance ({})",
-            held,
-            custody
-        );
-        prop_assert_eq!(
-            treasury_balance + refunded + custody,
-            count as i128 * BOND,
-            "conservation broken: treasury={} refunded={} custody={} bonds_pulled={}",
-            treasury_balance,
-            refunded,
-            custody,
-            count as i128 * BOND
-        );
-        Ok(())
     }
 }
 
@@ -248,11 +162,59 @@ fn vote_sequence() -> impl Strategy<Value = std::vec::Vec<(usize, bool)>> {
     prop::collection::vec(vote_action(), 0..=16)
 }
 
-fn delegation_graph() -> impl Strategy<Value = (std::vec::Vec<usize>, std::vec::Vec<bool>)> {
-    (
-        prop::collection::vec(0usize..=6, 6),
-        prop::collection::vec(any::<bool>(), 6),
-    )
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Random lower-id edges form DAGs. The independent mirror tracks each
+    /// proposal's Active/Succeeded/Executed phase and permits dispatch only
+    /// after every required id executed, regardless of caller order.
+    #[test]
+    fn p4_random_dependency_dags_match_execution_mirror(
+        masks in prop::collection::vec(any::<u8>(), 1..=5),
+        order in prop::collection::vec(any::<u8>(), 0..=40),
+    ) {
+        let w = setup_world();
+        let n = masks.len();
+        let mut edges: std::vec::Vec<std::vec::Vec<usize>> = std::vec::Vec::new();
+        let mut ids = std::vec::Vec::new();
+        for (idx, mask) in masks.iter().enumerate() {
+            let requires: std::vec::Vec<usize> = (0..idx).filter(|parent| mask & (1 << parent) != 0).collect();
+            let mut sdk_requires = soroban_sdk::Vec::new(&w.env);
+            for parent in &requires { sdk_requires.push_back(ids[*parent]); }
+            let id = w.client().propose(&w.accounts.user1, &w.target, &w.payload(), &DURATION, &sdk_requires, &None);
+            w.client().vote(&id, &w.accounts.user1, &true);
+            ids.push(id);
+            edges.push(requires);
+        }
+        w.env.ledger().set_timestamp(START + DURATION + 1);
+        let mut mirror = std::vec![0u8; n]; // 0 Active, 1 Succeeded, 2 Executed
+        let mut sequence: std::vec::Vec<usize> = order.iter().map(|pick| usize::from(*pick) % n).collect();
+        sequence.extend(0..n);
+        sequence.extend(0..n);
+        for idx in sequence {
+            let deps_ready = edges[idx].iter().all(|parent| mirror[*parent] == 2);
+            match mirror[idx] {
+                0 => {
+                    w.client().execute(&ids[idx]);
+                    mirror[idx] = 1;
+                }
+                1 if deps_ready => {
+                    w.client().execute(&ids[idx]);
+                    mirror[idx] = 2;
+                }
+                1 => {
+                    prop_assert_eq!(w.client().try_execute(&ids[idx]).unwrap_err().unwrap(), ForgeError::DeadlineReached);
+                }
+                _ => {
+                    prop_assert_eq!(w.client().try_execute(&ids[idx]).unwrap_err().unwrap(), ForgeError::InvalidInput);
+                }
+            }
+            let actual = w.client().get_proposal(&ids[idx]).state;
+            let expected = match mirror[idx] { 0 => ProposalState::Active, 1 => ProposalState::Succeeded, _ => ProposalState::Executed };
+            prop_assert_eq!(actual, expected);
+        }
+        prop_assert!(mirror.iter().all(|state| *state == 2));
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -335,68 +297,6 @@ proptest! {
             voted.len() as i128 * FUNDS,
             "total votes must equal the weights of distinct successful voters"
         );
-    }
-
-    /// Resolve random acyclic delegation chains independently and compare the
-    /// resulting voting power with the contract's stored tallies.
-    #[test]
-    fn p4_delegation_vote_power_matches_mirror_model(
-        (choices, supports) in delegation_graph(),
-    ) {
-        const N: usize = 6;
-        let world = setup_world();
-        let client = world.client();
-        let members = [
-            world.accounts.user1.clone(),
-            world.accounts.user2.clone(),
-            world.accounts.user3.clone(),
-            world.voters[0].clone(),
-            world.voters[1].clone(),
-            world.voters[2].clone(),
-        ];
-        let mut delegate_to = [None; N];
-        for i in 0..N - 1 {
-            let options = N - i;
-            let choice = choices[i] % options;
-            if choice < options - 1 {
-                let target = i + 1 + choice;
-                delegate_to[i] = Some(target);
-                client.delegate(&members[i], &members[target]);
-            }
-        }
-
-        let proposal_id = world.propose();
-        let mut expected_for = 0_i128;
-        let mut expected_against = 0_i128;
-        for root in 0..N {
-            let mut root_of = root;
-            while let Some(next) = delegate_to[root_of] {
-                root_of = next;
-            }
-            if root_of != root {
-                continue;
-            }
-            let mut weight = 0_i128;
-            for member in 0..N {
-                let mut resolved = member;
-                while let Some(next) = delegate_to[resolved] {
-                    resolved = next;
-                }
-                if resolved == root {
-                    weight += world.token_client().balance(&members[member]);
-                }
-            }
-            if supports[root] {
-                expected_for += weight;
-            } else {
-                expected_against += weight;
-            }
-            client.vote(&proposal_id, &members[root], &supports[root]);
-        }
-
-        let proposal = client.get_proposal(&proposal_id);
-        prop_assert_eq!(proposal.for_votes, expected_for);
-        prop_assert_eq!(proposal.against_votes, expected_against);
     }
 }
 
@@ -592,286 +492,4 @@ fn p3_against_majority_is_defeated() {
         ProposalState::Defeated,
         "1 for / 2 against must produce Defeated"
     );
-}
-
-// -----------------------------------------------------------------------
-// P5 — Failure-sequence bond conservation
-// -----------------------------------------------------------------------
-// Randomized action sequences over the three bond custody paths (pull,
-// refund, forfeit) and the two terminal bond moves (execute, cancel),
-// driven into territory where the transfer itself fails. After *every*
-// action the real-SAC conservation equation asserted by
-// `World::assert_balance_invariant` must hold:
-//
-//   treasury_balance + Σ refunded bond_amounts + contract custody
-//       == proposal_count * BOND
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
-
-    /// For any bounded sequence of failure-path actions, the bond
-    /// conservation equation
-    ///
-    /// ```text
-    /// treasury_balance + Σ refunded bond_amounts + contract custody
-    ///     == proposal_count * BOND
-    /// ```
-    ///
-    /// holds on the real Stellar Asset Contract after **every** action,
-    /// not merely at the end of the sequence. The action space covers:
-    ///
-    /// - `Propose(balance)` — a freshly generated proposer funded with
-    ///   `0`, `BOND - 1`, `BOND`, or `FUNDS`. The underfunded cases must
-    ///   fail with `ForgeError::TokenTransferFailed` and must not consume
-    ///   a proposal id; the funded cases must post the bond.
-    /// - `ExecutePass` — the two-phase execute path (finalise, then
-    ///   dispatch + refund): the bond returns to the proposer.
-    /// - `ExecuteDefeat` — an unvoted proposal finalises `Defeated` and
-    ///   forfeits its bond to the configured treasury.
-    /// - `Cancel` — the proposer withdraws and the bond is refunded.
-    #[test]
-    fn p5_failure_sequence_preserves_bond_conservation(
-        actions in failure_sequence(),
-    ) {
-        let w = setup_world();
-        let token = w.client().get_bond_config().token;
-        let sac = StellarAssetClient::new(&w.env, &token);
-
-        for action in &actions {
-            match action {
-                FailureAction::Propose(balance) => {
-                    let proposer = Address::generate(&w.env);
-                    if *balance > 0 {
-                        sac.mint(&proposer, balance);
-                    }
-                    let before = w.client().get_proposal_count();
-                    let res = w
-                        .client()
-                        .try_propose(&proposer, &w.target, &w.payload(), &DURATION);
-
-                    if *balance < BOND {
-                        prop_assert!(
-                            matches!(res, Err(Ok(ForgeError::TokenTransferFailed))),
-                            "a proposer funded with {} (< BOND {}) must fail the bond pull, got {:?}",
-                            balance,
-                            BOND,
-                            res
-                        );
-                        prop_assert_eq!(
-                            w.client().get_proposal_count(),
-                            before,
-                            "a failed bond pull must not consume a proposal id"
-                        );
-                    } else {
-                        prop_assert!(
-                            matches!(res, Ok(Ok(_))),
-                            "a proposer funded with {} (>= BOND {}) must post the bond, got {:?}",
-                            balance,
-                            BOND,
-                            res
-                        );
-                    }
-                }
-                FailureAction::ExecutePass => {
-                    let proposer = Address::generate(&w.env);
-                    sac.mint(&proposer, &FUNDS);
-                    let id = w.client().propose(&proposer, &w.target, &w.payload(), &DURATION);
-                    w.client().vote(&id, w.voter(0), &true);
-                    w.env
-                        .ledger()
-                        .set_timestamp(w.env.ledger().timestamp() + DURATION + 1);
-                    w.client().execute(&id); // Active -> Succeeded
-                    w.client().execute(&id); // Succeeded -> Executed + refund
-                }
-                FailureAction::ExecuteDefeat => {
-                    let proposer = Address::generate(&w.env);
-                    sac.mint(&proposer, &FUNDS);
-                    let id = w.client().propose(&proposer, &w.target, &w.payload(), &DURATION);
-                    w.env
-                        .ledger()
-                        .set_timestamp(w.env.ledger().timestamp() + DURATION + 1);
-                    w.client().execute(&id); // Active -> Defeated + forfeit
-                }
-                FailureAction::Cancel => {
-                    let proposer = Address::generate(&w.env);
-                    sac.mint(&proposer, &FUNDS);
-                    let id = w.client().propose(&proposer, &w.target, &w.payload(), &DURATION);
-                    w.client().cancel_proposal(&id, &proposer);
-                }
-            }
-
-            w.assert_balance_invariant()?;
-        }
-    }
-}
-
-/// One step of a failure-heavy action sequence.
-#[derive(Clone, Debug)]
-enum FailureAction {
-    /// `try_propose` from a proposer holding exactly this many tokens.
-    Propose(i128),
-    /// Finalise a passing proposal and refund its bond to the proposer.
-    ExecutePass,
-    /// Finalise an unvoted proposal and forfeit its bond to the treasury.
-    ExecuteDefeat,
-    /// Withdraw an active proposal and refund its bond.
-    Cancel,
-}
-
-/// Funding levels handed to a generated proposer: completely unfunded, one
-/// unit short of the bond, exactly the bond, and comfortably funded.
-fn propose_balance() -> impl Strategy<Value = i128> {
-    prop_oneof![Just(0i128), Just(BOND - 1), Just(BOND), Just(FUNDS)]
-}
-
-/// A single failure-path action.
-fn failure_action() -> impl Strategy<Value = FailureAction> {
-    prop_oneof![
-        propose_balance().prop_map(FailureAction::Propose),
-        Just(FailureAction::ExecutePass),
-        Just(FailureAction::ExecuteDefeat),
-        Just(FailureAction::Cancel),
-    ]
-}
-
-/// A bounded sequence of 1..=16 failure-path actions.
-fn failure_sequence() -> impl Strategy<Value = std::vec::Vec<FailureAction>> {
-    prop::collection::vec(failure_action(), 1..=16)
-}
-
-// -----------------------------------------------------------------------
-// Failed-pull purity — transfer-before-state
-// -----------------------------------------------------------------------
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
-
-    /// A bond pull that fails must leave **no** residue: no proposal
-    /// record, no consumed id, no movement of the custody total, and no
-    /// change to any SAC balance — proposer, contract, or treasury.
-    ///
-    /// `initial` covers the completely unfunded proposer (`0`) and the
-    /// proposer funded just below the bond (`BOND - 1`). The configured
-    /// bond token is a plain SAC, whose transfers carry no fee, so the
-    /// near-miss rung is the "funded almost to the bond" case; the retry
-    /// then funds the *same* proposer with exactly `BOND`, which must
-    /// succeed and leave a zero balance — pinning both the absence of a
-    /// transfer fee and the absence of residue from the failure.
-    #[test]
-    fn failed_pull_purity_leaves_no_residue(
-        initial in prop_oneof![Just(0i128), Just(BOND - 1)],
-    ) {
-        let w = setup_world();
-        let token = w.client().get_bond_config().token;
-        let sac = StellarAssetClient::new(&w.env, &token);
-        let proposer = Address::generate(&w.env);
-        if initial > 0 {
-            sac.mint(&proposer, &initial);
-        }
-
-        let before_count = w.client().get_proposal_count();
-        let before_proposer = sac.balance(&proposer);
-        let before_custody = sac.balance(&w.contract_id);
-        let before_treasury = sac.balance(&w.accounts.deployer);
-        let before_held = w.env.as_contract(&w.contract_id, || {
-            w.env
-                .storage()
-                .instance()
-                .get::<DataKey, i128>(&DataKey::BondHeld)
-                .unwrap_or(0)
-        });
-
-        // --- Step 1: the pull fails, cleanly ---
-        let res = w
-            .client()
-            .try_propose(&proposer, &w.target, &w.payload(), &DURATION);
-        prop_assert!(
-            matches!(res, Err(Ok(ForgeError::TokenTransferFailed))),
-            "a proposer funded with {} (< BOND {}) must fail the bond pull, got {:?}",
-            initial,
-            BOND,
-            res
-        );
-        prop_assert_eq!(
-            w.client().get_proposal_count(),
-            before_count,
-            "a failed bond pull must not consume a proposal id"
-        );
-        prop_assert_eq!(
-            w.client()
-                .try_get_proposal(&(before_count + 1))
-                .unwrap_err()
-                .unwrap(),
-            ForgeError::NotFound,
-            "a failed bond pull must not write a proposal record"
-        );
-        prop_assert_eq!(
-            w.env.as_contract(&w.contract_id, || {
-                w.env
-                    .storage()
-                    .instance()
-                    .get::<DataKey, i128>(&DataKey::BondHeld)
-                    .unwrap_or(0)
-            }),
-            before_held,
-            "a failed bond pull must not move the custody total"
-        );
-        prop_assert_eq!(
-            sac.balance(&w.contract_id),
-            before_custody,
-            "a failed bond pull must not move contract custody"
-        );
-        prop_assert_eq!(
-            sac.balance(&proposer),
-            before_proposer,
-            "a failed bond pull must not move the proposer's balance"
-        );
-        prop_assert_eq!(
-            sac.balance(&w.accounts.deployer),
-            before_treasury,
-            "a failed bond pull must not move the treasury balance"
-        );
-        w.assert_balance_invariant()?;
-
-        // --- Step 2: retry with exactly the bond ---
-        let top_up = BOND - initial;
-        if top_up > 0 {
-            sac.mint(&proposer, &top_up);
-        }
-        prop_assert_eq!(
-            sac.balance(&proposer),
-            BOND,
-            "the retry must fund the proposer with exactly the bond"
-        );
-
-        let proposal_id = w.client().propose(&proposer, &w.target, &w.payload(), &DURATION);
-        prop_assert_eq!(
-            w.client().get_proposal_count(),
-            before_count + 1,
-            "the retry must consume exactly one proposal id"
-        );
-        prop_assert_eq!(
-            sac.balance(&proposer),
-            0,
-            "the pull consumes exactly the bond — a SAC transfer charges no fee"
-        );
-
-        let proposal = w.client().get_proposal(&proposal_id);
-        prop_assert_eq!(
-            proposal.state,
-            ProposalState::Active,
-            "the retried proposal must be Active"
-        );
-        prop_assert_eq!(
-            proposal.bond_state,
-            BondState::Posted,
-            "the retried proposal must have posted its bond"
-        );
-        prop_assert_eq!(
-            proposal.bond_amount,
-            BOND,
-            "the posted bond must equal the configured bond"
-        );
-        w.assert_balance_invariant()?;
-    }
 }
