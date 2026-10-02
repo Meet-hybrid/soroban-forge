@@ -2,7 +2,7 @@
 //! boundaries, caps, and rollover.
 //!
 //! Settlement coverage: real SEP-41 transfers on `charge()`, transfer-before-
-//! state ordering, rollback on failure, and conservation across periods.
+//! state ordering, arrears-retry on failure, and conservation across periods.
 //!
 //! Layered like the crate's other suites:
 //! - **Pure derivation** — [`period_amount`] and its helpers, with no
@@ -17,7 +17,8 @@
 
 use crate::{
     billable_buckets, metric_overage, period_amount, usage_units, validate_quotas, MetricQuota,
-    SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, UsageRecord, MAX_QUOTAS,
+    SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus, UsageRecord,
+    MAX_QUOTAS,
 };
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
@@ -987,7 +988,7 @@ fn charge_transfers_the_derived_amount_from_subscriber_to_provider() {
 }
 
 #[test]
-fn failed_transfer_reverts_state_and_leaves_balances_untouched() {
+fn failed_transfer_preserves_balances_and_meters_for_the_arrears_retry() {
     let (env, token, _tc, client, accounts, _subscription_id) = setup!();
     // Exactly the base: any overage makes the transfer fail.
     let broke = Address::generate(&env);
@@ -1002,13 +1003,28 @@ fn failed_transfer_reverts_state_and_leaves_balances_untouched() {
     let subscription_before = client.get_subscription(&broke_id);
 
     env.ledger().set_timestamp(START + PERIOD);
-    // The transfer fails, so `charge` reports zero collected and mutates
-    // nothing: no period advance, no balance movement.
+    // The transfer fails, so `charge` reports zero collected and moves no
+    // funds or meters; the subscription enters the arrears-retry state so
+    // the retry bills the exact attempted amount again.
     assert_eq!(client.charge(&broke_id), 0);
 
     assert_eq!(token_balance(&client, &broke), subscriber_before);
     assert_eq!(token_balance(&client, &provider), provider_before);
-    assert_eq!(client.get_subscription(&broke_id), subscription_before);
+    // The meter freezes at the attempted amount: the retry bills the same.
+    assert_eq!(
+        client.get_usage(&broke_id, &Symbol::new(&env, CALLS)).units,
+        11_001
+    );
+    // State advances to PastDue with the failure recorded, while the
+    // billing fields stay put.
+    let subscription_after = client.get_subscription(&broke_id);
+    assert_eq!(subscription_after.status, SubscriptionStatus::PastDue);
+    assert_eq!(subscription_after.failed_attempts, 1);
+    assert_eq!(
+        subscription_after.last_charged,
+        subscription_before.last_charged
+    );
+    assert_eq!(subscription_after.quotas, subscription_before.quotas);
 }
 
 #[test]
@@ -1039,21 +1055,29 @@ fn multiple_charges_across_periods_conserve_value() {
 }
 
 #[test]
-fn zero_balance_subscription_charge_is_a_noop_with_no_state_change() {
+fn zero_balance_subscription_charge_moves_to_past_due_without_moving_funds() {
     let (env, token, _tc, client, accounts, _subscription_id) = setup!();
     // A subscriber with no tokens at all: even the base cannot be collected.
     let broke = Address::generate(&env);
     let broke_id = client.subscribe(&broke, &accounts.validator, &token, &AMOUNT, &PERIOD);
     let subscription_before = client.get_subscription(&broke_id);
-    let provider = subscription_before.provider;
+    let provider = subscription_before.provider.clone();
     let provider_before = token_balance(&client, &provider);
 
     env.ledger().set_timestamp(START + PERIOD);
     assert_eq!(client.charge(&broke_id), 0);
 
-    assert_eq!(client.get_subscription(&broke_id), subscription_before);
+    // No funds moved in either direction.
     assert_eq!(token_balance(&client, &broke), 0);
     assert_eq!(token_balance(&client, &provider), provider_before);
+    // The failed attempt is recorded as the documented arrears-retry state.
+    let subscription_after = client.get_subscription(&broke_id);
+    assert_eq!(subscription_after.status, SubscriptionStatus::PastDue);
+    assert_eq!(subscription_after.failed_attempts, 1);
+    assert_eq!(
+        subscription_after.last_charged,
+        subscription_before.last_charged
+    );
 }
 
 /// Every event this contract published under `name` in the latest invocation,

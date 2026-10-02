@@ -1935,10 +1935,6 @@ fn split_amount(amount: i128, seller_bps: u32) -> Result<(i128, i128), ForgeErro
 ///
 /// Thin wrapper over [`soroban_forge_shared_utils::bump_entry`] — the
 /// canonical helper (issue #127); the policy lives there.
-/// Bump a persistent entry's TTL to the [`ttl::BUMP_AMOUNT`] horizon when
-/// it falls inside [`ttl::BUMP_THRESHOLD`]. The standard threshold/extend
-/// pattern: cheap no-op while the entry is fresh, decisive near expiry.
-
 fn bump_entry(env: &Env, key: &DataKey) {
     shared_bump_entry(env, key);
     // Mirror the escrow record's expiration ledger for `ttl_info`: SDK 27
