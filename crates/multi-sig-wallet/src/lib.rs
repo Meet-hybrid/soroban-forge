@@ -12,11 +12,11 @@
 //!
 //! ```text
 //! submit --(confirm × n)--> threshold met --execute--> Executed
-//! submit --(reject × n)--> rejection threshold met --> Rejected (terminal)
+//! submit --reject--> Rejected (terminal)
 //! submit_call --(confirm × n)--> threshold met --execute--> Executed (+ typed call invoked)
-//! submit_call --(reject × n)--> rejection threshold met --> Rejected (terminal)
+//! submit_call --reject--> Rejected (terminal)
 //! submit_withdrawal --(confirm × n)--> threshold met --execute--> Executed (+ tokens moved)
-//! submit_withdrawal --(reject × n)--> rejection threshold met --> Rejected (terminal)
+//! submit_withdrawal --reject--> Rejected (terminal)
 //! set_withdrawal_limit --(confirm × n)--> threshold met --execute--> Executed (limit applied)
 //! remove_withdrawal_limit --(confirm × n)--> threshold met --execute--> Executed (limit dropped)
 //! add_owner --(confirm × n)--> threshold met --execute--> Executed (owner added)
@@ -94,9 +94,13 @@
 //!   objection stalls the tx. That is load-bearing: without it, rejections
 //!   below the threshold would be a no-op and a threshold-met malicious tx
 //!   would still execute.
-//! - **Reaching the threshold is terminal.** Once `rejections.len() >=
-//!   threshold` the status flips to `Rejected`: no further confirms,
-//!   executes, or rejects are accepted.
+//! - **One rejection is terminal.** Any owner may veto a pending tx; the
+//!   status flips to `Rejected` immediately, retaining existing confirmations
+//!   and the rejector for audit. No further confirms, executes, or rejects
+//!   are accepted.
+//! - **Terminal operations fail without mutation.** `confirm`, `reject`, and
+//!   `execute` return [`ForgeError::InvalidInput`] for a `Rejected` tx and
+//!   leave its stored record unchanged.
 //! - **Executed txs can never be rejected** (there is nothing to stop), and
 //!   rejections are never revoked (un-confirm is out of scope).
 //!
@@ -171,8 +175,8 @@
 //!   funds that owners have already signed for), but an in-flight withdrawal
 //!   authorised under a higher limit still executes after a reduction. The
 //!   blast-radius cap applies to what can be *proposed*; owners lowering a
-//!   limit to stop a specific pending withdrawal must `reject` it, which the
-//!   rejection policy already handles at any count below the threshold.
+//!   limit to stop a specific pending withdrawal must `reject` it, which
+//!   immediately makes the transaction terminal.
 //!   Re-checking at execution instead would double-count the window (once
 //!   at submission, once at execution) and would make every reduction
 //!   silently void outstanding approvals.
@@ -336,12 +340,11 @@ pub trait SorobanForgeMultiSigWallet {
 
     /// Record `signer`'s formal objection to `tx_id`.
     ///
-    /// Confirmations already on the tx do not block an objection. Each owner
-    /// may signal once, in one direction (confirm **or** reject), and only
-    /// while the tx is `Pending`. Once rejections reach the configured
-    /// threshold the tx becomes `Rejected` and cannot be confirmed, executed,
-    /// or rejected further. A tx carrying any rejection can never execute,
-    /// even below the threshold (see the module docs).
+    /// Confirmations already on the tx do not block an objection and are
+    /// retained for audit. Each owner may signal once, in one direction
+    /// (confirm **or** reject), and only while the tx is `Pending`. A single
+    /// rejection immediately makes the tx `Rejected`; it cannot be confirmed,
+    /// executed, or rejected further (see the module docs).
     fn reject(
         env: Env,
         tx_id: u64,
@@ -662,7 +665,7 @@ pub enum TxStatus {
     Pending,
     /// Threshold met and executed successfully.
     Executed,
-    /// Rejected by owners (reached the rejection threshold); terminal.
+    /// Vetoed by an owner; terminal.
     Rejected,
     /// Expired before reaching the approval threshold; terminal.
     Expired,
@@ -996,6 +999,8 @@ impl MultiSigWallet {
     /// `Pending`. An owner who has already rejected the transaction may not
     /// also confirm it (one signal per owner, in one direction — see the
     /// module docs for the rejection policy).
+    ///
+    /// A rejected transaction returns [`ForgeError::InvalidInput`] unchanged.
     pub fn confirm(env: Env, tx_id: u64, signer: Address) -> Result<(), ForgeError> {
         let mut wallet_tx = Self::get_tx_impl(&env, tx_id)?;
         if wallet_tx.status == TxStatus::Expired {
@@ -1037,10 +1042,16 @@ impl MultiSigWallet {
     /// other owners do not block a rejection, and a rejection can never be
     /// revoked.
     ///
-    /// Once `rejections.len() >= threshold` the status flips to `Rejected`,
-    /// which is terminal: no further confirms, executes, or rejects. Below
-    /// the threshold the tx stays `Pending` but is already blocked from
-    /// executing (see the module docs).
+    /// A successful rejection immediately flips the status to `Rejected`,
+    /// which is terminal. Existing confirmations remain on the record for
+    /// audit, and no further confirms, executes, or rejects are accepted.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — the tx is not pending or this owner
+    ///   has already signalled on it.
+    /// * [`ForgeError::Unauthorized`] — `signer` is not an owner.
+    /// * [`ForgeError::NotFound`] — no transaction exists for `tx_id`.
     pub fn reject(env: Env, tx_id: u64, signer: Address) -> Result<(), ForgeError> {
         let mut wallet_tx = Self::get_tx_impl(&env, tx_id)?;
         if wallet_tx.status == TxStatus::Expired {
@@ -1058,18 +1069,12 @@ impl MultiSigWallet {
             return Err(ForgeError::InvalidInput);
         }
         wallet_tx.rejections.push_back(signer);
-        let threshold: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Threshold)
-            .ok_or(ForgeError::NotInitialized)?;
-        if wallet_tx.rejections.len() >= threshold {
-            wallet_tx.status = TxStatus::Rejected;
-        }
+        wallet_tx.status = TxStatus::Rejected;
         env.storage()
             .persistent()
             .set(&DataKey::Tx(tx_id), &wallet_tx);
         bump_entry(&env, &DataKey::Tx(tx_id));
+        events::rejected(&env, &wallet_tx);
         Ok(())
     }
 
@@ -1091,8 +1096,8 @@ impl MultiSigWallet {
     /// target revert surfaces as [`ForgeError::ContractInvocationFailed`]
     /// and leaves the transaction un-executed (status stays `Pending`).
     ///
-    /// Execution is refused while the tx carries **any** rejection, even
-    /// below the rejection threshold (see the module docs).
+    /// A terminal `Rejected` tx returns [`ForgeError::InvalidInput`] before
+    /// any external call or state change (see the module docs).
     pub fn execute(env: Env, tx_id: u64) -> Result<(), ForgeError> {
         let mut wallet_tx = Self::get_tx_impl(&env, tx_id)?;
         if wallet_tx.status == TxStatus::Expired {
@@ -1793,11 +1798,13 @@ impl MultiSigWallet {
                 let key = DataKey::WithdrawalLimit(limit.token.clone());
                 env.storage().persistent().set(&key, limit);
                 bump_entry(env, &key);
+                events::withdrawal_limit_set(env, limit);
             }
             LimitChange::Remove(token) => {
                 env.storage()
                     .persistent()
                     .remove(&DataKey::WithdrawalLimit(token.clone()));
+                events::withdrawal_limit_removed(env, token);
             }
         }
     }
@@ -2108,6 +2115,30 @@ mod events {
         pub threshold: u32,
     }
 
+    /// A per-token rolling withdrawal limit was installed or replaced.
+    /// The token is a **topic** so indexers can filter by asset cheaply.
+    #[contractevent]
+    pub struct WithdrawalLimitSet {
+        #[topic]
+        pub token: Address,
+        pub amount: i128,
+        pub window_seconds: u64,
+    }
+
+    /// A per-token rolling withdrawal limit was removed; withdrawals of
+    /// that token are unconstrained again.
+    #[contractevent]
+    pub struct WithdrawalLimitRemoved {
+        #[topic]
+        pub token: Address,
+    }
+
+    #[contractevent]
+    pub struct TxRejected {
+        #[topic]
+        pub tx_id: u64,
+        pub rejector: Address,
+    }
     #[contractevent]
     #[allow(dead_code)]
     pub struct TxExpired {
@@ -2143,6 +2174,29 @@ mod events {
         .publish(env);
     }
 
+    pub fn withdrawal_limit_set(env: &Env, limit: &WithdrawalLimit) {
+        WithdrawalLimitSet {
+            token: limit.token.clone(),
+            amount: limit.amount,
+            window_seconds: limit.window_seconds,
+        }
+        .publish(env);
+    }
+
+    pub fn withdrawal_limit_removed(env: &Env, token: &Address) {
+        WithdrawalLimitRemoved {
+            token: token.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn rejected(env: &Env, tx: &WalletTx) {
+        TxRejected {
+            tx_id: tx.tx_id,
+            rejector: tx.rejections.get_unchecked(tx.rejections.len() - 1),
+        }
+        .publish(env);
+    }
     #[allow(dead_code)]
     pub fn expired(env: &Env, tx_id: u64, expired_at: u64) {
         TxExpired { tx_id, expired_at }.publish(env);
@@ -2150,7 +2204,7 @@ mod events {
 }
 
 // Negative authorization coverage for the state-changing entrypoints
-// (`initialize`, `submit`, `confirm`, `execute`), following the escrow and
+// (`initialize`, `submit`, `confirm`, `reject`, `execute`), following the escrow and
 // dao-governance suites' two-layer pattern (issue #61).
 #[cfg(test)]
 mod authz;
@@ -2176,6 +2230,7 @@ mod tests {
     use soroban_forge_test_utils::{MockTarget, MockTargetClient, TestAccounts};
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+    use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
     use soroban_sdk::{contract, contractimpl, Bytes, Env, FromVal, Map, Symbol, TryIntoVal, Val};
 
     /// Build a fresh env with mocked auths, a registered contract, a configured
@@ -2473,6 +2528,216 @@ mod tests {
         assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
     }
 
+    /// The events recorded by the most recent client invocation under
+    /// `name`, decoded as their full topics (the event name first) and
+    /// their data maps — the shape an indexer consumes. The test host
+    /// exposes one invocation's events at a time, so counts are asserted
+    /// immediately after the emitting call (a failed `try_` call records
+    /// nothing).
+    fn events_named(
+        env: &Env,
+        contract: &Address,
+        name: &str,
+    ) -> std::vec::Vec<(soroban_sdk::Vec<Val>, Map<Symbol, Val>)> {
+        let name = ScVal::Symbol(ScSymbol::try_from(name).unwrap());
+        env.events()
+            .all()
+            .filter_by_contract(contract)
+            .events()
+            .iter()
+            .filter_map(|event| {
+                let ContractEventBody::V0(body) = &event.body;
+                if body.topics.first() != Some(&name) {
+                    return None;
+                }
+                Some((
+                    body.topics.clone().try_into_val(env).unwrap(),
+                    body.data.clone().try_into_val(env).unwrap(),
+                ))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn withdrawal_limit_set_emits_once_with_token_topic_and_policy_data() {
+        let (env, client, accounts) = setup!();
+        let token = Address::generate(&env);
+
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
+
+        // Submitting the change only proposes the policy: nothing is emitted
+        // until the quorum executes it.
+        let tx = client.set_withdrawal_limit(&accounts.user1, &token, &1_000_i128, &3_600_u64);
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
+
+        client.confirm(&tx, &accounts.user2);
+        client.confirm(&tx, &accounts.user3);
+        client.execute(&tx);
+
+        // The execute invocation publishes the limit event alongside the
+        // wallet's `tx_executed` event.
+        let events = events_named(&env, &client.address, "withdrawal_limit_set");
+        assert_eq!(events.len(), 1);
+        let (topics, data) = &events[0];
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "withdrawal_limit_set")
+        );
+        assert_eq!(Address::from_val(&env, &topics.get_unchecked(1)), token);
+        assert_eq!(
+            i128::from_val(&env, &data.get(Symbol::new(&env, "amount")).unwrap()),
+            1_000
+        );
+        assert_eq!(
+            u64::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "window_seconds")).unwrap()
+            ),
+            3_600
+        );
+        assert_eq!(client.get_withdrawal_limit(&token).unwrap().amount, 1_000);
+    }
+    #[test]
+    fn replacing_a_limit_emits_one_set_event_with_the_new_values() {
+        let (env, client, accounts) = setup!();
+        let token = Address::generate(&env);
+
+        let first = client.set_withdrawal_limit(&accounts.user1, &token, &1_000_i128, &3_600_u64);
+        client.confirm(&first, &accounts.user2);
+        client.confirm(&first, &accounts.user3);
+        client.execute(&first);
+        assert_eq!(
+            events_named(&env, &client.address, "withdrawal_limit_set").len(),
+            1
+        );
+
+        // Raising the cap rides the same path: the replacement emits exactly
+        // one new event carrying the new values, not two.
+        let second = client.set_withdrawal_limit(&accounts.user1, &token, &2_500_i128, &7_200_u64);
+        client.confirm(&second, &accounts.user2);
+        client.confirm(&second, &accounts.user3);
+        client.execute(&second);
+
+        let events = events_named(&env, &client.address, "withdrawal_limit_set");
+        assert_eq!(events.len(), 1);
+        let (topics, data) = &events[0];
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "withdrawal_limit_set")
+        );
+        assert_eq!(Address::from_val(&env, &topics.get_unchecked(1)), token);
+        assert_eq!(
+            i128::from_val(&env, &data.get(Symbol::new(&env, "amount")).unwrap()),
+            2_500
+        );
+        assert_eq!(
+            u64::from_val(
+                &env,
+                &data.get(Symbol::new(&env, "window_seconds")).unwrap()
+            ),
+            7_200
+        );
+        assert_eq!(client.get_withdrawal_limit(&token).unwrap().amount, 2_500);
+    }
+
+    #[test]
+    fn withdrawal_limit_removed_emits_once_with_token_topic() {
+        let (env, client, accounts) = setup!();
+        let token = Address::generate(&env);
+
+        let set_tx = client.set_withdrawal_limit(&accounts.user1, &token, &1_000_i128, &3_600_u64);
+        client.confirm(&set_tx, &accounts.user2);
+        client.confirm(&set_tx, &accounts.user3);
+        client.execute(&set_tx);
+
+        // Proposing the removal publishes nothing; the execute does.
+        let removal = client.remove_withdrawal_limit(&accounts.user1, &token);
+        assert!(events_named(&env, &client.address, "withdrawal_limit_removed").is_empty());
+        client.confirm(&removal, &accounts.user2);
+        client.confirm(&removal, &accounts.user3);
+        client.execute(&removal);
+
+        let events = events_named(&env, &client.address, "withdrawal_limit_removed");
+        assert_eq!(events.len(), 1);
+        let (topics, _data) = &events[0];
+        // Topics are the event name then the token; the event carries no
+        // data payload.
+        assert_eq!(topics.len(), 2);
+        assert_eq!(
+            Symbol::from_val(&env, &topics.get_unchecked(0)),
+            Symbol::new(&env, "withdrawal_limit_removed")
+        );
+        assert_eq!(Address::from_val(&env, &topics.get_unchecked(1)), token);
+        assert_eq!(client.get_withdrawal_limit(&token), None);
+
+        // Removing an already-absent limit is an idempotent success in this
+        // contract: the policy write is a no-op, but the quorum still
+        // approved and executed a state transition, so that execution emits
+        // exactly one event for it too.
+        let again = client.remove_withdrawal_limit(&accounts.user1, &token);
+        client.confirm(&again, &accounts.user2);
+        client.confirm(&again, &accounts.user3);
+        client.execute(&again);
+        let events = events_named(&env, &client.address, "withdrawal_limit_removed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            Address::from_val(&env, &events[0].0.get_unchecked(1)),
+            token
+        );
+    }
+
+    #[test]
+    fn withdrawal_limit_failure_paths_emit_no_limit_events() {
+        let (env, client, accounts) = setup!();
+        let token = Address::generate(&env);
+
+        // amount <= 0.
+        let err = client
+            .try_set_withdrawal_limit(&accounts.user1, &token, &0_i128, &3_600_u64)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
+
+        // window == 0.
+        let err = client
+            .try_set_withdrawal_limit(&accounts.user1, &token, &1_000_i128, &0_u64)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
+
+        // Non-owner submission.
+        let err = client
+            .try_set_withdrawal_limit(&accounts.arbiter, &token, &1_000_i128, &3_600_u64)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+        let err = client
+            .try_remove_withdrawal_limit(&accounts.arbiter, &token)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
+        assert!(events_named(&env, &client.address, "withdrawal_limit_removed").is_empty());
+
+        // Below-threshold execution: one confirmation of two required must
+        // not install the policy nor emit anything; the eventual
+        // threshold-meeting execute emits exactly one event.
+        let tx = client.set_withdrawal_limit(&accounts.user1, &token, &1_000_i128, &3_600_u64);
+        client.confirm(&tx, &accounts.user2);
+        let err = client.try_execute(&tx).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(events_named(&env, &client.address, "withdrawal_limit_set").is_empty());
+        assert_eq!(client.get_withdrawal_limit(&token), None);
+
+        client.confirm(&tx, &accounts.user3);
+        client.execute(&tx);
+        let events = events_named(&env, &client.address, "withdrawal_limit_set");
+        assert_eq!(events.len(), 1);
+        assert_eq!(client.get_withdrawal_limit(&token).unwrap().amount, 1_000);
+    }
+
     #[test]
     fn submit_assigns_distinct_ids() {
         let (env, client, accounts) = setup!();
@@ -2561,9 +2826,7 @@ mod tests {
         let tx = client.get_tx(&tx_id);
         assert_eq!(tx.rejections.len(), 1);
         assert_eq!(tx.rejections.get_unchecked(0), accounts.user2);
-        // Below the rejection threshold: still Pending, but blocked from
-        // executing.
-        assert_eq!(tx.status, TxStatus::Pending);
+        assert_eq!(tx.status, TxStatus::Rejected);
     }
 
     #[test]
@@ -2600,12 +2863,14 @@ mod tests {
     }
 
     #[test]
-    fn reject_reaches_threshold_rejects_tx() {
+    fn one_owner_rejection_makes_tx_terminal() {
         let (env, client, accounts) = setup!();
         let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
         client.reject(&tx_id, &accounts.user2);
-        client.reject(&tx_id, &accounts.user3);
-        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
+        let tx = client.get_tx(&tx_id);
+        assert_eq!(tx.status, TxStatus::Rejected);
+        assert_eq!(tx.rejections.len(), 1);
+        assert_eq!(tx.rejections.get_unchecked(0), accounts.user2);
     }
 
     #[test]
@@ -2627,12 +2892,15 @@ mod tests {
         let (env, client, accounts) = setup!();
         let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
         client.reject(&tx_id, &accounts.user2);
-        client.reject(&tx_id, &accounts.user3);
+        let before = client.get_tx(&tx_id);
         let err = client
             .try_confirm(&tx_id, &accounts.user1)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(client.get_tx(&tx_id).status, before.status);
+        assert_eq!(client.get_tx(&tx_id).confirmations, before.confirmations);
+        assert_eq!(client.get_tx(&tx_id).rejections, before.rejections);
     }
 
     #[test]
@@ -2640,9 +2908,12 @@ mod tests {
         let (env, client, accounts) = setup!();
         let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
         client.reject(&tx_id, &accounts.user2);
-        client.reject(&tx_id, &accounts.user3);
+        let before = client.get_tx(&tx_id);
         let err = client.try_execute(&tx_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(client.get_tx(&tx_id).status, before.status);
+        assert_eq!(client.get_tx(&tx_id).confirmations, before.confirmations);
+        assert_eq!(client.get_tx(&tx_id).rejections, before.rejections);
     }
 
     #[test]
@@ -2650,12 +2921,15 @@ mod tests {
         let (env, client, accounts) = setup!();
         let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
         client.reject(&tx_id, &accounts.user2);
-        client.reject(&tx_id, &accounts.user3);
+        let before = client.get_tx(&tx_id);
         let err = client
             .try_reject(&tx_id, &accounts.user1)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(client.get_tx(&tx_id).status, before.status);
+        assert_eq!(client.get_tx(&tx_id).confirmations, before.confirmations);
+        assert_eq!(client.get_tx(&tx_id).rejections, before.rejections);
     }
 
     #[test]
@@ -2667,12 +2941,16 @@ mod tests {
         client.confirm(&tx_id, &accounts.user2);
         client.confirm(&tx_id, &accounts.user3);
         client.execute(&tx_id);
-        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
+        let before = client.get_tx(&tx_id);
+        assert_eq!(before.status, TxStatus::Executed);
         let err = client
             .try_reject(&tx_id, &accounts.user1)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(client.get_tx(&tx_id).status, before.status);
+        assert_eq!(client.get_tx(&tx_id).confirmations, before.confirmations);
+        assert_eq!(client.get_tx(&tx_id).rejections, before.rejections);
     }
 
     #[test]
@@ -2708,11 +2986,11 @@ mod tests {
         let tx = client.get_tx(&tx_id);
         assert_eq!(tx.confirmations.len(), 1);
         assert_eq!(tx.rejections.len(), 1);
-        assert_eq!(tx.status, TxStatus::Pending);
+        assert_eq!(tx.status, TxStatus::Rejected);
     }
 
     #[test]
-    fn sub_threshold_rejection_blocks_execute() {
+    fn rejection_after_threshold_approvals_is_terminal_and_blocks_execute() {
         let (env, client, accounts) = setup!();
         let mock_target_id = Address::generate(&env);
         env.register_at(&mock_target_id, MockTarget, ());
@@ -2720,10 +2998,41 @@ mod tests {
         client.confirm(&tx_id, &accounts.user2);
         client.confirm(&tx_id, &accounts.user3);
         client.reject(&tx_id, &accounts.user1);
-        // Confirmations meet the threshold, but the standing objection wins.
+        // A veto remains effective even after confirmations reach threshold.
+        let before = client.get_tx(&tx_id);
+        assert_eq!(before.status, TxStatus::Rejected);
+        assert_eq!(before.confirmations.len(), 2);
         let err = client.try_execute(&tx_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
-        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+        let after = client.get_tx(&tx_id);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.confirmations, before.confirmations);
+        assert_eq!(after.rejections, before.rejections);
+    }
+
+    #[test]
+    fn reject_emits_event_with_tx_id_and_rejector() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
+        client.reject(&tx_id, &accounts.user2);
+
+        let event_collection = env.events().all();
+        let events = event_collection.events();
+        assert_eq!(events.len(), 1);
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &events[0].body;
+        assert_eq!(body.topics[1], soroban_sdk::xdr::ScVal::U64(tx_id));
+        let soroban_sdk::xdr::ScVal::Map(Some(data)) = &body.data else {
+            panic!("TxRejected payload must be a map");
+        };
+        assert_eq!(data.len(), 1);
+        assert_eq!(
+            data[0].key,
+            soroban_sdk::xdr::ScVal::Symbol("rejector".try_into().unwrap())
+        );
+        assert_eq!(
+            data[0].val,
+            soroban_sdk::xdr::ScVal::Address(accounts.user2.into())
+        );
     }
 
     #[test]
@@ -2860,11 +3169,10 @@ mod tests {
         assert_eq!(empty.len(), 0);
 
         client.reject(&tx_id, &accounts.user2);
-        client.reject(&tx_id, &accounts.user3);
         let rejections = client.get_rejections(&tx_id);
-        assert_eq!(rejections.len(), 2);
+        assert_eq!(rejections.len(), 1);
         assert_eq!(rejections.get_unchecked(0), accounts.user2);
-        assert_eq!(rejections.get_unchecked(1), accounts.user3);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
     }
 
     #[test]
@@ -2958,7 +3266,6 @@ mod tests {
         client.confirm(&executed_id, &accounts.user3);
         client.execute(&executed_id);
         client.reject(&rejected_id, &accounts.user2);
-        client.reject(&rejected_id, &accounts.user3);
 
         let pending = client.get_transactions_by_status(&TxStatus::Pending, &0, &10);
         assert_eq!(pending.len(), 2);
@@ -3155,15 +3462,15 @@ mod tests {
 
         let tx_id = client.submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &400_i128);
         client.reject(&tx_id, &accounts.user2);
-        client.reject(&tx_id, &accounts.user3);
 
         assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
+        assert_eq!(client.get_rejections(&tx_id).len(), 1);
         assert_eq!(token_client.balance(&accounts.arbiter), 0);
         assert_eq!(client.balance(&token), 1_000);
     }
 
     #[test]
-    fn sub_threshold_withdrawal_rejection_blocks_execute() {
+    fn rejection_after_threshold_withdrawal_approvals_blocks_execute() {
         let (_env, client, accounts, token, _token_client) = custody!();
         client.deposit(&token, &accounts.user1, &1_000);
 
@@ -3176,7 +3483,7 @@ mod tests {
 
         let err = client.try_execute(&tx_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
-        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
     }
 
     #[test]

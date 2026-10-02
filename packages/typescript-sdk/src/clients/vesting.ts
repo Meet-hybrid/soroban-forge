@@ -34,14 +34,6 @@ if (typeof window !== "undefined") {
 
 
 /**
- * Policy controlling how unvested tokens are handled on revocation.
- */
-export type RevocationPolicy = {tag: "FullClawback", values: void} | {tag: "KeepUnvested", values: void};
-
-
-
-
-/**
  * Lifecycle state of a vesting schedule.
  */
 export type VestingStatus = {tag: "Locked", values: void} | {tag: "Vesting", values: void} | {tag: "Completed", values: void} | {tag: "Revoked", values: void};
@@ -83,10 +75,6 @@ token: string;
  * Total amount to vest linearly between `cliff` and `duration`.
  */
 total_amount: i128;
-  /**
- * Address authorized to revoke this schedule (its creator).
- */
-creator: string;
 }
 
 
@@ -111,7 +99,7 @@ role: string;
 
 /**
  * Inclusive time window expressed as Unix timestamps (seconds).
- * 
+ *
  * Stored as plain `u64` because `soroban_sdk` models time as `u64`; a
  * dedicated newtype would add conversions without benefit.
  */
@@ -129,7 +117,7 @@ start: u64;
 
 /**
  * A page of results plus the cursor needed to fetch the next page.
- * 
+ *
  * Items are stored as serialized `Bytes` so the helper is agnostic to the
  * concrete value type a contract paginates. Callers decode each item into
  * their domain type. `Debug` is omitted because the SDK collection does not
@@ -167,12 +155,12 @@ offset: u32;
 
 /**
  * Shared error type used across all Soroban Forge contracts.
- * 
+ *
  * Defining a single error enum in `shared-utils` keeps the on-chain error
  * space consistent and intelligible to SDK consumers, and avoids every
  * contract re-declaring the same failure modes. Contract crates may expose
  * their own domain-specific errors, but should prefer these where they fit.
- * 
+ *
  * Error codes start at 1; code 0 is reserved by the Soroban host.
  */
 export const ForgeError = {
@@ -245,7 +233,7 @@ export const ForgeError = {
 
 /**
  * Audit metadata attached to a persisted value.
- * 
+ *
  * Contracts store domain data in Soroban instance storage; wrapping it with
  * this record lets callers (and off-chain indexers) see when a value was last
  * written. The payload is stored as opaque serialized bytes so the record is
@@ -267,11 +255,11 @@ export interface Client {
   /**
    * Construct and simulate a claim transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Claim the vested-but-unclaimed amount.
-   * 
+   *
    * Requires the beneficiary. Returns exactly what vested since the last
    * claim (or `0` when nothing is claimable), so repeated claims can never
    * overpay or underpay.
-   * 
+   *
    * Ordering: the SEP-41 transfer runs **before** the schedule write —
    * see the module docs. A zero-claim call returns before either.
    */
@@ -286,25 +274,16 @@ export interface Client {
   /**
    * Construct and simulate a get_status transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Read the current lifecycle status (read-only view).
-   * 
+   *
    * The status is derived from the ledger time and claimed amount rather
    * than the stored field, so it is always current between claims.
    */
   get_status: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<VestingStatus>>>
 
   /**
-   * Construct and simulate a revoke transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Revoke a vesting schedule, clawing back tokens per the given policy.
-   * 
-   * Only the creator may revoke. Revocation is rejected before the cliff
-   * elapses and once the schedule is fully vested or already revoked.
-   */
-  revoke: ({schedule_id, policy}: {schedule_id: u64, policy: RevocationPolicy}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
-
-  /**
    * Construct and simulate a create_schedule transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Create a new vesting schedule and return its stable id.
-   * 
+   *
    * Requires `total_amount > 0`, `duration > 0`, and `cliff <= duration`.
    * The beneficiary is authorized at creation time.
    */
@@ -333,8 +312,6 @@ export class Client extends ContractClient {
         "AAAAAAAAALhSZWFkIHRoZSBjdXJyZW50IGxpZmVjeWNsZSBzdGF0dXMgKHJlYWQtb25seSB2aWV3KS4KClRoZSBzdGF0dXMgaXMgZGVyaXZlZCBmcm9tIHRoZSBsZWRnZXIgdGltZSBhbmQgY2xhaW1lZCBhbW91bnQgcmF0aGVyCnRoYW4gdGhlIHN0b3JlZCBmaWVsZCwgc28gaXQgaXMgYWx3YXlzIGN1cnJlbnQgYmV0d2VlbiBjbGFpbXMuAAAACmdldF9zdGF0dXMAAAAAAAEAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAABAAAD6QAAB9AAAAANVmVzdGluZ1N0YXR1cwAAAAAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAgAAACZMaWZlY3ljbGUgc3RhdGUgb2YgYSB2ZXN0aW5nIHNjaGVkdWxlLgAAAAAAAAAAAA1WZXN0aW5nU3RhdHVzAAAAAAAABAAAAAAAAAAiQmVmb3JlIHRoZSBjbGlmZiBoYXMgYmVlbiByZWFjaGVkLgAAAAAABkxvY2tlZAAAAAAAAAAAACxQYXN0IHRoZSBjbGlmZjsgdG9rZW5zIGFyZSB2ZXN0aW5nIGxpbmVhcmx5LgAAAAdWZXN0aW5nAAAAAAAAAAAZRnVsbHkgdmVzdGVkIGFuZCBjbGFpbWVkLgAAAAAAAAlDb21wbGV0ZWQAAAAAAAAAAAAANVNjaGVkdWxlIHdhcyB0ZXJtaW5hdGVkIGJlZm9yZSBjb21wbGV0aW9uIChyZXNlcnZlZCkuAAAAAAAAB1Jldm9rZWQA",
         "AAAAAQAAACBBIHNpbmdsZSB0b2tlbi12ZXN0aW5nIHNjaGVkdWxlLgAAAAAAAAAPVmVzdGluZ1NjaGVkdWxlAAAAAAgAAAAfUmVjaXBpZW50IG9mIHRoZSB2ZXN0ZWQgdG9rZW5zLgAAAAALYmVuZWZpY2lhcnkAAAAAEwAAACpBbW91bnQgYWxyZWFkeSBjbGFpbWVkIGJ5IHRoZSBiZW5lZmljaWFyeS4AAAAAAAdjbGFpbWVkAAAAAAsAAAA2U2Vjb25kcyBhZnRlciBgc3RhcnRgIGF0IHdoaWNoIGNsYWltcyBiZWNvbWUgcG9zc2libGUuAAAAAAAFY2xpZmYAAAAAAAAGAAAAPFNlY29uZHMgYWZ0ZXIgYHN0YXJ0YCBhdCB3aGljaCB0aGUgc2NoZWR1bGUgaXMgZnVsbHkgdmVzdGVkLgAAAAhkdXJhdGlvbgAAAAYAAAA5TGVkZ2VyIHRpbWVzdGFtcCBhdCB3aGljaCB2ZXN0aW5nIGJlZ2lucyAoY3JlYXRpb24gdGltZSkuAAAAAAAABXN0YXJ0AAAAAAAABgAAABhDdXJyZW50IGxpZmVjeWNsZSBzdGF0ZS4AAAAGc3RhdHVzAAAAAAfQAAAADVZlc3RpbmdTdGF0dXMAAAAAAAArVG9rZW4gY29udHJhY3Qgd2hvc2UgYmFsYW5jZSBpcyBkcmF3biBkb3duLgAAAAAFdG9rZW4AAAAAAAATAAAAPVRvdGFsIGFtb3VudCB0byB2ZXN0IGxpbmVhcmx5IGJldHdlZW4gYGNsaWZmYCBhbmQgYGR1cmF0aW9uYC4AAAAAAAAMdG90YWxfYW1vdW50AAAACw==",
-        "AAAAAgAAADVQb2xpY3kgY29udHJvbGxpbmcgaG93IHVudmVzdGVkIHRva2VucyBhcmUgaGFuZGxlZCBvbiByZXZvY2F0aW9uLgAAAAAAAA9SZXZvY2F0aW9uUG9saWN5AAAAAAIAAAAAAAAADUZ1bGxDbGF3YmFjawAAAAAAAAAAAAAAAAAADUtlZXBVbnZlc3RlZAAAAAAAAA==",
-        "AAAAAAAAAKJSZXZva2UgYSB2ZXN0aW5nIHNjaGVkdWxlLCBjbGF3aW5nIGJhY2sgdG9rZW5zIHBlciB0aGUgZ2l2ZW4gcG9saWN5LgoKT25seSB0aGUgY3JlYXRvciBtYXkgcmV2b2tlLiBSZXZvY2F0aW9uIGlzIHJlamVjdGVkIGJlZm9yZSB0aGUgY2xpZmYKZWxhcHNlcyBhbmQgb25jZSB0aGUgc2NoZWR1bGUgaXMgZnVsbHkgdmVzdGVkIG9yIGFscmVhZHkgcmV2b2tlZC4AAAAABnJldm9rZQAAAAAAAgAAAAAAAAALc2NoZWR1bGVfaWQAAAAABgAAAAAAAAAGcG9saWN5AAAAAAfQAAAAD1Jldm9jYXRpb25Qb2xpY3kAAAAAAQAAA+kAAAACAAAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAAAAAK5DcmVhdGUgYSBuZXcgdmVzdGluZyBzY2hlZHVsZSBhbmQgcmV0dXJuIGl0cyBzdGFibGUgaWQuCgpSZXF1aXJlcyBgdG90YWxfYW1vdW50ID4gMGAsIGBkdXJhdGlvbiA+IDBgLCBhbmQgYGNsaWZmIDw9IGR1cmF0aW9uYC4KVGhlIGJlbmVmaWNpYXJ5IGlzIGF1dGhvcml6ZWQgYXQgY3JlYXRpb24gdGltZS4AAAAAAA9jcmVhdGVfc2NoZWR1bGUAAAAABQAAAAAAAAALYmVuZWZpY2lhcnkAAAAAEwAAAAAAAAAFdG9rZW4AAAAAAAATAAAAAAAAAAx0b3RhbF9hbW91bnQAAAALAAAAAAAAAAVjbGlmZgAAAAAAAAYAAAAAAAAACGR1cmF0aW9uAAAABgAAAAEAAAPpAAAABgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAQAAAD5BIHBhcnRpY2lwYW50IGluIGEgbXVsdGktcGFydHkgZmxvdyAoZXNjcm93LCBnb3Zlcm5hbmNlLCAuLi4pLgAAAAAAAAAAAAVQYXJ0eQAAAAAAAAMAAAAkT24tY2hhaW4gYWRkcmVzcyBvZiB0aGUgcGFydGljaXBhbnQuAAAAB2FkZHJlc3MAAAAAEwAAAD9XaGV0aGVyIHRoaXMgcGFydHkgaGFzIGdyYW50ZWQgYXBwcm92YWwgZm9yIHRoZSBjdXJyZW50IGFjdGlvbi4AAAAACGFwcHJvdmVkAAAAAQAAADlIdW1hbi1yZWFkYWJsZSByb2xlIGxhYmVsLCBlLmcuIGAiYnV5ZXIiYCBvciBgImFyYml0ZXIiYC4AAAAAAAAEcm9sZQAAABA=",
         "AAAAAQAAALtJbmNsdXNpdmUgdGltZSB3aW5kb3cgZXhwcmVzc2VkIGFzIFVuaXggdGltZXN0YW1wcyAoc2Vjb25kcykuCgpTdG9yZWQgYXMgcGxhaW4gYHU2NGAgYmVjYXVzZSBgc29yb2Jhbl9zZGtgIG1vZGVscyB0aW1lIGFzIGB1NjRgOyBhCmRlZGljYXRlZCBuZXd0eXBlIHdvdWxkIGFkZCBjb252ZXJzaW9ucyB3aXRob3V0IGJlbmVmaXQuAAAAAAAAAAAKVGltZUJvdW5kcwAAAAAAAgAAADhMYXRlc3QgbW9tZW50IChpbmNsdXNpdmUpIGF0IHdoaWNoIHRoZSB3aW5kb3cgaXMgYWN0aXZlLgAAAANlbmQAAAAABgAAADpFYXJsaWVzdCBtb21lbnQgKGluY2x1c2l2ZSkgYXQgd2hpY2ggdGhlIHdpbmRvdyBpcyBhY3RpdmUuAAAAAAAFc3RhcnQAAAAAAAAG",
@@ -349,7 +326,6 @@ export class Client extends ContractClient {
     claim: this.txFromJSON<Result<i128>>,
         claimable: this.txFromJSON<Result<i128>>,
         get_status: this.txFromJSON<Result<VestingStatus>>,
-        revoke: this.txFromJSON<Result<void>>,
         create_schedule: this.txFromJSON<Result<u64>>
   }
 }

@@ -29,6 +29,12 @@ The wallet is configured **once** via `initialize(owners, threshold)`
 the threshold is reached; `execute` then performs a real cross-contract
 invocation to the recorded target (an opaque `TxKind::Data` tx) or moves
 real tokens (a typed `TxKind::Withdrawal` tx). A target revert surfaces as
+`ForgeError::ContractInvocationFailed` and leaves the tx `Pending` and
+retryable. Any owner may `reject` a pending tx; one rejection immediately
+makes it `Rejected` and terminal. The rejector and any existing confirmations
+remain on the record for audit, and `get_tx` continues to expose it.
+Confirming, rejecting, or executing a rejected transaction returns
+`ForgeError::InvalidInput` without changing the record.
 `ForgeError::ContractInvocationFailed` and leaves the tx `Pending` and retryable. `reject` records a formal objection; any rejection blocks
 execution, and reaching the rejection threshold makes the tx `Rejected`
 (terminal). If a transaction expires before meeting threshold, its status transitions lazily to `Expired` and further confirmations are refused.
@@ -118,6 +124,9 @@ recorded balance.
 
 ## States
 
+- `Pending` — Awaiting approvals
+- `Executed` — Threshold met and the transaction completed
+- `Rejected` — Vetoed by an owner; terminal; rejector and existing confirmations retained
 - `Pending` — Awaiting approvals; liveness view `is_live(tx_id)` reads `true`.
 - `Executed` — Threshold met and the transaction completed (terminal).
 - `Rejected` — Rejection threshold met (terminal).

@@ -10,13 +10,17 @@ explicit table of unlock tranches.
 fn create_schedule(funder, beneficiary, token, total_amount, cliff, duration) -> Result<u64, ForgeError>
 fn get_schedule(schedule_id) -> Result<VestingSchedule, ForgeError>
 fn revoke(schedule_id) -> Result<(), ForgeError>
+fn reassign_beneficiary(schedule_id, new_beneficiary) -> Result<(), ForgeError>
 // tranche (discrete unlock table)
 fn create_tranche_schedule(beneficiary, token, tranches: Vec<Tranche>) -> Result<u64, ForgeError>
 fn get_tranche_schedule(schedule_id) -> Result<TrancheSchedule, ForgeError>
 // both kinds
 fn claim(schedule_id) -> Result<i128, ForgeError>
+fn claim_for(schedule_id, beneficiary) -> Result<i128, ForgeError>
 fn claimable(schedule_id) -> Result<i128, ForgeError>
+fn claimable_for(schedule_id, beneficiary) -> Result<i128, ForgeError>
 fn get_status(schedule_id) -> Result<VestingStatus, ForgeError>
+fn touch_ttl(schedule_id) -> Result<(), ForgeError>
 ```
 
 `Tranche { unlock_at: u64, amount: i128 }` is one entry of the unlock table:
@@ -28,11 +32,12 @@ records live under distinct storage keys and a linear id is `NotFound` in
 `get_tranche_schedule` (and vice versa).
 
 `get_schedule` is the linear kind's read-only record view: it returns the
-stored `VestingSchedule` (funder, beneficiary, token, total amount, start,
-cliff, duration, claimed, frozen revoked amount, stored status) for an
+stored `VestingSchedule` (funder, current beneficiary, token, total amount,
+start, cliff, duration, total claimed across beneficiaries, reassignment
+snapshot and count, frozen revoked amount, stored status) for an
 existing id, mirroring `get_tranche_schedule` and the workspace's other
 record views (`get_escrow`, `get_tx`, `get_proposal`,
-`get_subscription`). `claimed` reflects completed claims; the stored
+`get_subscription`). `claimed` is the total already paid across beneficiaries; the stored
 `status` is refreshed on claim, and `get_status` derives the current one
 from ledger time between claims.
 
@@ -80,6 +85,13 @@ A first tranche at `unlock_at == 0` unlocks at the creation timestamp — the
 "TGE tranche" of a typical agreement. The table is validated, stored once, and
 immutable afterwards.
 
+## Revocation
+
+The creator of a schedule may revoke it, clawing back tokens under a
+configurable policy. Revocation is terminal: a revoked schedule can no longer
+be claimed.
+
+
 ## Release Formula
 
 Linear, at ledger time `t`:
@@ -106,6 +118,32 @@ timestamp (`revoked_vested`): the release formula returns that frozen amount
 for every later time, so `claim` succeeds only up to it and `claimable`
 returns `0` once it is claimed. Nothing after the revocation timestamp ever
 vests.
+
+### Reassignment split
+
+`reassign_beneficiary(schedule_id, new_beneficiary)` is funder-authorized and
+only applies to a live linear schedule. It snapshots the vested amount at the
+current ledger timestamp without changing `start`, `cliff`, `duration`, or
+`total_amount`. The outgoing beneficiary's vested-but-unclaimed amount is
+credited to that address; the new beneficiary starts with zero accrual at that
+same timestamp and receives only subsequent vesting.
+
+The split is exact at the boundary: a claim and reassignment in the same
+ledger observes the pre-reassignment vested amount for the outgoing
+beneficiary. `claim` and `claimable` address the current beneficiary;
+`claim_for` and `claimable_for` address a named beneficiary and include any
+unclaimed frozen balance from earlier assignments. Former-beneficiary balances
+are keyed by both schedule id and address, so one beneficiary's other schedules
+are unaffected. Reassignment is unlimited but increments
+`VestingSchedule.reassignment_count` on every successful change.
+
+Each successful change emits `BeneficiaryReassignedFrom` and
+`BeneficiaryReassignedTo`, with the schedule id and corresponding beneficiary
+as topics, plus the other party, frozen vested amount, and count in event data.
+Reassignment to the current beneficiary or funder is rejected. Completed and
+revoked schedules cannot be reassigned. If a reassigned schedule is later
+revoked, existing former-beneficiary balances remain payable and the current
+beneficiary can claim only their accrued portion up to the revocation snapshot.
 
 ## Status
 
@@ -142,14 +180,28 @@ frozen remainder is unclaimed.
   the `funder` argument is recorded on the schedule without authorizing
   (mirroring escrow's non-consenting parties).
 - `revoke` requires the funder recorded at creation.
-- `claim` requires the beneficiary.
-- `claimable`, `get_status`, `get_schedule`, and `get_tranche_schedule` are
-  read-only views.
+- `reassign_beneficiary` requires the funder recorded at creation.
+- `claim` requires the current beneficiary; `claim_for` requires the named
+  beneficiary.
+- `claimable`, `claimable_for`, `get_status`, `get_schedule`, and
+  `get_tranche_schedule` are read-only views.
 
 ## Settlement
 
+## Events
+
+`create_schedule` publishes one `ScheduleCreated` event after storing the
+linear schedule. Its `schedule_id` is the topic and the complete
+`VestingSchedule` is the payload. A successful non-zero `claim` publishes one
+`Claimed` event after the updated record is stored; the event carries the
+schedule id, payout amount, cumulative claimed amount, and resulting status.
+Claims for both linear and tranche schedules are reported. A claim returning
+zero, read-only calls, and failed invocations publish no vesting lifecycle
+event.
+
 The contract custodies the SEP-41 token configured on the schedule, and
-`claim` settles through it for both kinds:
+`claim` settles through it for both kinds; `claim_for` settles linear claims
+for an explicit beneficiary:
 
 - the newly claimable amount is transferred from the contract to the
   beneficiary **before** the schedule is written (escrow's
@@ -163,8 +215,7 @@ The contract custodies the SEP-41 token configured on the schedule, and
 
 ## Storage Layout & Upgrade Compatibility
 
-The vesting contract uses instance storage partitioned into three distinct
-keys:
+The vesting contract uses instance storage partitioned into four key variants:
 
 ```rust
 enum DataKey {
@@ -174,13 +225,16 @@ enum DataKey {
     TrancheSchedule(u64),
     /// Monotonic id counter (`u64`), initialized at 0 and incremented on each schedule creation.
     Count,
+    /// Frozen, unclaimed amount owed to a former beneficiary.
+    FormerBeneficiaryClaim(u64, Address),
 }
 ```
 
 ### Storage Model
 
 - **`DataKey::Count`**: Stores a single `u64` representing the highest allocated schedule id. Next id allocation uses checked addition (`checked_add(1)`), returning `ForgeError::ArithmeticOverflow` on counter saturation.
-- **`DataKey::Schedule(u64)`**: Stores the `VestingSchedule` struct containing funder, beneficiary, token address, total amount, start timestamp, cliff duration, total duration, claimed amount, the optional frozen vested amount (`revoked_vested`), and derived lifecycle status.
+- **`DataKey::Schedule(u64)`**: Stores the `VestingSchedule` struct containing funder, current beneficiary, token address, total amount, start timestamp, cliff duration, total duration, total claimed amount, the current assignment's vested snapshot and claimed amount, reassignment count, optional frozen vested amount (`revoked_vested`), and derived lifecycle status.
+- **`DataKey::FormerBeneficiaryClaim(u64, Address)`**: Stores a former beneficiary's frozen, unclaimed balance for that schedule. The schedule id is part of the key, so balances from separate grants never mix.
 - **`DataKey::TrancheSchedule(u64)`**: Stores the `TrancheSchedule` struct containing beneficiary, token address, start timestamp, the immutable unlock table, claimed amount, and derived lifecycle status.
 - Instance storage lifetime is bound to the contract instance. In environments with storage TTL expiration, the contract instance TTL must be maintained to prevent storage eviction.
 
@@ -188,10 +242,10 @@ enum DataKey {
 
 - **Key Segregation**: Because `DataKey::Schedule(u64)` and `DataKey::TrancheSchedule(u64)` use tuple variants and `DataKey::Count` is a unit variant, keys occupy non-overlapping namespaces within instance storage.
 - **Record Schema Evolution**:
-  - The `VestingSchedule` struct is serialized via Soroban's `#[contracttype]`, where every struct field is a required key. The revocation upgrade **added required fields** (`funder: Address` and `revoked_vested: Option<i128>`), which makes it a **storage-breaking upgrade**: records written by a pre-revocation build do not deserialize into the new type. A deployed contract must migrate or reset its instance storage when upgrading, and `create_schedule` callers must add the `funder` argument (the entrypoint signature changed too). `TrancheSchedule` and `create_tranche_schedule` keep their existing schema and interface.
+  - The `VestingSchedule` struct is serialized via Soroban's `#[contracttype]`, where every struct field is a required key. The revocation/reassignment additions (`funder`, `revoked_vested`, `reassignment_vested`, `beneficiary_claimed`, and `reassignment_count`) make this a **storage-breaking upgrade**: records written by an older build do not deserialize into the new type. Deployments must migrate or reset their instance storage before upgrading. The former-beneficiary key is additive. `TrancheSchedule` keeps its existing schema.
   - Future additions to either struct must maintain backwards deserialization compatibility (e.g. using `Option<T>` for newly introduced optional fields, or migrating storage records upon upgrade) — note that `Option<T>` helps only for reading absent fields into an optional, not for the required-key encoding itself.
   - Storage key enums must preserve existing discriminant ordering if extended (e.g. adding new key variants for administrative roles or persistent storage migration).
-- **Storage Tier Migration**: If migrating from instance storage to persistent storage with per-schedule TTL management (mirroring the Escrow contract architecture), `DataKey::Schedule(u64)` and `DataKey::TrancheSchedule(u64)` entries can be migrated to persistent storage while retaining `DataKey::Count` in instance storage. Revocation added no storage keys and no tier changes.
+- **Storage Tier Migration**: If migrating from instance storage to persistent storage with per-schedule TTL management (mirroring the Escrow contract architecture), schedule records and `FormerBeneficiaryClaim` entries can be migrated to persistent storage while retaining `DataKey::Count` in instance storage. Reassignment adds a key variant but no storage tier.
 
 Tests live in-crate (`crates/vesting/src/lib.rs`) and run with
 `cargo test -p soroban-forge-vesting --all-targets --locked`.

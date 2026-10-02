@@ -13,8 +13,10 @@ permissionless execution of approved opaque actions.
 fn initialize(governance_token) -> Result<(), ForgeError>
 fn configure_bond(token, amount, treasury) -> Result<(), ForgeError>
 fn get_bond_config() -> Result<BondConfig, ForgeError>
-fn propose(proposer, target, action, duration, requires, conflicts_with) -> Result<u64, ForgeError>
-fn get_dependencies(proposal_id) -> Result<DependencyView, ForgeError>
+fn configure_category_rules(rules) -> Result<(), ForgeError>
+fn get_category_rules(category) -> Result<CategoryRules, ForgeError>
+fn propose(proposer, target, action, duration) -> Result<u64, ForgeError>
+fn propose_with_category(proposer, target, action, category) -> Result<u64, ForgeError>
 fn vote(proposal_id, voter, support) -> Result<(), ForgeError>
 fn execute(proposal_id) -> Result<(), ForgeError>
 fn cancel_proposal(proposal_id, proposer) -> Result<(), ForgeError>
@@ -35,16 +37,43 @@ rejected with `ForgeError::InvalidInput`. Finalisation still requires a
 strict weighted majority. After the deadline, the first `execute` call finalises the vote; a
 succeeded proposal is then dispatched by a subsequent permissionless
 `execute` call. Only a successful target invocation changes `Succeeded` to
+`action` is forwarded as a single `Bytes` argument to the target contract's
+`execute` entrypoint. Voting remains one vote per voter. `propose` is retained
+as a Standard-category compatibility shortcut; `propose_with_category` selects
+the category's configured voting period. After the deadline, the first
+`execute` call finalises the vote; a succeeded proposal is dispatched by a
+subsequent permissionless `execute` call once its configured execution delay
+has elapsed. Only a successful target invocation changes `Succeeded` to
 `Executed`. A target revert returns
 `ForgeError::ContractInvocationFailed` and leaves the proposal retryable in
 `Succeeded`.
 
-`requires` lists proposal ids that must reach `Executed` before the target
-action can run. `conflicts_with` is one optional id; if it executes, this
-proposal can never dispatch. Both edges are same-contract relations.
-`get_dependencies` exposes them to indexers. Unknown ids return
-`ForgeError::NotFound`; self edges, duplicate edges, consumed references,
-and cycles return `ForgeError::InvalidInput`.
+## Proposal categories
+
+Call `configure_category_rules` once during deployment with exactly one
+`CategoryRules` record for each category. The configuration is permissionless
+and immutable; as with the bond setup, the deployer should configure it in the
+deployment transaction before opening the contract to callers. Proposals are
+rejected with `ForgeError::NotInitialized` until rules are configured.
+
+Each record contains a voting period in seconds, a minimum number of votes
+cast for quorum, an approval threshold in basis points, and an execution delay
+in seconds. The electorate is not token-weighted, so quorum counts unique
+voters. The approval threshold is checked against all votes cast. For example,
+`6_667` requires at least 66.67% of votes to support the proposal.
+
+| Category | Example period | Example quorum | Example approval | Example delay |
+|---|---:|---:|---:|---:|
+| `Standard` | 1 day | 1 | 50.01% | 0 |
+| `Financial` | 2 days | 2 | 66.67% | 1 hour |
+| `Governance` | 7 days | 3 | 75% | 1 day |
+| `Emergency` | 1 hour | 1 | 50.01% | 0 |
+
+These are recommended example values, not hard-coded contract defaults. A
+proposal becomes `Defeated` if it misses quorum or its approval threshold.
+`execute_after` is recorded as `voting_ends + execution_delay`; a premature
+dispatch attempt returns `ForgeError::InvalidInput` without changing the
+`Succeeded` proposal.
 
 The DAO call itself is permissionless after voting has ended. A target's own
 `require_auth` is not implicitly satisfied by the DAO's cross-contract call;
@@ -59,16 +88,17 @@ Proposals progress through the following states, driven entirely by
 | State | Meaning | Entered from | Exits to |
 |---|---|---|---|
 | `Active` | Voting in progress | `propose` | `Succeeded`, `Defeated`, `Cancelled` |
-| `Succeeded` | Strict `for` majority after the deadline; ready for dispatch | `execute` (finalization) | `Executed` |
-| `Defeated` | No strict majority after the deadline (including ties and zero votes) | `execute` (finalization) | — (terminal) |
+| `Succeeded` | Quorum and category approval threshold met after the deadline | `execute` (finalisation) | `Executed` |
+| `Defeated` | Quorum or category approval threshold missed | `execute` (finalisation) | — (terminal) |
 | `Executed` | Target dispatch succeeded | `execute` (dispatch) | — (terminal) |
 | `Cancelled` | Withdrawn by the original proposer | `cancel_proposal` | — (terminal) |
 | `Queued` | Reserved for an optional timelock; **not reachable** through the public interface | — | — |
 
 ```text
-propose (voting_ends = now + duration)
+propose_with_category (voting_ends = now + category.voting_period)
   --> Active --vote × n--> deadline passes
-  --> execute: for > against ? Succeeded : Defeated
+  --> execute: quorum + approval threshold ? Succeeded : Defeated
+  --> wait until execute_after = voting_ends + category.execution_delay
   --> execute (on Succeeded): target.execute(action) --> Executed (terminal)
   --> cancel (proposer only): Cancelled (terminal)
 ```
@@ -81,11 +111,12 @@ Transition rules enforced by the contract:
   voter regardless of balance. Voting before `initialize` returns
   `ForgeError::NotInitialized`.
 - `execute` before the deadline is `ForgeError::InvalidInput`.
-- On `Active` past deadline, `execute` finalizes: `for_votes > against_votes`
-  → `Succeeded` (bond stays in custody); otherwise → `Defeated` (bond
-  forfeited to the treasury). Ties and zero-vote proposals are `Defeated`.
+- On `Active` past deadline, `execute` finalises: quorum and the category's
+  approval threshold must both be met for `Succeeded` (bond stays in custody);
+  otherwise → `Defeated` (bond forfeited to the treasury).
 - A `Succeeded` proposal is dispatched by a **second, separate** `execute`
-  call; dispatch is described in [Execute dispatch](#execute-dispatch).
+  call, no earlier than `execute_after`; dispatch is described in
+  [Execute dispatch](#execute-dispatch).
 - `Defeated`, `Executed`, `Cancelled`, and still-`Active` proposals reject
   `execute` with `ForgeError::InvalidInput`.
 - `cancel_proposal` requires the original proposer
@@ -95,38 +126,11 @@ Transition rules enforced by the contract:
 
 ## Proposer cooldown and active proposal limit
 
-To bound proposal creation and prevent spam, each proposer can have at most
-`DEFAULT_MAX_ACTIVE_PROPOSALS = 5` concurrent active proposals. Exceeding the
-limit returns `ForgeError::ProposerCooldown`. The active count increments on
-successful `propose` and decrements on `Cancelled`, `Defeated`, or `Executed`.
-`get_active_proposal_count(proposer)` is a read-only view.
-
-### Dependency outcomes
-
-| Dependency condition | Consumer state | `execute` result | Resulting consumer state |
-|---|---|---|---|
-| Required proposal is Active or Succeeded | Succeeded | `DeadlineReached` | Succeeded; bond remains held |
-| Required proposal is Cancelled or Defeated | Succeeded | `ContractInvocationFailed` | Succeeded permanently blocked |
-| Required proposal is Executed | Succeeded | target dispatch proceeds | Executed on success |
-| Conflicting proposal is Executed | Succeeded | `InvalidInput` | Succeeded permanently blocked |
-| Conflicting proposal is not Executed | Succeeded | target dispatch proceeds | Executed on success |
-
-The first `execute` on a passed proposal may move it to `Succeeded` while a
-dependency is unresolved. The dependency guard runs before target dispatch,
-refund, and state writes. A blocked call leaves the Succeeded proposal and its
-bond unchanged. If a required proposal is later cancelled or defeated, its
-dependents remain Succeeded and permanently unexecutable; they are not
-automatically cancelled and their bonds stay held. This defines the
-cancellation boundary for the separate amendment/cancellation work in #226.
-
-Cycles are checked at proposal time with iterative DFS over reachable
-`requires` edges. The traversal uses an explicit Soroban `Vec` as its stack
-and a visited set, so it does not consume recursive call-stack depth. Runtime
-is O(V + E) for the reachable dependency subgraph. Since ids must already
-exist, ordinary edges point to older proposals; the traversal also catches
-cycles in malformed stored graphs. `Queued` remains an orthogonal future time
-gate: a timelock can queue work after its dependencies resolve, but is not
-implemented here.
+To bound proposal creation rates and prevent spam, the contract enforces a concurrent active proposal limit:
+- **Active limit**: Each proposer can have at most `DEFAULT_MAX_ACTIVE_PROPOSALS = 5` concurrent active proposals.
+- **Enforcement**: Calling `propose` when the proposer already has 5 active proposals returns `ForgeError::ProposerCooldown`.
+- **Accounting**: The active count increments on a successful `propose` and decrements when a proposal reaches a terminal state (`Cancelled` via `cancel_proposal`, or `Defeated` / `Executed` via `execute`).
+- **Read-only view**: `get_active_proposal_count(proposer: Address) -> u32` returns the current number of active proposals for `proposer` with zero auth requirements and no state mutations.
 
 ## Proposal bonds
 
@@ -137,15 +141,8 @@ The governance token configured by `initialize` may be the same token as the
 proposal bond token or a different token; bond amounts never contribute to
 vote weight. Its configuration is stored in instance storage under the
 additive `DataKey::GovernanceToken` key. Existing deployments must call
-`initialize` once before accepting votes. Proposal records add the dependency
-fields. The `Proposed` event name and topics stay unchanged; its `data` now
-includes those fields.
-
-This changes the `propose` client signature and serialized `Proposal` shape.
-Consumers must regenerate the DAO client bindings. Existing deployed proposal
-records require an explicit migration before upgrading this contract; this
-feature does not implement that migration, so deploy a new DAO instance when
-legacy proposals must remain readable.
+`initialize` once before accepting votes. This addition does not change the
+`propose` signature or the serialized `Proposal` shape.
 
 **Configuration.** `configure_bond(token, amount, treasury)` is a one-time,
 permissionless write — first caller wins, later calls return
@@ -155,6 +152,13 @@ the party that later receives forfeited bonds. A non-positive amount is
 rejected with `ForgeError::InvalidInput`. While no bond is configured,
 `propose` returns `ForgeError::NotInitialized`: free proposals are never
 accepted (an unconfigured deployment is unusable, not spam-prone).
+**Configuration.** `configure_bond(token, amount, treasury)` and
+`configure_category_rules(rules)` are one-time, permissionless writes — first
+caller wins, later calls return `ForgeError::AlreadyInitialized`. Configure
+both during deployment before opening the contract to callers. The treasury
+address is fixed at bond setup; category rules must contain exactly one valid
+record for each category. Proposals return `ForgeError::NotInitialized` until
+both configurations exist.
 
 **Posting.** `propose` pulls `amount` of `token` from the proposer into
 contract custody *before* any state write, then stores `bond_token`,
@@ -168,9 +172,9 @@ released once:
 
 | Transition | Trigger | Bond |
 |---|---|---|
-| `Active → Succeeded` | majority after the deadline | stays in custody (`Posted`) |
+| `Active → Succeeded` | quorum and category approval threshold after the deadline | stays in custody (`Posted`) |
 | `Succeeded → Executed` | successful target dispatch | refunded to the proposer (`Refunded`) |
-| `Active → Defeated` | no majority after the deadline | forfeited to the configured treasury (`Forfeited`) |
+| `Active → Defeated` | quorum or category approval threshold missed | forfeited to the configured treasury (`Forfeited`) |
 | `Active → Cancelled` | proposer revokes the proposal | refunded to the proposer (`Refunded`) |
 
 `BondState` mirrors this exactly: `Posted` (in custody), `Refunded` (back
@@ -192,8 +196,8 @@ implicit in Soroban.
 Delivering an approved action is a two-step process, both steps
 permissionless and keyed by `execute(proposal_id)`:
 
-1. **Finalization** (proposal `Active` past the deadline): the tally is
-   frozen. A strict `for` majority moves the proposal to `Succeeded` — the
+1. **Finalisation** (proposal `Active` past the deadline): the tally is
+  frozen. Meeting quorum and the category approval threshold moves the proposal to `Succeeded` — the
    bond remains in custody and **no target call is made yet**. Otherwise the
    proposal becomes `Defeated` and the bond is forfeited.
 2. **Dispatch** (proposal `Succeeded`): the contract performs a real
@@ -242,12 +246,17 @@ A full lifecycle, from deployment to on-chain effect:
    transaction. Both configurations are immutable; there is no admin role.
    `propose` is rejected until the bond is configured, and `vote` is rejected
    until the governance token is configured.
+  `configure_bond(&bond_token, &100, &treasury)` and
+  `configure_category_rules(&rules)` in the deploy transaction. Both
+  configurations are immutable; there is no admin role. Proposals are
+  rejected until both calls complete.
 
 2. **Create a proposal.** A member calls
-   `propose(&proposer, &target, &action_payload, &duration)`. The contract
-   transfers 100 units of the bond token from the proposer into custody,
-   assigns the next stable `proposal_id`, records the proposal as `Active`
-   with `voting_ends = now + duration`, and emits `Proposed` and
+  `propose_with_category(&proposer, &target, &action_payload, &category)`
+  (or the Standard-only `propose` compatibility method). The contract
+  transfers 100 units of the bond token from the proposer into custody,
+  assigns the next stable `proposal_id`, records the proposal as `Active`
+  with category-defined `voting_ends` and `execute_after`, and emits `Proposed` and
    `BondPosted`. The proposer's signature covers the nested bond pull.
 
 3. **Vote.** Each member calls `vote(&proposal_id, &voter, &support)` once.
@@ -256,10 +265,10 @@ A full lifecycle, from deployment to on-chain effect:
    and rejects zero-balance voters, duplicate votes, votes after the deadline,
    and votes on non-`Active` proposals.
 
-4. **Finalize.** After `voting_ends`, anyone (not just voters — the
-   proposal creator or an observer) calls `execute(&proposal_id)`. A strict
-   `for` majority moves the proposal to `Succeeded` (`Finalised` event);
-   otherwise it becomes `Defeated` and the bond is forfeited to the
+4. **Finalise.** After `voting_ends`, anyone (not just voters — the
+  proposal creator or an observer) calls `execute(&proposal_id)`. Meeting
+  quorum and the category approval threshold moves the proposal to
+  `Succeeded` (`Finalised` event); otherwise it becomes `Defeated` and the bond is forfeited to the
    treasury (`Finalised` + `BondReleased` with `forfeited: true`).
 
 5. **Dispatch.** Anyone calls `execute(&proposal_id)` again. The contract
@@ -314,6 +323,18 @@ address to separate the DAO's records from the token's.
 
 Proposal records (`DataKey::Proposal(u64)`) are stored in persistent storage. `DataKey::Count`, `DataKey::Bond`, `DataKey::BondHeld`, and `DataKey::Vote` entries remain in instance storage.
 
-`propose`, `vote`, `execute`, and `cancel_proposal` extend proposal persistent storage TTL on every write to a 30-day horizon (`30 * DAY_IN_LEDGERS = 518,400` ledgers). Dependency edges live on the proposal record; no top-level storage key is added.
+## Vote Delegation
+
+`delegate(to)` and `undelegate()` require the delegator's authorization and
+apply to proposals created after the change. Self-delegation and cycles are
+rejected. Proposal creation resolves active delegation chains and stores an
+immutable per-proposal snapshot, so later changes cannot change that
+proposal's voting power. When a delegate votes, the vote consumes its own
+mark and all unspent marks in that snapshot. `VoteCast` remains unchanged;
+the additive `VotePowerCast` event reports the counted weight. The delegation
+graph is bounded to `MAX_DELEGATION_MEMBERS = 100`, and snapshots use the
+proposal's persistent TTL horizon.
+
+`propose`, `vote`, `execute`, and `cancel_proposal` extend proposal persistent storage TTL on every write to a 30-day horizon (`30 * DAY_IN_LEDGERS = 518,400` ledgers).
 
 A permissionless public keeper entrypoint `touch_ttl(proposal_id)` allows anyone to bump a proposal's persistent TTL without modifying its state. If the proposal ID does not exist, `touch_ttl` returns `ForgeError::NotFound`.

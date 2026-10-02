@@ -19,7 +19,7 @@ export const FORGE_ERRORS: Record<number, string> = {
   [12]: "ContractInvocationFailed",
   [13]: "WithdrawalLimitExceeded",
   [14]: "SubscriptionPastDue",
-  [15]: "ProposerCooldown",
+  [15]: "ProposerCooldown"
 };
 
 /**

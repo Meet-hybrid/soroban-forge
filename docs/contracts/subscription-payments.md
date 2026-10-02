@@ -7,6 +7,10 @@ pull a fixed `amount` per `period` (seconds) through SEP-41 token transfers.
 
 ```rust
 fn subscribe(subscriber, provider, token, amount, period) -> Result<u64, ForgeError>
+fn subscribe_on_behalf_of(provider, subscriber, token, amount, period) -> Result<u64, ForgeError>
+fn authorize_provider(subscriber, provider) -> Result<(), ForgeError>
+fn revoke_provider(subscriber, provider) -> Result<(), ForgeError>
+fn is_provider_authorized(subscriber, provider) -> bool
 fn charge(subscription_id) -> Result<i128, ForgeError>
 fn deposit(subscription_id, amount) -> Result<i128, ForgeError>
 fn withdraw_balance(subscription_id, amount) -> Result<i128, ForgeError>
@@ -22,6 +26,11 @@ fn get_usage(subscription_id, metric: Symbol) -> Result<UsageRecord, ForgeError>
 fn get_subscription_count() -> u64
 fn subscriptions_for_subscriber(subscriber, offset, limit) -> Result<Vec<Subscription>, ForgeError>
 fn subscriptions_for_provider(provider, offset, limit) -> Result<Vec<Subscription>, ForgeError>
+// Plan registry (issue #116)
+fn create_plan(provider, token, amount, period, quotas: Vec<MetricQuota>) -> Result<u64, ForgeError>
+fn subscribe_to_plan(plan_id, subscriber) -> Result<u64, ForgeError>
+fn get_plan(plan_id) -> Result<Plan, ForgeError>
+fn plan_count() -> u64
 ```
 
 - `subscribe` requires the subscriber and returns a stable, monotonic id.
@@ -35,6 +44,7 @@ fn subscriptions_for_provider(provider, offset, limit) -> Result<Vec<Subscriptio
   balance cannot cover it, no partial transfer occurs and the existing retry
   policy moves the subscription to `PastDue` (and auto-cancels after three
   failed attempts). Depositing while `PastDue` allows the next `charg` retry
+  failed attempts). Depositing while `PastDue` allows the next `charge` retry
   to recover it. `charge_catchup` rejects prepaid subscriptions so it cannot
   bypass this one-period lapse policy by pulling from the subscriber.
 - `withdraw_balance` requires the subscriber and returns a requested amount
@@ -66,7 +76,7 @@ without this feature.
 ```rust
 struct MetricQuota {
     metric: Symbol,             // e.g. api_calls
-    included_units: u64,        // covered by the base `amount`
+    included_units: u64,         // covered by the base `amount`
     overage_price: i128,        // per started bucket
     bucket_units: u64,             // units per bucket, must be > 0
     max_overage_units: Option<u64>, // cap on billable overage units
@@ -187,6 +197,33 @@ pull mode remains direct subscriber-to-provider settlement. The subscription
 record gains an optional `prepaid_balance` field; ABI clients must be regenerated
 for this record shape change.
 
+## Prepaid money flow
+
+Only a successful `deposit` opts in. Subscriptions that never deposit retain
+the existing pull flow and `prepaid_balance == None`.
+
+| State / operation | Token movement | Balance effect |
+|---|---|---|
+| Pull mode `charge` | subscriber → provider, exact derived period amount | no prepaid balance |
+| Prepaid `deposit` | subscriber → contract, exact requested amount | add amount after transfer succeeds |
+| Prepaid `charge`, sufficient balance | contract → provider, exact derived period amount | subtract amount after transfer succeeds |
+| Prepaid `charge`, insufficient balance | none | unchanged; retry state advances to `PastDue` or retry-limit cancellation |
+| `withdraw_balance` | contract → subscriber, exact requested amount | subtract amount after transfer succeeds |
+| `cancel` / retry-limit auto-cancel | contract → subscriber, full remaining balance | set to `Some(0)` after refund succeeds |
+
+The conservation invariant is `Σdeposits − Σperiod debits ‒ Σwithdrawals ‒
+Σcancellation refunds == prepaid_balance` after every successful operation.
+The randomized lifecycle property test compares each operation with an
+independent balance/state mirror and also checks the SEP-41 contract balance.
+Every successful deposit, period debit, and refund emits `Deposited`,
+`BalanceDebited`, or `BalanceRefunded` with `amount` and `balance_after`.
+
+Prepaid mode introduces a custody trust surface: deposited tokens stay in the
+contract until periods are charged or the subscriber withdraws/cancels. The
+pull mode remains direct subscriber-to-provider settlement. The subscription
+record gains an optional `prepaid_balance` field; ABI clients must be regenerated
+for this record shape change.
+
 ## Secondary Indices
 
 Each subscription is indexed in two secondary lists, written on the `subscribe`Jsuccess path:
@@ -218,13 +255,15 @@ of `0` fails with `ForgeError::InvalidInput`.
 
 ## Storage
 
--  `Subscription(id)` — the record for id `u64`. The record carries the
+- `Subscription(id)` — the record for id `u64`. The record carries the
   lapsed bookkeeping (a due-since timestamp or missed-period counter) alongside
   the existing fields.
--  `Count` — monotonic subscription id counter.
--  `SubscriberSubscriptions(address)` — subscriber id index.
--  `ProviderSubscriptions(address)` — provider id index.
--  `Usage(subscription_id, metric)` — the open period's raw unit counter for one
+- `Count` — monotonic subscription id counter.
+- `SubscriberSubscriptions(address)` — subscriber id index.
+- `ProviderSubscriptions(address)` — provider id index.
+- `RenewalPolicy(id)` — separate instance-storage record; the `Subscription`
+  wire shape remains unchanged.
+- `Usage(subscription_id, metric)` — the open period's raw unit counter for one
   metric, stamped with the `last_charged` window it belongs to; removed by the
   charge that closes the period.
 
@@ -262,8 +301,119 @@ The contract emits typed on-chain lifecycle events for indexers and off-chain mo
 - `BalanceDebited` (topic: `subscription_id: u64`) — successful prepaid period settlement; contains the exact `amount` and `balance_after`.
 - `BalanceRefunded` (topic: `subscription_id: u64`) — successful subscriber withdrawal or cancellation refund; contains `amount` and `balance_after`.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
+- `Charged` (topic: `subscription_id: u64`) — emitted on successful billing via `charge` (one event) or `charge_catchup` (one event per settled period). Contains `amount`, `last_charged`, and `next_charge_at`.
+- `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
+- `RenewalPolicyChanged` reports subscriber policy changes; `max_renewals = 0`
+  means unlimited.
+- `Renewed` reports successful permissionless renewals and the completed
+  renewal count; the ordinary `Charged` event is also emitted.
 
 `pause` and `resume` currently emit no contract events. `Paused`/`Resumed`
 events are planned in [issue #12](https://github.com/Meet-hybrid/soroban-forge/issues/12);
 until that work lands, indexers should observe the status through the stored
 subscription record rather than expecting lifecycle events for these calls.
+
+## Automatic Renewal
+
+The subscriber enables or disables policy with `set_renewal_policy`.
+`renew(subscription_id)` settles one elapsed period while the subscription
+is active, policy is enabled, and the call lands between the due timestamp
+and seven days after it (inclusive). A configured maximum is enforced; zero
+means unlimited. A failed transfer returns `TokenTransferFailed` and leaves
+the subscription and renewal counter unchanged. `get_renewal_policy` reports
+the next due timestamp, current eligibility, and allowance expiry ledger.
+Enabling policy approves this contract as a SEP-41 spender; finite renewal
+counts are enforced independently by each subscription policy. Disabling a
+policy closes that subscription's renewal gate, and the shared allowance is
+revoked when no other active policy for the same subscriber and token remains.
+The token's temporary allowance lives through its
+maximum TTL, so the subscriber must re-enable policy after that ledger window
+to continue automatic renewals. Policy uses a parallel key so the serialized
+`Subscription` record does not change. Manual charges and renewals advance the
+same `last_charged` value, preventing double settlement.
+
+## Plan Registry
+
+A provider can publish a reusable billing plan once and share its `plan_id`
+with subscribers, who then self-serve without needing the token, amount, and
+period out-of-band.
+
+### Creating a plan
+
+```rust
+fn create_plan(provider, token, amount, period, quotas) -> Result<u64, ForgeError>
+```
+
+- Requires the **provider's authorization**.
+- Validates `amount > 0` and `period > 0` before auth, so invalid inputs never
+  spend the provider's signature.
+- `quotas` follows the same validation as `set_quotas`: at most 16 entries, no
+  duplicate metrics, `bucket_units > 0`, `overage_price >= 0`. Pass an empty
+  `Vec` for flat pricing.
+- Returns a stable `plan_id` allocated from a **separate monotonic counter**
+  (`DataKey::PlanCount`) so plan ids and subscription ids are in distinct
+  namespaces and can never be confused.
+- Plan ids are sequential starting from 1 and stable — they never change after
+  creation.
+
+### Subscribing to a plan
+
+```rust
+fn subscribe_to_plan(plan_id, subscriber) -> Result<u64, ForgeError>
+```
+
+- Requires the **subscriber's authorization**.
+- Looks up the plan; returns `ForgeError::NotFound` for an unknown `plan_id`.
+- Creates a `Subscription` record with the plan's token, amount, period, and
+  quotas copied verbatim. The subscription id is allocated from the **same**
+  counter as `subscribe`, so all subscription ids are globally unique regardless
+  of creation path.
+- **A subscriber can hold multiple subscriptions to the same plan.** Each call
+  creates a distinct record with its own `subscription_id`, `last_charged`
+  timestamp, and independent lifecycle. This mirrors the existing behaviour of
+  `subscribe`, which also creates a new record on every call even with the same
+  provider.
+- The resulting subscription is indistinguishable from one created via
+  `subscribe`: it appears in both subscriber and provider secondary indexes,
+  supports `charge`, `charge_catchup`, `pause`, `resume`, `cancel`,
+  `set_quotas`, `record_usage`, and all views.
+
+### Reading plan state
+
+```rust
+fn get_plan(plan_id) -> Result<Plan, ForgeError>  // no auth required
+fn plan_count() -> u64                            // no auth required
+```
+
+- `get_plan` returns `ForgeError::NotFound` for an unknown id. No
+  authorization required.
+- `plan_count` returns the total number of plans created (the monotonic counter;
+  it never decreases). No authorization required.
+
+### Plan struct
+
+```rust
+struct Plan {
+    plan_id:  u64,
+    provider: Address,
+    token:    Address,
+    amount:   i128,
+    period:   u64,
+    quotas:   Vec<MetricQuota>,  // empty = flat pricing
+}
+```
+
+### Authorization table (plan entrypoints)
+
+| Entrypoint          | Required authorization |
+| ------------------- | ---------------------- |
+| `create_plan`       | provider               |
+| `subscribe_to_plan` | subscriber             |
+| `get_plan`          | none                   |
+| `plan_count`        | none                   |
+
+### Storage keys (plan registry)
+
+- `Plan(plan_id: u64)` — the plan record.
+- `PlanCount` — monotonic plan id counter (separate from `Count` used for
+  subscriptions).

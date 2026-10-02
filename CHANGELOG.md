@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Opt-in accrual / recoupment ledger for marketplace royalties** (`set_royalty`,
+  `distribute`, `settle_sale`, `settle_sales`, `distribute_accrued`):
+  collections can opt into accrual mode at configuration time; sales then
+  credit the royalty share to a per-`(collection, token)` ledger held in
+  contract custody instead of paying the recipient immediately. `distribute_accrued`
+  pays the full accrued balance to the configured recipient atomically, debiting
+  the ledger before the outbound transfer and rolling back on failure to
+  prevent double sweeps. New read-only views `get_accrued` and
+  `get_recipient_accrued` expose the ledger. The accrual flag is immutable
+  once a collection has settlement history; new `ForgeError::InvalidState`
+  rejects a flip, and `ForgeError::AccrualEmpty` rejects a sweep with no
+  balance. Includes conservation, auth, interleave, and rollback coverage
+  (issue #251).
 - **DAO proposal dependency DAG** (`requires` and `conflicts_with`): proposal
   creation validates same-contract references and cycles with iterative DFS;
   permissionless dispatch waits for requirements and stops after a conflict
