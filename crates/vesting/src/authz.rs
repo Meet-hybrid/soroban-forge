@@ -667,3 +667,60 @@ fn blank_envelope_aborts_claim_and_preserves_custody() {
     assert_eq!(tc.balance(&contract_id), TOTAL);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
 }
+
+#[test]
+fn reassignment_accepts_funder_signature_alone() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let id = client.create_schedule(funder, &accounts.user1, &token, &TOTAL, &CLIFF, &DURATION);
+    let new_beneficiary = &accounts.user2;
+
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "reassign_beneficiary",
+            args: (id, new_beneficiary).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_reassign_beneficiary(&id, new_beneficiary)
+        .expect("outer ok")
+        .expect("reassignment ok");
+    assert_eq!(client.get_schedule(&id).beneficiary, *new_beneficiary);
+    assert_eq!(client.get_schedule(&id).reassignment_count, 1);
+}
+
+#[test]
+fn reassignment_rejects_old_new_and_outsider_signatures() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user1,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+    let new_beneficiary = accounts.user2.clone();
+    let outsider = Address::generate(&env);
+
+    for caller in [accounts.user1.clone(), accounts.user2.clone(), outsider] {
+        env.mock_auths(&[MockAuth {
+            address: &caller,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "reassign_beneficiary",
+                args: (id, &new_beneficiary).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_reassign_beneficiary(&id, &new_beneficiary);
+        assert_auth_abort!(res);
+        assert_eq!(client.get_schedule(&id).beneficiary, accounts.user1);
+        assert_eq!(client.get_schedule(&id).reassignment_count, 0);
+    }
+}

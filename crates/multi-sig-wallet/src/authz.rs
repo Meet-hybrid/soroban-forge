@@ -521,7 +521,7 @@ fn reject_accepts_owner_signature_below_threshold() {
         .expect("contract ok");
     let tx = client.get_tx(&tx_id);
     assert_eq!(tx.rejections.len(), 1);
-    assert_eq!(tx.status, TxStatus::Pending);
+    assert_eq!(tx.status, TxStatus::Rejected);
 }
 
 #[test]
@@ -577,7 +577,9 @@ fn reject_twice_by_same_owner_is_invalid() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, soroban_forge_shared_utils::ForgeError::InvalidInput);
-    assert_eq!(client.get_tx(&tx_id).rejections.len(), 1);
+    let tx = client.get_tx(&tx_id);
+    assert_eq!(tx.rejections.len(), 1);
+    assert_eq!(tx.status, TxStatus::Rejected);
 }
 
 #[test]

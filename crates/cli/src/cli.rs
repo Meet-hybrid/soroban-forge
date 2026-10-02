@@ -101,6 +101,24 @@ pub struct EventsArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct InspectArgs {
+    /// Contract address or alias.
+    pub contract: String,
+    /// Specific DataKey entries to inspect (comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub keys: Vec<String>,
+    /// Output as JSON for programmatic use.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+    /// Network to use.
+    #[arg(long, default_value = "testnet")]
+    pub network: String,
+    /// Source account.
+    #[arg(long)]
+    pub source: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
     /// Optional WASM artifact to validate as a regular, non-empty file.
     #[arg(long, value_name = "PATH")]

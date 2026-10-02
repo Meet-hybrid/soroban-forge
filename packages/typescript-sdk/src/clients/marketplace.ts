@@ -33,60 +33,66 @@ if (typeof window !== "undefined") {
 
 
 
-/**
- * Policy controlling how unvested tokens are handled on revocation.
- */
-export type RevocationPolicy = {tag: "FullClawback", values: void} | {tag: "KeepUnvested", values: void};
-
-
-
 
 /**
- * Lifecycle state of a vesting schedule.
+ * A royalty configuration for a single collection.
  */
-export type VestingStatus = {tag: "Locked", values: void} | {tag: "Vesting", values: void} | {tag: "Completed", values: void} | {tag: "Revoked", values: void};
+export interface Royalty {
+  /**
+ * Royalty rate in basis points (100 bps = 1%).
+ */
+bps: u32;
+  /**
+ * Collection (NFT contract) this configuration applies to.
+ */
+collection: string;
+  /**
+ * Address entitled to royalty payments.
+ */
+recipient: string;
+  /**
+ * Whether the configuration is currently enforced.
+ */
+status: RoyaltyStatus;
+}
 
 
 /**
- * A single token-vesting schedule.
+ * The two amounts one atomic `settle_sale` invocation transferred.
  */
-export interface VestingSchedule {
+export interface Settlement {
   /**
- * Recipient of the vested tokens.
+ * Amount transferred to the configured royalty recipient.
  */
-beneficiary: string;
+royalty_share: i128;
   /**
- * Amount already claimed by the beneficiary.
+ * Amount transferred to the seller.
  */
-claimed: i128;
+seller_net: i128;
+}
+
+/**
+ * Lifecycle state of a registered royalty configuration.
+ */
+export type RoyaltyStatus = {tag: "Active", values: void} | {tag: "Disabled", values: void};
+
+
+/**
+ * Cumulative settlement totals for one collection.
+ */
+export interface SettlementSummary {
   /**
- * Seconds after `start` at which claims become possible.
+ * Sum of every settled sale amount.
  */
-cliff: u64;
+gross_volume: i128;
   /**
- * Seconds after `start` at which the schedule is fully vested.
+ * Sum of every royalty share transferred to the recipient.
  */
-duration: u64;
+royalties_paid: i128;
   /**
- * Ledger timestamp at which vesting begins (creation time).
+ * Number of sales settled so far.
  */
-start: u64;
-  /**
- * Current lifecycle state.
- */
-status: VestingStatus;
-  /**
- * Token contract whose balance is drawn down.
- */
-token: string;
-  /**
- * Total amount to vest linearly between `cliff` and `duration`.
- */
-total_amount: i128;
-  /**
- * Address authorized to revoke this schedule (its creator).
- */
-creator: string;
+sales: u32;
 }
 
 
@@ -111,7 +117,7 @@ role: string;
 
 /**
  * Inclusive time window expressed as Unix timestamps (seconds).
- * 
+ *
  * Stored as plain `u64` because `soroban_sdk` models time as `u64`; a
  * dedicated newtype would add conversions without benefit.
  */
@@ -129,7 +135,7 @@ start: u64;
 
 /**
  * A page of results plus the cursor needed to fetch the next page.
- * 
+ *
  * Items are stored as serialized `Bytes` so the helper is agnostic to the
  * concrete value type a contract paginates. Callers decode each item into
  * their domain type. `Debug` is omitted because the SDK collection does not
@@ -167,12 +173,12 @@ offset: u32;
 
 /**
  * Shared error type used across all Soroban Forge contracts.
- * 
+ *
  * Defining a single error enum in `shared-utils` keeps the on-chain error
  * space consistent and intelligible to SDK consumers, and avoids every
  * contract re-declaring the same failure modes. Contract crates may expose
  * their own domain-specific errors, but should prefer these where they fit.
- * 
+ *
  * Error codes start at 1; code 0 is reserved by the Soroban host.
  */
 export const ForgeError = {
@@ -245,7 +251,7 @@ export const ForgeError = {
 
 /**
  * Audit metadata attached to a persisted value.
- * 
+ *
  * Contracts store domain data in Soroban instance storage; wrapping it with
  * this record lets callers (and off-chain indexers) see when a value was last
  * written. The payload is stored as opaque serialized bytes so the record is
@@ -265,50 +271,56 @@ value: Buffer;
 
 export interface Client {
   /**
-   * Construct and simulate a claim transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Claim the vested-but-unclaimed amount.
-   * 
-   * Requires the beneficiary. Returns exactly what vested since the last
-   * claim (or `0` when nothing is claimable), so repeated claims can never
-   * overpay or underpay.
-   * 
-   * Ordering: the SEP-41 transfer runs **before** the schedule write —
-   * see the module docs. A zero-claim call returns before either.
+   * Construct and simulate a distribute transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Compute the royalty split for a sale.
+   *
+   * Requires the collection's authorization and `amount > 0`. Returns the
+   * net owed to `seller` after reserving `amount * bps / 10_000` for the
+   * configured recipient. A `Disabled` configuration settles in full.
+   * This entrypoint is a pure computation and moves no tokens; use
+   * `settle_sale` to transfer the split in real SEP-41 tokens.
    */
-  claim: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<i128>>>
+  distribute: ({collection, seller, amount}: {collection: string, seller: string, amount: i128}, options?: MethodOptions) => Promise<AssembledTransaction<Result<i128>>>
 
   /**
-   * Construct and simulate a claimable transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Amount currently claimable (read-only view; no state change).
+   * Construct and simulate a get_royalty transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Read the stored royalty configuration for `collection` (read-only view).
    */
-  claimable: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<i128>>>
+  get_royalty: ({collection}: {collection: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Royalty>>>
 
   /**
-   * Construct and simulate a get_status transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Read the current lifecycle status (read-only view).
-   * 
-   * The status is derived from the ledger time and claimed amount rather
-   * than the stored field, so it is always current between claims.
+   * Construct and simulate a set_royalty transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Register or update a royalty configuration for `collection`.
+   *
+   * Requires the collection's authorization and `bps <= 10_000`
+   * (100%). Re-registration updates the existing configuration in place.
    */
-  get_status: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<VestingStatus>>>
+  set_royalty: ({collection, recipient, bps}: {collection: string, recipient: string, bps: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
-   * Construct and simulate a revoke transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Revoke a vesting schedule, clawing back tokens per the given policy.
-   * 
-   * Only the creator may revoke. Revocation is rejected before the cliff
-   * elapses and once the schedule is fully vested or already revoked.
+   * Construct and simulate a settle_sale transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Settle a sale of `collection` atomically in `token`.
+   *
+   * Requires the collection's authorization (as `distribute` does)
+   * and the `payer`'s, which covers both nested token transfers. Requires
+   * `amount > 0` and a stored configuration. The split is computed with
+   * checked arithmetic, and both transfers run **before any settlement
+   * state is committed**: the seller's net first, the royalty recipient
+   * last, so a failed transfer can never leave the royalty recipient
+   * partially paid. A `Disabled` or zero-bps configuration settles the
+   * full amount to the seller in a single transfer. Token failures are
+   * bucketed into [`ForgeError::TokenTransferFailed`], and any returned
+   * error rolls the whole invocation back — including an earlier
+   * successful transfer — so retrying after a failure never double-pays.
    */
-  revoke: ({schedule_id, policy}: {schedule_id: u64, policy: RevocationPolicy}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  settle_sale: ({collection, token, payer, seller, amount}: {collection: string, token: string, payer: string, seller: string, amount: i128}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Settlement>>>
 
   /**
-   * Construct and simulate a create_schedule transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
-   * Create a new vesting schedule and return its stable id.
-   * 
-   * Requires `total_amount > 0`, `duration > 0`, and `cliff <= duration`.
-   * The beneficiary is authorized at creation time.
+   * Construct and simulate a get_settlement_summary transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Read the cumulative settlement totals for `collection` (read-only
+   * view). `NotFound` until the collection settles its first sale.
    */
-  create_schedule: ({beneficiary, token, total_amount, cliff, duration}: {beneficiary: string, token: string, total_amount: i128, cliff: u64, duration: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+  get_settlement_summary: ({collection}: {collection: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<SettlementSummary>>>
 
 }
 export class Client extends ContractClient {
@@ -328,14 +340,15 @@ export class Client extends ContractClient {
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAAAAAAAUxDbGFpbSB0aGUgdmVzdGVkLWJ1dC11bmNsYWltZWQgYW1vdW50LgoKUmVxdWlyZXMgdGhlIGJlbmVmaWNpYXJ5LiBSZXR1cm5zIGV4YWN0bHkgd2hhdCB2ZXN0ZWQgc2luY2UgdGhlIGxhc3QKY2xhaW0gKG9yIGAwYCB3aGVuIG5vdGhpbmcgaXMgY2xhaW1hYmxlKSwgc28gcmVwZWF0ZWQgY2xhaW1zIGNhbiBuZXZlcgpvdmVycGF5IG9yIHVuZGVycGF5LgoKT3JkZXJpbmc6IHRoZSBTRVAtNDEgdHJhbnNmZXIgcnVucyAqKmJlZm9yZSoqIHRoZSBzY2hlZHVsZSB3cml0ZSDigJQKc2VlIHRoZSBtb2R1bGUgZG9jcy4gQSB6ZXJvLWNsYWltIGNhbGwgcmV0dXJucyBiZWZvcmUgZWl0aGVyLgAAAAVjbGFpbQAAAAAAAAEAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAABAAAD6QAAAAsAAAfQAAAACkZvcmdlRXJyb3IAAA==",
-        "AAAAAAAAAD1BbW91bnQgY3VycmVudGx5IGNsYWltYWJsZSAocmVhZC1vbmx5IHZpZXc7IG5vIHN0YXRlIGNoYW5nZSkuAAAAAAAACWNsYWltYWJsZQAAAAAAAAEAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAABAAAD6QAAAAsAAAfQAAAACkZvcmdlRXJyb3IAAA==",
-        "AAAAAAAAALhSZWFkIHRoZSBjdXJyZW50IGxpZmVjeWNsZSBzdGF0dXMgKHJlYWQtb25seSB2aWV3KS4KClRoZSBzdGF0dXMgaXMgZGVyaXZlZCBmcm9tIHRoZSBsZWRnZXIgdGltZSBhbmQgY2xhaW1lZCBhbW91bnQgcmF0aGVyCnRoYW4gdGhlIHN0b3JlZCBmaWVsZCwgc28gaXQgaXMgYWx3YXlzIGN1cnJlbnQgYmV0d2VlbiBjbGFpbXMuAAAACmdldF9zdGF0dXMAAAAAAAEAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAABAAAD6QAAB9AAAAANVmVzdGluZ1N0YXR1cwAAAAAAB9AAAAAKRm9yZ2VFcnJvcgAA",
-        "AAAAAgAAACZMaWZlY3ljbGUgc3RhdGUgb2YgYSB2ZXN0aW5nIHNjaGVkdWxlLgAAAAAAAAAAAA1WZXN0aW5nU3RhdHVzAAAAAAAABAAAAAAAAAAiQmVmb3JlIHRoZSBjbGlmZiBoYXMgYmVlbiByZWFjaGVkLgAAAAAABkxvY2tlZAAAAAAAAAAAACxQYXN0IHRoZSBjbGlmZjsgdG9rZW5zIGFyZSB2ZXN0aW5nIGxpbmVhcmx5LgAAAAdWZXN0aW5nAAAAAAAAAAAZRnVsbHkgdmVzdGVkIGFuZCBjbGFpbWVkLgAAAAAAAAlDb21wbGV0ZWQAAAAAAAAAAAAANVNjaGVkdWxlIHdhcyB0ZXJtaW5hdGVkIGJlZm9yZSBjb21wbGV0aW9uIChyZXNlcnZlZCkuAAAAAAAAB1Jldm9rZWQA",
-        "AAAAAQAAACBBIHNpbmdsZSB0b2tlbi12ZXN0aW5nIHNjaGVkdWxlLgAAAAAAAAAPVmVzdGluZ1NjaGVkdWxlAAAAAAgAAAAfUmVjaXBpZW50IG9mIHRoZSB2ZXN0ZWQgdG9rZW5zLgAAAAALYmVuZWZpY2lhcnkAAAAAEwAAACpBbW91bnQgYWxyZWFkeSBjbGFpbWVkIGJ5IHRoZSBiZW5lZmljaWFyeS4AAAAAAAdjbGFpbWVkAAAAAAsAAAA2U2Vjb25kcyBhZnRlciBgc3RhcnRgIGF0IHdoaWNoIGNsYWltcyBiZWNvbWUgcG9zc2libGUuAAAAAAAFY2xpZmYAAAAAAAAGAAAAPFNlY29uZHMgYWZ0ZXIgYHN0YXJ0YCBhdCB3aGljaCB0aGUgc2NoZWR1bGUgaXMgZnVsbHkgdmVzdGVkLgAAAAhkdXJhdGlvbgAAAAYAAAA5TGVkZ2VyIHRpbWVzdGFtcCBhdCB3aGljaCB2ZXN0aW5nIGJlZ2lucyAoY3JlYXRpb24gdGltZSkuAAAAAAAABXN0YXJ0AAAAAAAABgAAABhDdXJyZW50IGxpZmVjeWNsZSBzdGF0ZS4AAAAGc3RhdHVzAAAAAAfQAAAADVZlc3RpbmdTdGF0dXMAAAAAAAArVG9rZW4gY29udHJhY3Qgd2hvc2UgYmFsYW5jZSBpcyBkcmF3biBkb3duLgAAAAAFdG9rZW4AAAAAAAATAAAAPVRvdGFsIGFtb3VudCB0byB2ZXN0IGxpbmVhcmx5IGJldHdlZW4gYGNsaWZmYCBhbmQgYGR1cmF0aW9uYC4AAAAAAAAMdG90YWxfYW1vdW50AAAACw==",
-        "AAAAAgAAADVQb2xpY3kgY29udHJvbGxpbmcgaG93IHVudmVzdGVkIHRva2VucyBhcmUgaGFuZGxlZCBvbiByZXZvY2F0aW9uLgAAAAAAAA9SZXZvY2F0aW9uUG9saWN5AAAAAAIAAAAAAAAADUZ1bGxDbGF3YmFjawAAAAAAAAAAAAAAAAAADUtlZXBVbnZlc3RlZAAAAAAAAA==",
-        "AAAAAAAAAKJSZXZva2UgYSB2ZXN0aW5nIHNjaGVkdWxlLCBjbGF3aW5nIGJhY2sgdG9rZW5zIHBlciB0aGUgZ2l2ZW4gcG9saWN5LgoKT25seSB0aGUgY3JlYXRvciBtYXkgcmV2b2tlLiBSZXZvY2F0aW9uIGlzIHJlamVjdGVkIGJlZm9yZSB0aGUgY2xpZmYKZWxhcHNlcyBhbmQgb25jZSB0aGUgc2NoZWR1bGUgaXMgZnVsbHkgdmVzdGVkIG9yIGFscmVhZHkgcmV2b2tlZC4AAAAABnJldm9rZQAAAAAAAgAAAAAAAAALc2NoZWR1bGVfaWQAAAAABgAAAAAAAAAGcG9saWN5AAAAAAfQAAAAD1Jldm9jYXRpb25Qb2xpY3kAAAAAAQAAA+kAAAACAAAAB9AAAAAKRm9yZ2VFcnJvcgAA",
-        "AAAAAAAAAK5DcmVhdGUgYSBuZXcgdmVzdGluZyBzY2hlZHVsZSBhbmQgcmV0dXJuIGl0cyBzdGFibGUgaWQuCgpSZXF1aXJlcyBgdG90YWxfYW1vdW50ID4gMGAsIGBkdXJhdGlvbiA+IDBgLCBhbmQgYGNsaWZmIDw9IGR1cmF0aW9uYC4KVGhlIGJlbmVmaWNpYXJ5IGlzIGF1dGhvcml6ZWQgYXQgY3JlYXRpb24gdGltZS4AAAAAAA9jcmVhdGVfc2NoZWR1bGUAAAAABQAAAAAAAAALYmVuZWZpY2lhcnkAAAAAEwAAAAAAAAAFdG9rZW4AAAAAAAATAAAAAAAAAAx0b3RhbF9hbW91bnQAAAALAAAAAAAAAAVjbGlmZgAAAAAAAAYAAAAAAAAACGR1cmF0aW9uAAAABgAAAAEAAAPpAAAABgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
+      new ContractSpec([ "AAAAAQAAADBBIHJveWFsdHkgY29uZmlndXJhdGlvbiBmb3IgYSBzaW5nbGUgY29sbGVjdGlvbi4AAAAAAAAAB1JveWFsdHkAAAAABAAAACxSb3lhbHR5IHJhdGUgaW4gYmFzaXMgcG9pbnRzICgxMDAgYnBzID0gMSUpLgAAAANicHMAAAAABAAAADhDb2xsZWN0aW9uIChORlQgY29udHJhY3QpIHRoaXMgY29uZmlndXJhdGlvbiBhcHBsaWVzIHRvLgAAAApjb2xsZWN0aW9uAAAAAAATAAAAJUFkZHJlc3MgZW50aXRsZWQgdG8gcm95YWx0eSBwYXltZW50cy4AAAAAAAAJcmVjaXBpZW50AAAAAAAAEwAAADBXaGV0aGVyIHRoZSBjb25maWd1cmF0aW9uIGlzIGN1cnJlbnRseSBlbmZvcmNlZC4AAAAGc3RhdHVzAAAAAAfQAAAADVJveWFsdHlTdGF0dXMAAAA=",
+        "AAAAAQAAAEBUaGUgdHdvIGFtb3VudHMgb25lIGF0b21pYyBgc2V0dGxlX3NhbGVgIGludm9jYXRpb24gdHJhbnNmZXJyZWQuAAAAAAAAAApTZXR0bGVtZW50AAAAAAACAAAAN0Ftb3VudCB0cmFuc2ZlcnJlZCB0byB0aGUgY29uZmlndXJlZCByb3lhbHR5IHJlY2lwaWVudC4AAAAADXJveWFsdHlfc2hhcmUAAAAAAAALAAAAIUFtb3VudCB0cmFuc2ZlcnJlZCB0byB0aGUgc2VsbGVyLgAAAAAAAApzZWxsZXJfbmV0AAAAAAAL",
+        "AAAAAgAAADZMaWZlY3ljbGUgc3RhdGUgb2YgYSByZWdpc3RlcmVkIHJveWFsdHkgY29uZmlndXJhdGlvbi4AAAAAAAAAAAANUm95YWx0eVN0YXR1cwAAAAAAAAIAAAAAAAAAHEFjdGl2ZSBhbmQgYXBwbGllZCB0byBzYWxlcy4AAAAGQWN0aXZlAAAAAAAAAAAALURpc2FibGVkOyBzYWxlcyBzZXR0bGUgdG8gdGhlIHNlbGxlciBpbiBmdWxsLgAAAAAAAAhEaXNhYmxlZA==",
+        "AAAAAQAAADBDdW11bGF0aXZlIHNldHRsZW1lbnQgdG90YWxzIGZvciBvbmUgY29sbGVjdGlvbi4AAAAAAAAAEVNldHRsZW1lbnRTdW1tYXJ5AAAAAAAAAwAAACFTdW0gb2YgZXZlcnkgc2V0dGxlZCBzYWxlIGFtb3VudC4AAAAAAAAMZ3Jvc3Nfdm9sdW1lAAAACwAAADhTdW0gb2YgZXZlcnkgcm95YWx0eSBzaGFyZSB0cmFuc2ZlcnJlZCB0byB0aGUgcmVjaXBpZW50LgAAAA5yb3lhbHRpZXNfcGFpZAAAAAAACwAAAB9OdW1iZXIgb2Ygc2FsZXMgc2V0dGxlZCBzbyBmYXIuAAAAAAVzYWxlcwAAAAAAAAQ=",
+        "AAAAAAAAAW1Db21wdXRlIHRoZSByb3lhbHR5IHNwbGl0IGZvciBhIHNhbGUuCgpSZXF1aXJlcyB0aGUgY29sbGVjdGlvbidzIGF1dGhvcml6YXRpb24gYW5kIGBhbW91bnQgPiAwYC4gUmV0dXJucyB0aGUKbmV0IG93ZWQgdG8gYHNlbGxlcmAgYWZ0ZXIgcmVzZXJ2aW5nIGBhbW91bnQgKiBicHMgLyAxMF8wMDBgIGZvciB0aGUKY29uZmlndXJlZCByZWNpcGllbnQuIEEgYERpc2FibGVkYCBjb25maWd1cmF0aW9uIHNldHRsZXMgaW4gZnVsbC4KVGhpcyBlbnRyeXBvaW50IGlzIGEgcHVyZSBjb21wdXRhdGlvbiBhbmQgbW92ZXMgbm8gdG9rZW5zOyB1c2UKYHNldHRsZV9zYWxlYCB0byB0cmFuc2ZlciB0aGUgc3BsaXQgaW4gcmVhbCBTRVAtNDEgdG9rZW5zLgAAAAAAAApkaXN0cmlidXRlAAAAAAADAAAAAAAAAApjb2xsZWN0aW9uAAAAAAATAAAAAAAAAAZzZWxsZXIAAAAAABMAAAAAAAAABmFtb3VudAAAAAAACwAAAAEAAAPpAAAACwAAB9AAAAAKRm9yZ2VFcnJvcgAA",
+        "AAAAAAAAAEhSZWFkIHRoZSBzdG9yZWQgcm95YWx0eSBjb25maWd1cmF0aW9uIGZvciBgY29sbGVjdGlvbmAgKHJlYWQtb25seSB2aWV3KS4AAAALZ2V0X3JveWFsdHkAAAAAAQAAAAAAAAAKY29sbGVjdGlvbgAAAAAAEwAAAAEAAAPpAAAH0AAAAAdSb3lhbHR5AAAAB9AAAAAKRm9yZ2VFcnJvcgAA",
+        "AAAAAAAAAL5SZWdpc3RlciBvciB1cGRhdGUgYSByb3lhbHR5IGNvbmZpZ3VyYXRpb24gZm9yIGBjb2xsZWN0aW9uYC4KClJlcXVpcmVzIHRoZSBjb2xsZWN0aW9uJ3MgYXV0aG9yaXphdGlvbiBhbmQgYGJwcyA8PSAxMF8wMDBgCigxMDAlKS4gUmUtcmVnaXN0cmF0aW9uIHVwZGF0ZXMgdGhlIGV4aXN0aW5nIGNvbmZpZ3VyYXRpb24gaW4gcGxhY2UuAAAAAAALc2V0X3JveWFsdHkAAAAAAwAAAAAAAAAKY29sbGVjdGlvbgAAAAAAEwAAAAAAAAAJcmVjaXBpZW50AAAAAAAAEwAAAAAAAAADYnBzAAAAAAQAAAABAAAD6QAAAAIAAAfQAAAACkZvcmdlRXJyb3IAAA==",
+        "AAAAAAAAAxZTZXR0bGUgYSBzYWxlIG9mIGBjb2xsZWN0aW9uYCBhdG9taWNhbGx5IGluIGB0b2tlbmAuCgpSZXF1aXJlcyB0aGUgY29sbGVjdGlvbidzIGF1dGhvcml6YXRpb24gKGFzIGBkaXN0cmlidXRlYCBkb2VzKQphbmQgdGhlIGBwYXllcmAncywgd2hpY2ggY292ZXJzIGJvdGggbmVzdGVkIHRva2VuIHRyYW5zZmVycy4gUmVxdWlyZXMKYGFtb3VudCA+IDBgIGFuZCBhIHN0b3JlZCBjb25maWd1cmF0aW9uLiBUaGUgc3BsaXQgaXMgY29tcHV0ZWQgd2l0aApjaGVja2VkIGFyaXRobWV0aWMsIGFuZCBib3RoIHRyYW5zZmVycyBydW4gKipiZWZvcmUgYW55IHNldHRsZW1lbnQKc3RhdGUgaXMgY29tbWl0dGVkKio6IHRoZSBzZWxsZXIncyBuZXQgZmlyc3QsIHRoZSByb3lhbHR5IHJlY2lwaWVudApsYXN0LCBzbyBhIGZhaWxlZCB0cmFuc2ZlciBjYW4gbmV2ZXIgbGVhdmUgdGhlIHJveWFsdHkgcmVjaXBpZW50CnBhcnRpYWxseSBwYWlkLiBBIGBEaXNhYmxlZGAgb3IgemVyby1icHMgY29uZmlndXJhdGlvbiBzZXR0bGVzIHRoZQpmdWxsIGFtb3VudCB0byB0aGUgc2VsbGVyIGluIGEgc2luZ2xlIHRyYW5zZmVyLiBUb2tlbiBmYWlsdXJlcyBhcmUKYnVja2V0ZWQgaW50byBbYEZvcmdlRXJyb3I6OlRva2VuVHJhbnNmZXJGYWlsZWRgXSwgYW5kIGFueSByZXR1cm5lZAplcnJvciByb2xscyB0aGUgd2hvbGUgaW52b2NhdGlvbiBiYWNrIOKAlCBpbmNsdWRpbmcgYW4gZWFybGllcgpzdWNjZXNzZnVsIHRyYW5zZmVyIOKAlCBzbyByZXRyeWluZyBhZnRlciBhIGZhaWx1cmUgbmV2ZXIgZG91YmxlLXBheXMuAAAAAAALc2V0dGxlX3NhbGUAAAAABQAAAAAAAAAKY29sbGVjdGlvbgAAAAAAEwAAAAAAAAAFdG9rZW4AAAAAAAATAAAAAAAAAAVwYXllcgAAAAAAABMAAAAAAAAABnNlbGxlcgAAAAAAEwAAAAAAAAAGYW1vdW50AAAAAAALAAAAAQAAA+kAAAfQAAAAClNldHRsZW1lbnQAAAAAB9AAAAAKRm9yZ2VFcnJvcgAA",
+        "AAAAAAAAAIBSZWFkIHRoZSBjdW11bGF0aXZlIHNldHRsZW1lbnQgdG90YWxzIGZvciBgY29sbGVjdGlvbmAgKHJlYWQtb25seQp2aWV3KS4gYE5vdEZvdW5kYCB1bnRpbCB0aGUgY29sbGVjdGlvbiBzZXR0bGVzIGl0cyBmaXJzdCBzYWxlLgAAABZnZXRfc2V0dGxlbWVudF9zdW1tYXJ5AAAAAAABAAAAAAAAAApjb2xsZWN0aW9uAAAAAAATAAAAAQAAA+kAAAfQAAAAEVNldHRsZW1lbnRTdW1tYXJ5AAAAAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAQAAAD5BIHBhcnRpY2lwYW50IGluIGEgbXVsdGktcGFydHkgZmxvdyAoZXNjcm93LCBnb3Zlcm5hbmNlLCAuLi4pLgAAAAAAAAAAAAVQYXJ0eQAAAAAAAAMAAAAkT24tY2hhaW4gYWRkcmVzcyBvZiB0aGUgcGFydGljaXBhbnQuAAAAB2FkZHJlc3MAAAAAEwAAAD9XaGV0aGVyIHRoaXMgcGFydHkgaGFzIGdyYW50ZWQgYXBwcm92YWwgZm9yIHRoZSBjdXJyZW50IGFjdGlvbi4AAAAACGFwcHJvdmVkAAAAAQAAADlIdW1hbi1yZWFkYWJsZSByb2xlIGxhYmVsLCBlLmcuIGAiYnV5ZXIiYCBvciBgImFyYml0ZXIiYC4AAAAAAAAEcm9sZQAAABA=",
         "AAAAAQAAALtJbmNsdXNpdmUgdGltZSB3aW5kb3cgZXhwcmVzc2VkIGFzIFVuaXggdGltZXN0YW1wcyAoc2Vjb25kcykuCgpTdG9yZWQgYXMgcGxhaW4gYHU2NGAgYmVjYXVzZSBgc29yb2Jhbl9zZGtgIG1vZGVscyB0aW1lIGFzIGB1NjRgOyBhCmRlZGljYXRlZCBuZXd0eXBlIHdvdWxkIGFkZCBjb252ZXJzaW9ucyB3aXRob3V0IGJlbmVmaXQuAAAAAAAAAAAKVGltZUJvdW5kcwAAAAAAAgAAADhMYXRlc3QgbW9tZW50IChpbmNsdXNpdmUpIGF0IHdoaWNoIHRoZSB3aW5kb3cgaXMgYWN0aXZlLgAAAANlbmQAAAAABgAAADpFYXJsaWVzdCBtb21lbnQgKGluY2x1c2l2ZSkgYXQgd2hpY2ggdGhlIHdpbmRvdyBpcyBhY3RpdmUuAAAAAAAFc3RhcnQAAAAAAAAG",
         "AAAAAQAAAUBBIHBhZ2Ugb2YgcmVzdWx0cyBwbHVzIHRoZSBjdXJzb3IgbmVlZGVkIHRvIGZldGNoIHRoZSBuZXh0IHBhZ2UuCgpJdGVtcyBhcmUgc3RvcmVkIGFzIHNlcmlhbGl6ZWQgYEJ5dGVzYCBzbyB0aGUgaGVscGVyIGlzIGFnbm9zdGljIHRvIHRoZQpjb25jcmV0ZSB2YWx1ZSB0eXBlIGEgY29udHJhY3QgcGFnaW5hdGVzLiBDYWxsZXJzIGRlY29kZSBlYWNoIGl0ZW0gaW50bwp0aGVpciBkb21haW4gdHlwZS4gYERlYnVnYCBpcyBvbWl0dGVkIGJlY2F1c2UgdGhlIFNESyBjb2xsZWN0aW9uIGRvZXMgbm90CmltcGxlbWVudCBpdCBmb3IgdGhpcyBjb250cmFjdCB0eXBlLgAAAAAAAAAPUGFnaW5hdGVkUmVzdWx0AAAAAAMAAAA9Q3Vyc29yIGRlc2NyaWJpbmcgdGhlIG5leHQgcGFnZSAob2Zmc2V0IGFkdmFuY2VkIGJ5IGBsaW1pdGApLgAAAAAAAAZjdXJzb3IAAAAAB9AAAAAQUGFnaW5hdGlvbkN1cnNvcgAAABNJdGVtcyBvbiB0aGlzIHBhZ2UuAAAAAAVpdGVtcwAAAAAAA+oAAAAOAAAAJ1RvdGFsIG51bWJlciBvZiBpdGVtcyBhY3Jvc3MgYWxsIHBhZ2VzLgAAAAAFdG90YWwAAAAAAAAE",
@@ -346,10 +359,10 @@ export class Client extends ContractClient {
     )
   }
   public readonly fromJSON = {
-    claim: this.txFromJSON<Result<i128>>,
-        claimable: this.txFromJSON<Result<i128>>,
-        get_status: this.txFromJSON<Result<VestingStatus>>,
-        revoke: this.txFromJSON<Result<void>>,
-        create_schedule: this.txFromJSON<Result<u64>>
+    distribute: this.txFromJSON<Result<i128>>,
+        get_royalty: this.txFromJSON<Result<Royalty>>,
+        set_royalty: this.txFromJSON<Result<void>>,
+        settle_sale: this.txFromJSON<Result<Settlement>>,
+        get_settlement_summary: this.txFromJSON<Result<SettlementSummary>>
   }
 }
