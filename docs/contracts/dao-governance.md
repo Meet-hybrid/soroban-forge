@@ -1,25 +1,25 @@
 # DAO Governance Contract Reference
 
-- **Crate**: `crates/dao-governance`
-- **Package**: `soroban-forge-dao-governance`
-- **Client**: `SorobanForgeDaoGovernanceClient`
-- **Contract Type**: `DaoGovernance`
-- **Trait**: `SorobanForgeDaoGovernance`
+- **Crate**: `soroban-forge-dao-governance`
+- **Wasm Target**: `wasm32v1-none`
+- **Rust Client**: `SorobanForgeDaoGovernanceClient`
+- **TypeScript Client**: `@soroban-forge/dao-governance-client` (`Client`)
 
 ---
 
-## Overview
+## 1. Overview & Architectural Role
 
-The DAO Governance contract implements on-chain decentralized decision making. Governance token holders submit proposals, cast balance-weighted votes, and execute approved cross-contract actions. The contract incorporates anti-spam proposal bonds, DAG execution order dependencies, proposer cooldowns, and immutable treasury forfeiture.
-
-### Key Capabilities
-- **Proposal Bonds (Anti-Spam)**: Requires proposers to post an upfront bond in a designated SEP-41 token. Bonds are refunded upon successful execution or cancellation, and forfeited to the treasury if defeated.
-- **DAG Execution Dependencies**: Supports execution dependencies (`requires`) and mutual exclusions (`conflicts_with`) with iterative DFS cycle detection.
-- **Token-Weighted Voting**: Voting power is proportional to the voter's SEP-41 governance token balance at the time of vote casting.
-- **Strict Majority Quorum**: Proposals pass if and only if $\text{for\_votes} > \text{against\_votes}$ when voting closes. Ties and zero-vote proposals are defeated.
-- **Proposer Concurrency Limits**: Limits proposers to a maximum of 5 concurrent active proposals (`DEFAULT_MAX_ACTIVE_PROPOSALS`).
+The DAO Governance contract implements on-chain token-weighted governance with integrated anti-spam token bonds and dependency DAG management:
+1. **Balance-Weighted Voting**: Members vote with voting power determined by real-time SEP-41 token balances at the moment of voting.
+2. **Anti-Spam Proposal Bonds**: Every proposal requires posting a fixed bond upfront. Defeated proposals forfeit their bond to a designated treasury; executed and cancelled proposals refund the bond to the proposer.
+3. **Dependency Graphs (DAGs)**: Proposals can specify prerequisite proposals (`requires`) and mutual exclusions (`conflicts_with`), enforced via iterative DFS cycle detection.
+4. **Proposer Cooldown**: Limits concurrent active proposals per address to prevent spam.
 
 ---
 
-## State Machine & Lifecycle
+## 2. API Reference
 
+### Initialization & Configuration
+
+#### `initialize`
+Sets the SEP-41 governance token used for voting weights. One-time call.

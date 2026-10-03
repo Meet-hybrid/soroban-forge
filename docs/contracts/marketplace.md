@@ -1,3 +1,3 @@
-# Marketplace Royalties Contract Reference
+# Marketplace Royalties
 
-See the authoritative documentation in [marketplace-royalties.md](./marketplace-royalties.md).
+See the canonical reference at [marketplace-royalties.md](./marketplace-royalties.md).

@@ -1,27 +1,23 @@
 # Vesting Contract Reference
 
-- **Crate**: `crates/vesting`
-- **Package**: `soroban-forge-vesting`
-- **Client**: `SorobanForgeVestingClient`
-- **Contract Type**: `Vesting`
-- **Trait**: `SorobanForgeVesting`
+- **Crate**: `soroban-forge-vesting`
+- **Wasm Target**: `wasm32v1-none`
+- **Rust Client**: `SorobanForgeVestingClient`
+- **TypeScript Client**: `@soroban-forge/vesting-client` (`Client`)
 
 ---
 
-## Overview
+## 1. Overview & Architectural Role
 
-The Vesting contract manages token release schedules over time for employees, founders, advisors, and ecosystem participants. The contract supports two distinct schedule models under a single identifier space:
-
-1. **Linear Vesting (`VestingSchedule`)**: A straight-line continuous vesting curve with an optional initial lockup cliff.
-2. **Tranche Vesting (`TrancheSchedule`)**: An explicit schedule of discrete unlock events (e.g. 25% at TGE, 25% after 6 months, 50% after 12 months).
-
-Both models hold SEP-41 tokens in contract custody, release funds incrementally via `claim()`, and support introspection of unlocked balances and lifecycle status.
+The Vesting contract manages token release schedules across time. It supports two schedule structures sharing a unified monotonic ID counter and claim execution path:
+1. **Linear Vesting**: Continuous accrual following an optional cliff up to a maturity duration, with support for funder revocation and beneficiary reassignment.
+2. **Tranche Vesting**: Discrete unlock tables specifying exact token quantities unlocking at specific time offsets (e.g., TGE releases and periodic unlocks).
 
 ---
 
-## Vesting Models & Mathematics
+## 2. API Reference
 
-### 1. Linear Model
+### Schedule Creation
 
-Linear schedules parameterize vesting using `cliff` and `duration` (in seconds elapsed since `start`).
-
+#### `create_schedule`
+Creates a linear vesting schedule.

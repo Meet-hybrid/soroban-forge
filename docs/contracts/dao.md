@@ -1,3 +1,3 @@
-# DAO Governance Contract Reference
+# DAO Governance
 
-See the authoritative documentation in [dao-governance.md](./dao-governance.md).
+See the canonical reference at [dao-governance.md](./dao-governance.md).

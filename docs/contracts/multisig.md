@@ -1,3 +1,3 @@
-# Multi-Signature Wallet Contract Reference
+# Multi-Sig Wallet
 
-See the authoritative documentation in [multi-sig-wallet.md](./multi-sig-wallet.md).
+See the canonical reference at [multi-sig-wallet.md](./multi-sig-wallet.md).

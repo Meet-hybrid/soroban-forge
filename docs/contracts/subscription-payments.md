@@ -1,28 +1,26 @@
 # Subscription Payments Contract Reference
 
-- **Crate**: `crates/subscription-payments`
-- **Package**: `soroban-forge-subscription-payments`
-- **Client**: `SorobanForgeSubscriptionPaymentsClient`
-- **Contract Type**: `SubscriptionPayments`
-- **Trait**: `SorobanForgeSubscriptionPayments`
+- **Crate**: `soroban-forge-subscription-payments`
+- **Wasm Target**: `wasm32v1-none`
+- **Rust Client**: `SorobanForgeSubscriptionPaymentsClient`
+- **TypeScript Client**: `@soroban-forge/subscription-payments-client` (`Client`)
 
 ---
 
-## Overview
+## 1. Overview & Architectural Role
 
-The Subscription Payments contract provides recurring, on-chain billing protocols on Stellar. Subscribers authorize providers to bill fixed amounts per period, or opt into prepaid custody balances. The contract supports metered usage quotas with exact bucketed overage pricing, multi-period catch-up billing, pause and resume capabilities, provider opt-in consent, and automated arrears retries.
-
-### Key Capabilities
-- **Dual Billing Modes**:
-  - **Pull Mode**: Direct recurring pulls from the subscriber's account via SEP-41 token transfer authorization.
-  - **Prepaid Mode**: Funds deposited into contract custody (`deposit`), debited per billing cycle, and refunded upon cancellation or retry exhaustion.
-- **Provider Opt-In Protocol**: Explicit subscriber authorization (`authorize_provider`) required before a provider can create subscriptions on the subscriber's behalf (`subscribe_on_behalf_of`).
-- **Metered Usage Quotas & Overages**: Allows providers to meter consumption units. The contract derives overage charges based on included units, bucketed rounding, and rate caps.
-- **Arrears & Retry Engine**: Failed payments transition subscriptions to `PastDue` and allow up to 3 retry attempts (`MAX_RETRIES`) before automatic cancellation.
-- **Multi-Period Catch-Up**: Providers can settle up to 32 accumulated periods in a single atomic transaction (`charge_catchup`).
-- **Fair Time Pause/Resume**: Pausing halts charges and usage metering; resuming shifts billing schedules forward by the exact paused duration.
+The Subscription Payments contract provides recurring token billing with support for:
+1. **Pull & Prepaid Billing Modes**: Direct pull transfers from subscriber balances or automated deductions from contract-custodied prepaid deposits.
+2. **Provider Opt-In Authorization**: Cryptographic consent mechanism enabling authorized providers to establish subscriptions on behalf of subscribers.
+3. **Metered Usage & Quotas**: Tiered overage pricing supporting inclusions, integer bucket units, and optional maximum unit caps.
+4. **Arrears & Retries**: Automated status degradation to `PastDue` upon billing failure, followed by cancellation after 3 consecutive failures.
+5. **Multi-Period Catch-Up**: Atomic processing of missed billing intervals up to 32 periods.
 
 ---
 
-## State Machine & Lifecycle
+## 2. API Reference
 
+### Subscription Management
+
+#### `subscribe`
+Subscribes an account directly. Requires subscriber signature.

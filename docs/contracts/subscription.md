@@ -1,3 +1,3 @@
-# Subscription Payments Contract Reference
+# Subscription Payments
 
-See the authoritative documentation in [subscription-payments.md](./subscription-payments.md).
+See the canonical reference at [subscription-payments.md](./subscription-payments.md).
