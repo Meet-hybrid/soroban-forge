@@ -165,6 +165,7 @@ treasury at a terminal transition.
 | ForgeError registry | ✅ Generated | Machine-readable error registry from Rust source; generates `errors.json` and TypeScript module |
 | TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` from the deployed escrow ABI + five generated clients (`vesting`, `multi-sig-wallet`, `subscription-payments`, `marketplace-royalties`, `dao-governance`) via `scripts/generate-clients.sh`; all six build with `npm run build` (no own test suites yet) |
 | Next.js demo | ✅ Example | `packages/nextjs-example` — testnet escrow demo UI (Freighter connect, friendbot funding, create/deposit/release/refund/dispute/resolve, read, participant list) |
+| Cross-contract composition tests | ✅ Implemented | Real cross-contract integration workflows (`crates/composition-tests`): Multi-Sig + Escrow settlement/refunds/splits, Vesting + Subscription streaming/prepaid overage, DAO + Marketplace royalties/proposals |
 | CI (fmt/clippy/test/audit/WASM size/provenance) | ✅ Enforced | `--locked`, `-D warnings`, stable toolchain, `wasm32v1-none`, size budget, **provenance manifest job** (SHA-256 of all six WASM artifacts from a clean rebuild) |
 | External audit | ❌ Not performed | Planned as a grant-funded tranche deliverable before any mainnet value custody |
 | Soroban SDK version | ✅ 27.0.6 | Stable Rust; `wasm32v1-none` target |
