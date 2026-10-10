@@ -724,3 +724,21 @@ fn reassignment_rejects_old_new_and_outsider_signatures() {
         assert_eq!(client.get_schedule(&id).reassignment_count, 0);
     }
 }
+
+#[test]
+fn touch_ttl_is_permissionless() {
+    let (env, token, _tc, _contract_id, client, accounts) = setup!();
+    let id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user1,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+
+    // Call touch_ttl with no authorizations mocked — keeper operation requires no auth
+    env.mock_auths(&[]);
+    client.touch_ttl(&id);
+    assert_eq!(env.auths(), []);
+}

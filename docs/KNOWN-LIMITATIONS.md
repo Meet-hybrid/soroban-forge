@@ -22,12 +22,8 @@ royalties, vesting, DAO bonds, and both subscription payment modes:
    real cross-contract invocations; subscriptions transfer pull-mode charges
    directly from subscriber to provider and custody prepaid deposits for exact
    period debits and refunds.
-2. **Instance-only storage** — escrow, multi-sig wallet, DAO governance, and marketplace royalties now use **persistent** entries with TTL bumps on every write and permissionless `touch_ttl` keeper entrypoints. Vesting and subscriptions still use instance storage.
-3. **No events** — escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit lifecycle events; only vesting remains silent.
-   real cross-contract invocations;
-   subscriptions still move nothing.
-2. **Instance-only storage** — escrow, multi-sig wallet, DAO governance, marketplace royalties, and subscription records use **persistent** entries with TTL bumps and permissionless `touch_ttl` keeper entrypoints. Vesting records remain in instance storage; subscription counters and enumeration indexes remain instance-scoped.
-3. **No events** — escrow, multi-sig wallet, DAO governance, subscription payments, marketplace royalties, and vesting emit lifecycle events.
+2. **Instance-only storage** — escrow, multi-sig wallet, DAO governance, marketplace royalties, subscription payments, and vesting now use **persistent** entries with TTL bumps on every write and permissionless `touch_ttl` keeper entrypoints. Instance storage is reserved for monotonic counters (`Count`) and relationship opt-ins.
+3. **No events** — escrow, multi-sig wallet, DAO governance, subscription payments, marketplace royalties, and vesting emit typed lifecycle events.
 4. **Arbiter stored but unreachable** — `dispute` (claimant-authorized)
    and `resolve` (arbiter-only, final) make the third party live.
    `Disputed` is a real state, verified by tests.

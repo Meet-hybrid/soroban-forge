@@ -469,26 +469,37 @@ proptest! {
 fn mutate_vesting_record(w: &World, id: u64, kind: u8, delta: i128) {
     let key = crate::DataKey::Schedule(id);
     w.env.as_contract(&w.vesting, || {
-        if let Some(mut rec) = w.env.storage().instance().get::<_, VestingSchedule>(&key) {
-            match kind {
-                // Fuzz total_amount
-                0 => {
-                    rec.total_amount = rec.total_amount.wrapping_add(delta).max(1);
-                }
-                // Fuzz claimed
-                1 => {
-                    rec.claimed = rec.claimed.wrapping_add(delta).max(0);
-                }
-                // Fuzz cliff
-                2 => {
-                    rec.cliff = (rec.cliff as i128).wrapping_add(delta).max(0) as u64;
-                }
-                // Fuzz duration
-                3 => {
-                    rec.duration = (rec.duration as i128).wrapping_add(delta).max(1) as u64;
-                }
-                _ => {}
+        let (mut rec, in_persistent) =
+            if let Some(rec) = w.env.storage().persistent().get::<_, VestingSchedule>(&key) {
+                (rec, true)
+            } else if let Some(rec) = w.env.storage().instance().get::<_, VestingSchedule>(&key) {
+                (rec, false)
+            } else {
+                return;
+            };
+
+        match kind {
+            // Fuzz total_amount
+            0 => {
+                rec.total_amount = rec.total_amount.wrapping_add(delta).max(1);
             }
+            // Fuzz claimed
+            1 => {
+                rec.claimed = rec.claimed.wrapping_add(delta).max(0);
+            }
+            // Fuzz cliff
+            2 => {
+                rec.cliff = (rec.cliff as i128).wrapping_add(delta).max(0) as u64;
+            }
+            // Fuzz duration
+            3 => {
+                rec.duration = (rec.duration as i128).wrapping_add(delta).max(1) as u64;
+            }
+            _ => {}
+        }
+        if in_persistent {
+            w.env.storage().persistent().set(&key, &rec);
+        } else {
             w.env.storage().instance().set(&key, &rec);
         }
     });

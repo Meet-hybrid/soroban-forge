@@ -215,37 +215,39 @@ for an explicit beneficiary:
 
 ## Storage Layout & Upgrade Compatibility
 
-The vesting contract uses instance storage partitioned into four key variants:
+The vesting contract partitions its storage across persistent storage (with TTL management) and instance storage:
 
 ```rust
 enum DataKey {
-    /// Holds a `VestingSchedule` record keyed by monotonic schedule id.
+    /// Holds a `VestingSchedule` record keyed by monotonic schedule id (persistent storage).
     Schedule(u64),
-    /// Holds a `TrancheSchedule` record keyed by the same id space.
+    /// Holds a `TrancheSchedule` record keyed by the same id space (persistent storage).
     TrancheSchedule(u64),
-    /// Monotonic id counter (`u64`), initialized at 0 and incremented on each schedule creation.
+    /// Monotonic id counter (`u64`), initialized at 0 and incremented on each schedule creation (instance storage).
     Count,
-    /// Frozen, unclaimed amount owed to a former beneficiary.
+    /// Frozen, unclaimed amount owed to a former beneficiary (persistent storage).
     FormerBeneficiaryClaim(u64, Address),
 }
 ```
 
 ### Storage Model
 
-- **`DataKey::Count`**: Stores a single `u64` representing the highest allocated schedule id. Next id allocation uses checked addition (`checked_add(1)`), returning `ForgeError::ArithmeticOverflow` on counter saturation.
-- **`DataKey::Schedule(u64)`**: Stores the `VestingSchedule` struct containing funder, current beneficiary, token address, total amount, start timestamp, cliff duration, total duration, total claimed amount, the current assignment's vested snapshot and claimed amount, reassignment count, optional frozen vested amount (`revoked_vested`), and derived lifecycle status.
-- **`DataKey::FormerBeneficiaryClaim(u64, Address)`**: Stores a former beneficiary's frozen, unclaimed balance for that schedule. The schedule id is part of the key, so balances from separate grants never mix.
-- **`DataKey::TrancheSchedule(u64)`**: Stores the `TrancheSchedule` struct containing beneficiary, token address, start timestamp, the immutable unlock table, claimed amount, and derived lifecycle status.
-- Instance storage lifetime is bound to the contract instance. In environments with storage TTL expiration, the contract instance TTL must be maintained to prevent storage eviction.
+- **`DataKey::Count`**: Stores a single `u64` in **instance storage** representing the highest allocated schedule id. Next id allocation uses checked addition (`checked_add(1)`), returning `ForgeError::ArithmeticOverflow` on counter saturation.
+- **`DataKey::Schedule(u64)`**: Stores the `VestingSchedule` struct in **persistent storage** with a 30-day TTL horizon (`BUMP_AMOUNT`, 518,400 ledgers) renewed on every state-changing operation (`create_schedule`, `revoke`, `reassign_beneficiary`, `claim`, `claim_for`) and via the permissionless `touch_ttl` keeper entrypoint.
+- **`DataKey::TrancheSchedule(u64)`**: Stores the `TrancheSchedule` struct in **persistent storage** with a 30-day TTL horizon, renewed on `create_tranche_schedule`, `claim`, and `touch_ttl`.
+- **`DataKey::FormerBeneficiaryClaim(u64, Address)`**: Stores a former beneficiary's frozen, unclaimed balance in **persistent storage** with a 30-day TTL horizon. The schedule id is part of the key, so balances from separate grants never mix. Cleared once claimed.
+- **TTL Keepers**: The permissionless `touch_ttl(schedule_id)` keeper extends the entry's persistent TTL horizon to 30 days without modifying schedule state, returning `ForgeError::NotFound` if the schedule does not exist or has expired.
 
-### Upgrade Compatibility
+### Upgrade Compatibility & Schema Evolution
 
-- **Key Segregation**: Because `DataKey::Schedule(u64)` and `DataKey::TrancheSchedule(u64)` use tuple variants and `DataKey::Count` is a unit variant, keys occupy non-overlapping namespaces within instance storage.
-- **Record Schema Evolution**:
-  - The `VestingSchedule` struct is serialized via Soroban's `#[contracttype]`, where every struct field is a required key. The revocation/reassignment additions (`funder`, `revoked_vested`, `reassignment_vested`, `beneficiary_claimed`, and `reassignment_count`) make this a **storage-breaking upgrade**: records written by an older build do not deserialize into the new type. Deployments must migrate or reset their instance storage before upgrading. The former-beneficiary key is additive. `TrancheSchedule` keeps its existing schema.
-  - Future additions to either struct must maintain backwards deserialization compatibility (e.g. using `Option<T>` for newly introduced optional fields, or migrating storage records upon upgrade) — note that `Option<T>` helps only for reading absent fields into an optional, not for the required-key encoding itself.
-  - Storage key enums must preserve existing discriminant ordering if extended (e.g. adding new key variants for administrative roles or persistent storage migration).
-- **Storage Tier Migration**: If migrating from instance storage to persistent storage with per-schedule TTL management (mirroring the Escrow contract architecture), schedule records and `FormerBeneficiaryClaim` entries can be migrated to persistent storage while retaining `DataKey::Count` in instance storage. Reassignment adds a key variant but no storage tier.
+- **Key Segregation**: Because `DataKey::Schedule(u64)` and `DataKey::TrancheSchedule(u64)` use tuple variants and `DataKey::Count` is a unit variant, keys occupy non-overlapping namespaces.
+- **Storage Tier Migration**: Schedule records and former beneficiary claims are stored in persistent storage with per-record TTL management (mirroring Escrow and Subscription Payments), while `DataKey::Count` remains in instance storage.
+- **Lazy Migration**: Records from earlier deployments written to instance storage are automatically migrated to persistent storage upon first access (`load`), and their instance entries are pruned.
+- **Backwards Compatible Deserialization**:
+  - `VestingScheduleV0` (flat fields without funder or revocation) is decoded safely and upcast with `funder = beneficiary` and initialized reassignment counters.
+  - `VestingScheduleV1` (with funder and revocation, but without reassignment snapshots) is decoded safely and upcast with initialized reassignment fields.
+  - `VestingSchedule` (current schema) is deserialized directly.
+- **Expired Entry Protection**: Expired persistent entries return `ForgeError::NotFound` across all contract entrypoints and never recreate default state.
 
-Tests live in-crate (`crates/vesting/src/lib.rs`) and run with
+Tests live in-crate (`crates/vesting/src/lib.rs`, `crates/vesting/src/ttl_migration.rs`) and run with
 `cargo test -p soroban-forge-vesting --all-targets --locked`.
