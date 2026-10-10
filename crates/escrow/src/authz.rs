@@ -1399,3 +1399,46 @@ fn blank_envelope_aborts_basket_create_and_writes_nothing() {
     let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
     assert_eq!(id, 1);
 }
+
+#[test]
+fn touch_ttl_is_permissionless_under_blank_envelope() {
+    let (env, token, _token_client, _contract_id, client, accounts) = setup!();
+    let id = client.create_escrow(
+        &accounts.user1,
+        &accounts.user2,
+        &accounts.arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+    );
+
+    env.set_auths(&[]);
+    assert_eq!(client.touch_ttl(&id), ());
+    assert_eq!(env.auths().len(), 0);
+}
+
+#[test]
+fn read_entrypoints_succeed_under_blank_envelope() {
+    let (env, token, _token_client, _contract_id, client, accounts) = setup!();
+    let id = client.create_escrow(
+        &accounts.user1,
+        &accounts.user2,
+        &accounts.arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+    );
+
+    env.set_auths(&[]);
+    assert_eq!(client.get_status(&id), EscrowStatus::Pending);
+    let escrow = client.get_escrow(&id);
+    assert_eq!(escrow.escrow_id, id);
+    let _ttl = client.ttl_info(&id);
+    assert_eq!(
+        client
+            .escrows_for_participant(&accounts.user1, &0, &10)
+            .ids
+            .len(),
+        1
+    );
+}

@@ -489,3 +489,112 @@ fn settle_sales_auth_failure_leaves_summary_and_balances_untouched() {
         initial_summary
     );
 }
+
+#[test]
+fn set_royalty_splits_accepts_collection_signature() {
+    use crate::RoyaltyShare;
+    use soroban_sdk::vec;
+
+    let (env, _token, contract_id, client, collection, recipient, _seller, _payer) = setup!();
+    let splits = vec![
+        &env,
+        RoyaltyShare {
+            recipient: recipient.clone(),
+            bps: BPS,
+        },
+    ];
+
+    env.mock_auths(&[MockAuth {
+        address: &collection,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_royalty_splits",
+            args: (&collection, splits.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_set_royalty_splits(&collection, &splits)
+        .expect("outer ok")
+        .expect("contract ok");
+
+    let royalty = client.get_royalty(&collection);
+    assert_eq!(royalty.recipient, recipient);
+    assert_eq!(royalty.bps, BPS);
+}
+
+#[test]
+fn set_royalty_splits_rejects_signature_from_non_collection() {
+    use crate::RoyaltyShare;
+    use soroban_sdk::vec;
+
+    let (env, _token, contract_id, client, collection, recipient, _seller, _payer) = setup!();
+    let splits = vec![
+        &env,
+        RoyaltyShare {
+            recipient: recipient.clone(),
+            bps: BPS,
+        },
+    ];
+
+    env.mock_auths(&[MockAuth {
+        address: &recipient,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_royalty_splits",
+            args: (&collection, splits.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_set_royalty_splits(&collection, &splits);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn blank_envelope_aborts_set_royalty_splits() {
+    use crate::RoyaltyShare;
+    use soroban_sdk::vec;
+
+    let (env, _token, _contract_id, client, collection, recipient, _seller, _payer) = setup!();
+    let splits = vec![
+        &env,
+        RoyaltyShare {
+            recipient: recipient.clone(),
+            bps: BPS,
+        },
+    ];
+
+    env.mock_auths(&[]);
+    let res = client.try_set_royalty_splits(&collection, &splits);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn touch_ttl_is_permissionless_under_blank_envelope() {
+    let (env, _token, _contract_id, client, collection, recipient, _seller, _payer) = setup!();
+    client.set_royalty(&collection, &recipient, &BPS);
+
+    env.mock_auths(&[]);
+    assert_eq!(client.touch_ttl(&collection), ());
+}
+
+#[test]
+fn read_entrypoints_succeed_under_blank_envelope() {
+    let (env, token, _contract_id, client, collection, recipient, seller, payer) = setup!();
+    client.set_royalty(&collection, &recipient, &BPS);
+    client.settle_sale(&collection, &token, &payer, &seller, &AMOUNT);
+
+    env.mock_auths(&[]);
+    let royalty = client.get_royalty(&collection);
+    assert_eq!(royalty.recipient, recipient);
+
+    let summary = client.get_settlement_summary(&collection);
+    assert_eq!(summary.sales, 1);
+
+    let quote = client.quote_sale(&collection, &AMOUNT);
+    assert_eq!(quote.gross, AMOUNT);
+    assert_eq!(quote.royalty_amount, 50);
+    assert_eq!(quote.seller_net, 950);
+}

@@ -9,12 +9,14 @@
 //! - `pause` and `resume` require the subscriber.
 //! - `charge_catchup` requires the provider and the subscriber for token transfer.
 
-use crate::{SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus};
+use crate::{
+    MetricQuota, SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus,
+};
 use soroban_sdk::testutils::{
     Address as _, AuthorizedFunction, AuthorizedInvocation, Ledger as _, MockAuth, MockAuthInvoke,
 };
 use soroban_sdk::token::StellarAssetClient;
-use soroban_sdk::{Address, Env, IntoVal, InvokeError, Symbol};
+use soroban_sdk::{Address, Env, IntoVal, InvokeError, Symbol, Vec};
 
 const START: u64 = 1_000_000;
 const PERIOD: u64 = 1_000;
@@ -98,6 +100,82 @@ fn subscribe_rejects_signature_from_non_subscriber() {
 }
 
 #[test]
+fn deposit_accepts_subscriber_signature_and_token_transfer_authorization() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    env.mock_auths(&[MockAuth {
+        address: subscriber,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit",
+            args: (id, AMOUNT).into_val(&env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &token,
+                fn_name: "transfer",
+                args: (subscriber, &contract_id, AMOUNT).into_val(&env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    assert_eq!(client.deposit(&id, &AMOUNT), AMOUNT);
+}
+
+#[test]
+fn deposit_rejects_signature_without_token_transfer_authorization() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    env.mock_auths(&[MockAuth {
+        address: subscriber,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit",
+            args: (id, AMOUNT).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_deposit(&id, &AMOUNT);
+    assert_eq!(
+        res,
+        Err(Ok(
+            soroban_forge_shared_utils::ForgeError::TokenTransferFailed
+        ))
+    );
+}
+
+#[test]
+fn deposit_rejects_signature_over_different_amount() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    env.mock_auths(&[MockAuth {
+        address: subscriber,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit",
+            args: (id, 500_i128).into_val(&env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &token,
+                fn_name: "transfer",
+                args: (subscriber, &contract_id, 500_i128).into_val(&env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_deposit(&id, &AMOUNT));
+}
+
+#[test]
 fn deposit_rejects_signature_from_non_subscriber() {
     let (env, _token, contract_id, client, accounts) = setup!();
     let id = client.subscribe(&accounts.user1, &accounts.user2, &_token, &AMOUNT, &PERIOD);
@@ -112,6 +190,60 @@ fn deposit_rejects_signature_from_non_subscriber() {
         },
     }]);
     assert_auth_abort!(client.try_deposit(&id, &AMOUNT));
+}
+
+#[test]
+fn blank_envelope_aborts_deposit_without_changing_custody_or_balance() {
+    let (env, token, _contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    env.mock_auths(&[]);
+    assert_auth_abort!(client.try_deposit(&id, &AMOUNT));
+    assert_eq!(client.get_subscription(&id).prepaid_balance, None);
+}
+
+#[test]
+fn withdraw_balance_accepts_subscriber_signature() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+    client.deposit(&id, &AMOUNT);
+
+    env.mock_auths(&[MockAuth {
+        address: subscriber,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "withdraw_balance",
+            args: (id, AMOUNT).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_eq!(client.withdraw_balance(&id, &AMOUNT), 0);
+}
+
+#[test]
+fn withdraw_balance_rejects_signature_over_different_amount() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+    client.deposit(&id, &AMOUNT);
+
+    env.mock_auths(&[MockAuth {
+        address: subscriber,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "withdraw_balance",
+            args: (id, 500_i128).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_withdraw_balance(&id, &AMOUNT));
 }
 
 #[test]
@@ -130,6 +262,19 @@ fn withdraw_balance_rejects_signature_from_non_subscriber() {
         },
     }]);
     assert_auth_abort!(client.try_withdraw_balance(&id, &AMOUNT));
+}
+
+#[test]
+fn blank_envelope_aborts_withdraw_balance_without_changing_balance() {
+    let (env, token, _contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+    client.deposit(&id, &AMOUNT);
+
+    env.mock_auths(&[]);
+    assert_auth_abort!(client.try_withdraw_balance(&id, &AMOUNT));
+    assert_eq!(client.get_subscription(&id).prepaid_balance, Some(AMOUNT));
 }
 
 #[test]
@@ -805,4 +950,343 @@ fn charge_catchup_authorization_tree_contains_provider_and_token_transfer_frames
             ),
         ],
     );
+}
+
+#[test]
+fn set_quotas_accepts_subscriber_signature() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    let mut quotas = Vec::new(&env);
+    quotas.push_back(MetricQuota {
+        metric: Symbol::new(&env, "api_calls"),
+        included_units: 100,
+        overage_price: 10,
+        bucket_units: 10,
+        max_overage_units: None,
+    });
+
+    env.mock_auths(&[MockAuth {
+        address: subscriber,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_quotas",
+            args: (id, quotas.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.set_quotas(&id, &quotas);
+    let sub = client.get_subscription(&id);
+    assert_eq!(sub.quotas.len(), 1);
+}
+
+#[test]
+fn set_quotas_rejects_provider_signature() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    let mut quotas = Vec::new(&env);
+    quotas.push_back(MetricQuota {
+        metric: Symbol::new(&env, "api_calls"),
+        included_units: 100,
+        overage_price: 10,
+        bucket_units: 10,
+        max_overage_units: None,
+    });
+
+    env.mock_auths(&[MockAuth {
+        address: provider,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_quotas",
+            args: (id, quotas.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_set_quotas(&id, &quotas));
+    assert_eq!(client.get_subscription(&id).quotas.len(), 0);
+}
+
+#[test]
+fn set_quotas_rejects_outsider_signature() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let outsider = &accounts.user3;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    let mut quotas = Vec::new(&env);
+    quotas.push_back(MetricQuota {
+        metric: Symbol::new(&env, "api_calls"),
+        included_units: 100,
+        overage_price: 10,
+        bucket_units: 10,
+        max_overage_units: None,
+    });
+
+    env.mock_auths(&[MockAuth {
+        address: outsider,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_quotas",
+            args: (id, quotas.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_set_quotas(&id, &quotas));
+    assert_eq!(client.get_subscription(&id).quotas.len(), 0);
+}
+
+#[test]
+fn set_quotas_rejects_signature_replayed_for_another_subscription() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let first_id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+    let second_id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    let mut quotas = Vec::new(&env);
+    quotas.push_back(MetricQuota {
+        metric: Symbol::new(&env, "api_calls"),
+        included_units: 100,
+        overage_price: 10,
+        bucket_units: 10,
+        max_overage_units: None,
+    });
+
+    env.mock_auths(&[MockAuth {
+        address: subscriber,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_quotas",
+            args: (first_id, quotas.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_set_quotas(&second_id, &quotas));
+    assert_eq!(client.get_subscription(&first_id).quotas.len(), 0);
+    assert_eq!(client.get_subscription(&second_id).quotas.len(), 0);
+}
+
+#[test]
+fn blank_envelope_aborts_set_quotas_without_changing_quotas() {
+    let (env, token, _contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    let mut quotas = Vec::new(&env);
+    quotas.push_back(MetricQuota {
+        metric: Symbol::new(&env, "api_calls"),
+        included_units: 100,
+        overage_price: 10,
+        bucket_units: 10,
+        max_overage_units: None,
+    });
+
+    env.mock_auths(&[]);
+    assert_auth_abort!(client.try_set_quotas(&id, &quotas));
+    assert_eq!(client.get_subscription(&id).quotas.len(), 0);
+}
+
+#[test]
+fn record_usage_accepts_provider_signature() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    let metric = Symbol::new(&env, "api_calls");
+    let mut quotas = Vec::new(&env);
+    quotas.push_back(MetricQuota {
+        metric: metric.clone(),
+        included_units: 100,
+        overage_price: 10,
+        bucket_units: 10,
+        max_overage_units: None,
+    });
+    client.set_quotas(&id, &quotas);
+
+    env.mock_auths(&[MockAuth {
+        address: provider,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "record_usage",
+            args: (id, metric.clone(), 50_u64).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.record_usage(&id, &metric, &50);
+    assert_eq!(client.get_usage(&id, &metric).units, 50);
+}
+
+#[test]
+fn record_usage_rejects_subscriber_signature() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    let metric = Symbol::new(&env, "api_calls");
+    let mut quotas = Vec::new(&env);
+    quotas.push_back(MetricQuota {
+        metric: metric.clone(),
+        included_units: 100,
+        overage_price: 10,
+        bucket_units: 10,
+        max_overage_units: None,
+    });
+    client.set_quotas(&id, &quotas);
+
+    env.mock_auths(&[MockAuth {
+        address: subscriber,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "record_usage",
+            args: (id, metric.clone(), 50_u64).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_record_usage(&id, &metric, &50));
+    assert_eq!(client.get_usage(&id, &metric).units, 0);
+}
+
+#[test]
+fn record_usage_rejects_outsider_signature() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let outsider = &accounts.user3;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    let metric = Symbol::new(&env, "api_calls");
+    let mut quotas = Vec::new(&env);
+    quotas.push_back(MetricQuota {
+        metric: metric.clone(),
+        included_units: 100,
+        overage_price: 10,
+        bucket_units: 10,
+        max_overage_units: None,
+    });
+    client.set_quotas(&id, &quotas);
+
+    env.mock_auths(&[MockAuth {
+        address: outsider,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "record_usage",
+            args: (id, metric.clone(), 50_u64).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_record_usage(&id, &metric, &50));
+    assert_eq!(client.get_usage(&id, &metric).units, 0);
+}
+
+#[test]
+fn record_usage_rejects_signature_replayed_for_another_subscription() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let first_id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+    let second_id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    let metric = Symbol::new(&env, "api_calls");
+    let mut quotas = Vec::new(&env);
+    quotas.push_back(MetricQuota {
+        metric: metric.clone(),
+        included_units: 100,
+        overage_price: 10,
+        bucket_units: 10,
+        max_overage_units: None,
+    });
+    client.set_quotas(&first_id, &quotas);
+    client.set_quotas(&second_id, &quotas);
+
+    env.mock_auths(&[MockAuth {
+        address: provider,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "record_usage",
+            args: (first_id, metric.clone(), 50_u64).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_record_usage(&second_id, &metric, &50));
+    assert_eq!(client.get_usage(&first_id, &metric).units, 0);
+    assert_eq!(client.get_usage(&second_id, &metric).units, 0);
+}
+
+#[test]
+fn blank_envelope_aborts_record_usage_without_changing_meter() {
+    let (env, token, _contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    let metric = Symbol::new(&env, "api_calls");
+    let mut quotas = Vec::new(&env);
+    quotas.push_back(MetricQuota {
+        metric: metric.clone(),
+        included_units: 100,
+        overage_price: 10,
+        bucket_units: 10,
+        max_overage_units: None,
+    });
+    client.set_quotas(&id, &quotas);
+
+    env.mock_auths(&[]);
+    assert_auth_abort!(client.try_record_usage(&id, &metric, &50));
+    assert_eq!(client.get_usage(&id, &metric).units, 0);
+}
+
+#[test]
+fn read_entrypoints_succeed_under_blank_envelope() {
+    let (env, token, _contract_id, client, accounts) = setup!();
+    let subscriber = &accounts.user1;
+    let provider = &accounts.user2;
+    let id = client.subscribe(subscriber, provider, &token, &AMOUNT, &PERIOD);
+
+    let metric = Symbol::new(&env, "api_calls");
+    let mut quotas = Vec::new(&env);
+    quotas.push_back(MetricQuota {
+        metric: metric.clone(),
+        included_units: 100,
+        overage_price: 10,
+        bucket_units: 10,
+        max_overage_units: None,
+    });
+    client.set_quotas(&id, &quotas);
+
+    // Call read-only entrypoints under blank envelope
+    env.mock_auths(&[]);
+
+    let sub = client.get_subscription(&id);
+    assert_eq!(sub.subscription_id, id);
+    assert_eq!(client.get_subscription_count(), 1);
+    assert_eq!(
+        client
+            .subscriptions_for_subscriber(subscriber, &0, &10)
+            .len(),
+        1
+    );
+    assert_eq!(
+        client.subscriptions_for_provider(provider, &0, &10).len(),
+        1
+    );
+    assert!(!client.is_provider_authorized(subscriber, provider));
+    assert_eq!(client.get_usage(&id, &metric).units, 0);
+    assert_eq!(client.quote_period(&id), AMOUNT);
 }

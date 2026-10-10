@@ -740,3 +740,43 @@ fn blank_envelope_aborts_vote_and_preserves_tally() {
     assert_eq!(proposal.for_votes, 0);
     assert_eq!(proposal.against_votes, 0);
 }
+
+#[test]
+fn touch_ttl_is_permissionless_under_a_blank_envelope() {
+    let (env, _token, _tc, _contract_id, client, accounts, target_id) = setup!();
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
+
+    env.set_auths(&[]);
+    assert_eq!(client.touch_ttl(&id), ());
+    assert_eq!(env.auths().len(), 0);
+}
+
+#[test]
+fn read_entrypoints_succeed_under_a_blank_envelope() {
+    let (env, _token, _tc, _contract_id, client, accounts, target_id) = setup!();
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
+
+    env.set_auths(&[]);
+    let proposal = client.get_proposal(&id);
+    assert_eq!(proposal.proposal_id, id);
+    assert_eq!(client.get_proposal_count(), 1);
+    let _bond_cfg = client.get_bond_config();
+    let _deps = client.get_dependencies(&id);
+    assert_eq!(client.get_proposals(&0, &10).len(), 1);
+    assert!(!client.has_voted(&id, &accounts.user1));
+    assert_eq!(client.get_active_proposal_count(&accounts.user1), 1);
+}
