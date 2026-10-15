@@ -146,7 +146,7 @@ treasury at a terminal transition.
 | Concern | Status | Notes |
 |---|---|---|
 | Checked arithmetic | ✅ Workspace-wide | Overflow-safe; vesting guards documented |
-| `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, DAO governance, and marketplace royalties proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other two: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
+| `require_auth` on every state change | ✅ Workspace-wide | Proven against wrong signers across all six contracts via dedicated negative-auth suites (`authz.rs`) + authorization-tree assertions |
 | Events | ✅ Escrow + Multi-Sig + DAO + Marketplace + Vesting | Full lifecycle events on escrow, multi-sig wallet, DAO governance, marketplace royalties, and vesting beneficiary reassignment |
 | Persistent storage + TTL | ✅ Escrow + Royalties + Multi-Sig + DAO | Per-record persistent entries with `touch_ttl`/`touch_tx_ttl` keepers on escrow, marketplace royalties (royalty + summary), multi-sig (transactions), and DAO (proposals); vesting and subscriptions remain instance-only. TTL policy constants + `bump_entry` helper consolidated in shared-utils (issue #127) and consumed by all four |
 | SEP-41 token settlement | ✅ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Transfers use transfer-before-state ordering; subscription pull-mode charges pay subscriber → provider, while opt-in prepaid subscriptions custody deposits and pay exact debits/refunds |
@@ -154,7 +154,7 @@ treasury at a terminal transition.
 | Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
 | TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
 | Provenance + verification | ✅ CLI | `soroban-forge verify` checks a WASM artifact / expected hash against a deterministic rebuild using `provenance-manifest.json` | 
-| `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, and DAO governance proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other three: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
+| `require_auth` on every state change | ✅ Workspace-wide | Proven against wrong signers across all six contracts via dedicated negative-auth suites (`authz.rs`) + authorization-tree assertions |
 | Events | ✅ Escrow + Multi-Sig + DAO + Marketplace + Vesting | Full lifecycle events on escrow, multi-sig wallet, DAO governance, marketplace royalties, and vesting beneficiary reassignment |
 | Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
 | SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Real transfers with transfer-before-state ordering on escrow, vesting, marketplace, DAO, and subscriptions; prepaid subscriptions add contract custody, exact balance debits, and cancellation refunds |

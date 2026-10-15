@@ -724,3 +724,108 @@ fn reassignment_rejects_old_new_and_outsider_signatures() {
         assert_eq!(client.get_schedule(&id).reassignment_count, 0);
     }
 }
+
+#[test]
+fn claim_for_accepts_named_beneficiary_signature() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user1,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+    env.ledger().set_timestamp(START + CLIFF + 200);
+    client.reassign_beneficiary(&id, &accounts.user2);
+
+    let vested = client.claimable_for(&id, &accounts.user1);
+    assert!(vested > 0);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "claim_for",
+            args: (id, &accounts.user1).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let claimed = client.claim_for(&id, &accounts.user1);
+    assert_eq!(claimed, vested);
+}
+
+#[test]
+fn claim_for_rejects_signature_from_different_party() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user1,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+    env.ledger().set_timestamp(START + CLIFF + 200);
+    client.reassign_beneficiary(&id, &accounts.user2);
+
+    // Current beneficiary or outsider trying to claim_for old beneficiary
+    for wrong_signer in [&accounts.user2, &accounts.arbiter] {
+        env.mock_auths(&[MockAuth {
+            address: wrong_signer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "claim_for",
+                args: (id, &accounts.user1).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_claim_for(&id, &accounts.user1);
+        assert_auth_abort!(res);
+    }
+}
+
+#[test]
+fn blank_envelope_aborts_claim_for_and_preserves_custody() {
+    let (env, token, _tc, _contract_id, client, accounts) = setup!();
+    let id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user1,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+    env.ledger().set_timestamp(START + CLIFF + 200);
+    client.reassign_beneficiary(&id, &accounts.user2);
+
+    let vested = client.claimable_for(&id, &accounts.user1);
+    assert!(vested > 0);
+
+    env.set_auths(&[]);
+    let res = client.try_claim_for(&id, &accounts.user1);
+    assert_auth_abort!(res);
+    assert_eq!(client.claimable_for(&id, &accounts.user1), vested);
+}
+
+#[test]
+fn read_entrypoints_succeed_under_blank_envelope() {
+    let (env, token, _tc, _contract_id, client, accounts) = setup!();
+    let id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user1,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+
+    env.set_auths(&[]);
+    let schedule = client.get_schedule(&id);
+    assert_eq!(schedule.beneficiary, accounts.user1);
+    assert_eq!(client.get_status(&id), VestingStatus::Locked);
+    assert_eq!(client.claimable(&id), 0);
+    assert_eq!(client.claimable_for(&id, &accounts.user1), 0);
+}

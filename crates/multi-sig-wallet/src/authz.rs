@@ -1396,3 +1396,35 @@ fn blank_envelope_aborts_remove_withdrawal_limit_and_preserves_policy_and_window
     assert_eq!(w_tx, 2);
     assert_eq!(client.get_window_usage(&token), 300);
 }
+
+#[test]
+fn touch_tx_ttl_is_permissionless_under_a_blank_envelope() {
+    let (env, _contract_id, client, accounts) = setup!();
+    client.initialize(&owner_vec(&env, &accounts), &2_u32);
+    let target = env.register(MockTarget, ());
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
+
+    env.set_auths(&[]);
+    assert_eq!(client.touch_tx_ttl(&tx_id), ());
+    assert_eq!(env.auths().len(), 0);
+}
+
+#[test]
+fn read_entrypoints_succeed_under_a_blank_envelope() {
+    let (env, _contract_id, client, accounts) = setup!();
+    client.initialize(&owner_vec(&env, &accounts), &2_u32);
+    let target = env.register(MockTarget, ());
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
+
+    env.set_auths(&[]);
+    assert_eq!(client.get_threshold(), 2);
+    assert_eq!(client.get_owners().len(), 3);
+    assert!(client.is_owner(&accounts.user1));
+    assert_eq!(client.get_tx_count(), 1);
+    assert!(client.is_live(&tx_id));
+    let tx = client.get_tx(&tx_id);
+    assert_eq!(tx.tx_id, tx_id);
+    assert_eq!(client.get_confirmations(&tx_id).len(), 0);
+    assert_eq!(client.get_rejections(&tx_id).len(), 0);
+    assert_eq!(client.get_transactions(&0, &10).len(), 1);
+}
