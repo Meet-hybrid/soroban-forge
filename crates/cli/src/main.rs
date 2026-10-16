@@ -148,4 +148,66 @@ mod tests {
         assert!(help.contains("--expected"));
         assert!(help.contains("--manifest"));
     }
+
+    #[test]
+    fn invoke_typed_flags_and_legacy_examples_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "invoke",
+            "--contract",
+            "escrow_alias",
+            "--function",
+            "deposit",
+            "--arg",
+            "buyer:address=GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            "--arg",
+            "amount:i128=1000",
+            "--spec",
+            "target/wasm32v1-none/release/soroban_forge_escrow.wasm",
+            "--simulate-only",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+
+        let Commands::Invoke(args) = cli.command else {
+            panic!("expected invoke command");
+        };
+        assert_eq!(args.contract, "escrow_alias");
+        assert_eq!(args.function, "deposit");
+        assert_eq!(args.args.len(), 2);
+        assert!(args.simulate_only);
+        assert_eq!(args.output, crate::cli::InvokeOutputFormat::Json);
+        assert!(args.wasm.is_some());
+    }
+
+    #[test]
+    fn invoke_help_documents_all_typed_argument_forms() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("invoke")
+            .expect("invoke subcommand must exist")
+            .render_long_help()
+            .to_string();
+        for expected_token in [
+            "address",
+            "i128",
+            "u64",
+            "bool",
+            "symbol",
+            "bytes",
+            "vec",
+            "map",
+            "json",
+            "xdr",
+            "--wasm",
+            "--simulate-only",
+            "--output",
+        ] {
+            assert!(
+                help.contains(expected_token),
+                "expected invoke --help to contain `{expected_token}`, got:\n{help}"
+            );
+        }
+    }
 }

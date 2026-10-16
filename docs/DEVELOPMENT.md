@@ -172,6 +172,84 @@ All comparisons are exact; any mismatch (or a rebuild that fails) exits
 non-zero. `--package` selects a single package; without it, artifacts are
 matched by name inference.
 
+### Invoke and Simulate Contracts with Typed ScVal Arguments
+
+The `invoke` subcommand encodes typed `ScVal` arguments, optionally validates
+calls against a compiled contract WASM/spec (`--wasm` / `--spec`), delegates
+transport to `stellar contract invoke`, and decodes simulation or execution
+results into readable text, JSON, or base64 XDR:
+
+```bash
+# Legacy simple arguments continue to work unchanged
+cargo run -p soroban-forge-cli -- invoke \
+  --contract <CONTRACT_ID> \
+  --function balance \
+  --arg id=GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF \
+  --network testnet
+
+# Explicit typed arguments + contract-spec validation + simulation with JSON output
+cargo run -p soroban-forge-cli -- invoke \
+  --contract <CONTRACT_ID> \
+  --function create_escrow \
+  --wasm target/wasm32v1-none/release/soroban_forge_escrow.wasm \
+  --simulate-only \
+  --output json \
+  --arg buyer:address=GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF \
+  --arg seller:address=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4 \
+  --arg arbiter:address=GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF \
+  --arg token:address=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4 \
+  --arg amount:i128=50000 \
+  --arg timeout:u64=3600
+```
+
+#### Supported Argument Forms (`--arg`)
+
+- **Named typed:** `<name>:<type>=<value>` or `<name>=<type>:<value>`
+- **Positional typed:** `<type>:<value>`
+- **Simple (legacy):** `<name>=<value>` or `<value>` (automatically coerced and
+  type-checked when `--wasm` / `--spec` is supplied)
+
+| Type Tag | Aliases | Format & Validation |
+|---|---|---|
+| `address` | `addr` | 56-character Stellar account (`G...`) or contract (`C...`) Strkey with CRC16 checksum validation |
+| `i128`, `u128` | — | Signed / unsigned 128-bit integer (supports `_` separators, e.g. `100_000`) |
+| `i64`, `u64` | — | Signed / unsigned 64-bit integer |
+| `i32`, `u32` | — | Signed / unsigned 32-bit integer |
+| `bool` | `boolean` | `true` or `false` |
+| `symbol` | `sym` | 1–32 ASCII `[a-zA-Z0-9_]` characters (`ScVal::Symbol`) |
+| `string` | `str` | Arbitrary UTF-8 string (`ScVal::String`) |
+| `bytes` | `hex`, `bytes_n` | Even-length hex byte string with optional `0x` prefix (`ScVal::Bytes`) |
+| `void` | `unit` | Empty value, `()`, `void`, or `null` (`ScVal::Void`) |
+| `vec` | `array` | JSON array of `ScVal` objects or primitives (e.g. `[{"u32":1},{"u32":2}]`) |
+| `map` | — | JSON array of `{"key": <scval>, "val": <scval>}` entries or JSON object |
+| `json` | `scval` | Canonical JSON `ScVal` object (e.g. `{"address":"G..."}` or `{"i128":"1000"}`) |
+| `xdr` | — | Base64-encoded XDR `ScVal` |
+
+#### Quoting, Address Validation, and Error Behavior
+
+- **Shell quoting:** Wrap JSON arguments (`vec`, `map`, `json`) in single quotes
+  in `bash`/`zsh` (e.g. `--arg 'items:vec=[{"u64":1}]'`) or escaped quotes in
+  PowerShell.
+- **Address validation:** Both `--contract` and `address`-typed `--arg` values
+  are validated offline using `stellar-strkey` before any network request is
+  made. Passing an account (`G...`) or secret (`S...`) Strkey to `--contract`,
+  or any malformed Strkey with a bad checksum, fails immediately with an
+  actionable diagnostic.
+- **Contract-spec validation (`--wasm` / `--spec`):** Extracts the
+  `contractspecv0` custom section from a `.wasm` binary (or reads raw XDR
+  `ScSpecEntry` records) to verify function existence, argument count,
+  parameter names, `BytesN<N>` lengths, and `ScSpecTypeDef` compatibility
+  offline before invoking `stellar`.
+- **Decoded output & error context:** Use `--output text|json|xdr` (or `--json`)
+  to format simulation (`--simulate-only`) and execution results. When a
+  simulation or invocation fails, `ScError` diagnostics (`Error(Contract, #N)`
+  and host `Error(<Domain>, <Code>)`) are decoded and resolved against the
+  contract's `ScSpecUdtErrorEnumV0` (or `ForgeError` codes `1..=10`).
+- **Live-network tests:** Offline unit tests run by default in
+  `cargo test -p soroban-forge-cli`; set `SOROBAN_FORGE_LIVE_NETWORK_TESTS=1`
+  and `SOROBAN_FORGE_TEST_CONTRACT_ID=<C...>` to enable the live testnet
+  simulation test.
+
 ## Test Commands
 
 ### Full Test Suite
