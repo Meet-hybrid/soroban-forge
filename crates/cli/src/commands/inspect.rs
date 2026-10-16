@@ -90,7 +90,10 @@ fn run_dry_run(args: &InspectArgs) -> Result<()> {
     } else {
         println!("Dry-run artifact inspection");
         println!("  artifact: {}", result.artifact);
-        println!("  package: {}", result.package.as_deref().unwrap_or("unknown"));
+        println!(
+            "  package: {}",
+            result.package.as_deref().unwrap_or("unknown")
+        );
         println!("  size_bytes: {}", result.size_bytes);
         println!("  sha256: {}", result.sha256);
         if let Some(expected_hash) = &result.expected_sha256 {
@@ -101,7 +104,8 @@ fn run_dry_run(args: &InspectArgs) -> Result<()> {
         }
     }
 
-    if matches!(expected.as_deref(), Some(expected_hash) if !actual_hash.eq_ignore_ascii_case(expected_hash)) {
+    if matches!(expected.as_deref(), Some(expected_hash) if !actual_hash.eq_ignore_ascii_case(expected_hash))
+    {
         bail!("dry-run inspection failed: local artifact hash does not match expected SHA-256");
     }
 
