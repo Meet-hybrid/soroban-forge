@@ -63,6 +63,9 @@ pub struct VerifyArgs {
     /// Crate to rebuild; inferred from the WASM file name when omitted.
     #[arg(short, long)]
     pub package: Option<String>,
+    /// Emit a machine-readable JSON summary for the verification result.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, Clone)]

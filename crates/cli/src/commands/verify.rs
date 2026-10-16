@@ -1,7 +1,7 @@
 use crate::cli::VerifyArgs;
 use crate::commands::build::{self, CONTRACT_PACKAGES, WASM_TARGET};
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,24 +25,53 @@ struct ManifestArtifact {
     bytes: Option<u64>,
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
 enum VerifyStatus {
     Match,
     Mismatch,
+    SizeDrift,
+    Missing,
+}
+
+#[derive(Debug, Serialize)]
+struct ArtifactVerification {
+    name: String,
+    state: VerifyStatus,
+    expected_sha256: String,
+    actual_sha256: Option<String>,
+    recorded_bytes: Option<u64>,
+    actual_bytes: Option<u64>,
+    message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct VerificationSummary {
+    status: String,
+    artifacts: Vec<ArtifactVerification>,
+}
+
+fn render_verification_summary_json(summary: &VerificationSummary) -> String {
+    serde_json::to_string(summary).unwrap()
 }
 
 pub fn run(args: VerifyArgs) -> Result<()> {
     match (args.wasm.as_deref(), args.expected.as_deref()) {
-        (Some(wasm), expected) => verify_wasm(wasm, expected, args.package.as_deref()),
-        (None, Some(expected)) => verify_expected(expected, args.package.as_deref()),
-        (None, None) => verify_manifest(&args.manifest),
+        (Some(wasm), expected) => verify_wasm(wasm, expected, args.package.as_deref(), args.json),
+        (None, Some(expected)) => verify_expected(expected, args.package.as_deref(), args.json),
+        (None, None) => verify_manifest(&args.manifest, args.json),
     }
 }
 
 /// `--wasm <PATH>` (optionally with `--expected`): rebuild the contract that
 /// matches the artifact's file name and compare hashes. The supplied artifact
 /// is never overwritten; it is only read and hashed.
-fn verify_wasm(wasm_path: &str, expected: Option<&str>, package: Option<&str>) -> Result<()> {
+fn verify_wasm(
+    wasm_path: &str,
+    expected: Option<&str>,
+    package: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let input_path = PathBuf::from(wasm_path);
     if !input_path.exists() {
         bail!("WASM artifact not found at {}", input_path.display());
@@ -58,6 +87,24 @@ fn verify_wasm(wasm_path: &str, expected: Option<&str>, package: Option<&str>) -
 
     let expected_hash = expected.map(expect_valid_sha256).transpose()?;
     let status = compare(&input_hash, &rebuilt_hash, expected_hash.as_deref());
+    if json {
+        println!(
+            "{}",
+            render_verification_summary_json(&VerificationSummary {
+                status: if status == VerifyStatus::Match { "pass".to_string() } else { "fail".to_string() },
+                artifacts: vec![ArtifactVerification {
+                    name: package.clone(),
+                    state: status,
+                    expected_sha256: expected_hash.clone().unwrap_or_else(|| input_hash.clone()),
+                    actual_sha256: Some(rebuilt_hash.clone()),
+                    recorded_bytes: None,
+                    actual_bytes: fs::metadata(&rebuilt_path).ok().map(|meta| meta.len()),
+                    message: None,
+                }],
+            })
+        );
+        return finish(status, &package);
+    }
     print_row(
         &package,
         "Input SHA256",
@@ -72,7 +119,7 @@ fn verify_wasm(wasm_path: &str, expected: Option<&str>, package: Option<&str>) -
 /// `--expected <SHA256>` alone: rebuild the selected contract (or every
 /// contract package when none is selected) and compare each rebuilt hash
 /// against the supplied hash. No original WASM file is required.
-fn verify_expected(expected: &str, package: Option<&str>) -> Result<()> {
+fn verify_expected(expected: &str, package: Option<&str>, json: bool) -> Result<()> {
     let expected_hash = expect_valid_sha256(expected)?;
     let packages: Vec<&str> = match package {
         Some(package) => {
@@ -92,23 +139,46 @@ fn verify_expected(expected: &str, package: Option<&str>) -> Result<()> {
         rebuild_package(package)?;
     }
 
+    let mut artifacts = Vec::new();
     let mut mismatches = 0;
-    print_header("Expected SHA256", "Actual SHA256");
+    if !json {
+        print_header("Expected SHA256", "Actual SHA256");
+    }
     for package in &packages {
         let rebuilt_path = wasm_artifact_path(package)?;
         let rebuilt_hash = sha256_hex_file(&rebuilt_path)?;
         let status = compare(&expected_hash, &rebuilt_hash, None);
-        print_row(
-            package,
-            "Expected SHA256",
-            &expected_hash,
-            "Actual SHA256",
-            &rebuilt_hash,
-            status,
-        );
+        if json {
+            artifacts.push(ArtifactVerification {
+                name: package.to_string(),
+                state: status,
+                expected_sha256: expected_hash.clone(),
+                actual_sha256: Some(rebuilt_hash.clone()),
+                recorded_bytes: None,
+                actual_bytes: fs::metadata(&rebuilt_path).ok().map(|meta| meta.len()),
+                message: None,
+            });
+        } else {
+            print_row(
+                package,
+                "Expected SHA256",
+                &expected_hash,
+                "Actual SHA256",
+                &rebuilt_hash,
+                status,
+            );
+        }
         if status == VerifyStatus::Mismatch {
             mismatches += 1;
         }
+    }
+
+    if json {
+        let summary = VerificationSummary {
+            status: if mismatches == 0 { "pass".to_string() } else { "fail".to_string() },
+            artifacts,
+        };
+        println!("{}", render_verification_summary_json(&summary));
     }
 
     if mismatches > 0 {
@@ -119,7 +189,7 @@ fn verify_expected(expected: &str, package: Option<&str>) -> Result<()> {
 
 /// `--manifest <PATH>`: validate every listed artifact in the provenance
 /// manifest against a deterministic rebuild of the contract packages.
-fn verify_manifest(manifest_path: &str) -> Result<()> {
+fn verify_manifest(manifest_path: &str, json: bool) -> Result<()> {
     let manifest = parse_manifest(Path::new(manifest_path))?;
 
     build::ensure_wasm_target_installed()?;
@@ -138,60 +208,109 @@ fn verify_manifest(manifest_path: &str) -> Result<()> {
         bail!("cargo build failed with status {status}");
     }
 
-    println!("Verifying provenance manifest against source rebuild");
-    if let Some(commit) = manifest.git_commit.as_deref() {
-        println!("  git_commit:   {commit}");
-    }
-    if let Some(generated_at) = manifest.generated_at.as_deref() {
-        println!("  generated_at: {generated_at}");
-    }
-    if let Some(target) = manifest.target.as_deref() {
-        println!("  target:       {target}");
+    let mut summary = VerificationSummary {
+        status: "pass".to_string(),
+        artifacts: Vec::new(),
+    };
+
+    if !json {
+        println!("Verifying provenance manifest against source rebuild");
+        if let Some(commit) = manifest.git_commit.as_deref() {
+            println!("  git_commit:   {commit}");
+        }
+        if let Some(generated_at) = manifest.generated_at.as_deref() {
+            println!("  generated_at: {generated_at}");
+        }
+        if let Some(target) = manifest.target.as_deref() {
+            println!("  target:       {target}");
+        }
     }
 
     let mut mismatches = 0;
-    print_header("Expected SHA256", "Actual SHA256");
+    if !json {
+        print_header("Expected SHA256", "Actual SHA256");
+    }
     for artifact in &manifest.artifacts {
         let rebuilt_path = build::wasm_release_dir().join(&artifact.name);
         let actual_hash = match sha256_hex_file(&rebuilt_path) {
             Ok(hash) => hash,
             Err(error) => {
-                println!(
-                    "{:<32} {:<66} {:<66} MISSING ({error})",
-                    artifact.name, artifact.sha256, "-"
-                );
+                let result = ArtifactVerification {
+                    name: artifact.name.clone(),
+                    state: VerifyStatus::Missing,
+                    expected_sha256: artifact.sha256.clone(),
+                    actual_sha256: None,
+                    recorded_bytes: artifact.bytes,
+                    actual_bytes: None,
+                    message: Some(format!("missing artifact ({error})")),
+                };
+                if json {
+                    summary.artifacts.push(result);
+                } else {
+                    println!(
+                        "{:<32} {:<66} {:<66} MISSING ({error})",
+                        artifact.name, artifact.sha256, "-"
+                    );
+                }
                 mismatches += 1;
                 continue;
             }
         };
-        // The manifest records the artifact size it was generated from; a
-        // divergent size is its own drift signal even when by slim chance the
-        // hash still matches.
         let size_drift = match artifact.bytes {
             Some(recorded) => match fs::metadata(&rebuilt_path).map(|meta| meta.len()) {
                 Ok(actual) if actual != recorded => {
-                    println!(
-                        "  note: {:<32} size drifted: manifest {recorded} bytes vs rebuilt {actual} bytes",
-                        artifact.name,
-                    );
+                    let message = format!("size drifted: manifest {recorded} bytes vs rebuilt {actual} bytes");
+                    if !json {
+                        println!("  note: {:<32} {}", artifact.name, message);
+                    }
                     true
                 }
                 _ => false,
             },
             None => false,
         };
-        let status = compare(&artifact.sha256, &actual_hash, None);
-        print_row(
-            &artifact.name,
-            "Expected SHA256",
-            &artifact.sha256,
-            "Actual SHA256",
-            &actual_hash,
-            status,
-        );
-        if status == VerifyStatus::Mismatch || size_drift {
+        let status = if size_drift {
+            VerifyStatus::SizeDrift
+        } else {
+            compare(&artifact.sha256, &actual_hash, None)
+        };
+        let result = ArtifactVerification {
+            name: artifact.name.clone(),
+            state: status,
+            expected_sha256: artifact.sha256.clone(),
+            actual_sha256: Some(actual_hash.clone()),
+            recorded_bytes: artifact.bytes,
+            actual_bytes: fs::metadata(&rebuilt_path).ok().map(|meta| meta.len()),
+            message: if size_drift {
+                Some(format!(
+                    "size drifted: manifest {} bytes vs rebuilt {} bytes",
+                    artifact.bytes.unwrap_or(0),
+                    fs::metadata(&rebuilt_path).map(|meta| meta.len()).unwrap_or(0)
+                ))
+            } else {
+                None
+            },
+        };
+        if json {
+            summary.artifacts.push(result);
+        } else {
+            print_row(
+                &artifact.name,
+                "Expected SHA256",
+                &artifact.sha256,
+                "Actual SHA256",
+                &actual_hash,
+                status,
+            );
+        }
+        if status == VerifyStatus::Mismatch || status == VerifyStatus::SizeDrift || status == VerifyStatus::Missing {
             mismatches += 1;
         }
+    }
+
+    if json {
+        summary.status = if mismatches == 0 { "pass".to_string() } else { "fail".to_string() };
+        println!("{}", render_verification_summary_json(&summary));
     }
 
     if mismatches > 0 {
@@ -342,12 +461,14 @@ fn print_row(
         match status {
             VerifyStatus::Match => "MATCH",
             VerifyStatus::Mismatch => "MISMATCH",
+            VerifyStatus::SizeDrift => "SIZE DRIFT",
+            VerifyStatus::Missing => "MISSING",
         }
     );
 }
 
 fn finish(status: VerifyStatus, package: &str) -> Result<()> {
-    if status == VerifyStatus::Mismatch {
+    if status != VerifyStatus::Match {
         bail!("verification failed: hashes do not match for {package}");
     }
     Ok(())
@@ -494,16 +615,51 @@ mod tests {
         let dir = temp_dir();
         fs::create_dir_all(&dir).unwrap();
         let missing = dir.join("soroban_forge_escrow.wasm");
-        let err = verify_wasm(&missing.display().to_string(), None, None).unwrap_err();
+        let err = verify_wasm(&missing.display().to_string(), None, None, false).unwrap_err();
         assert!(err.to_string().contains("WASM artifact not found"));
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn unknown_package_for_expected_is_rejected_before_building() {
-        let err = verify_expected(&"a".repeat(64), Some("not-a-contract")).unwrap_err();
+        let err = verify_expected(&"a".repeat(64), Some("not-a-contract"), false).unwrap_err();
         assert!(err
             .to_string()
             .contains("not a known Soroban Forge contract package"));
+    }
+
+    #[test]
+    fn verification_summary_json_marks_all_pass_and_size_drift() {
+        let pass = VerificationSummary {
+            status: "pass".to_string(),
+            artifacts: vec![ArtifactVerification {
+                name: "soroban_forge_escrow.wasm".to_string(),
+                state: VerifyStatus::Match,
+                expected_sha256: "a".repeat(64),
+                actual_sha256: Some("a".repeat(64)),
+                recorded_bytes: Some(128),
+                actual_bytes: Some(128),
+                message: None,
+            }],
+        };
+        let value: serde_json::Value = serde_json::from_str(&render_verification_summary_json(&pass)).unwrap();
+        assert_eq!(value["status"], "pass");
+        assert_eq!(value["artifacts"][0]["state"], "match");
+
+        let drift = VerificationSummary {
+            status: "fail".to_string(),
+            artifacts: vec![ArtifactVerification {
+                name: "soroban_forge_escrow.wasm".to_string(),
+                state: VerifyStatus::SizeDrift,
+                expected_sha256: "a".repeat(64),
+                actual_sha256: Some("b".repeat(64)),
+                recorded_bytes: Some(128),
+                actual_bytes: Some(256),
+                message: Some("size drifted: manifest 128 bytes vs rebuilt 256 bytes".to_owned()),
+            }],
+        };
+        let value: serde_json::Value = serde_json::from_str(&render_verification_summary_json(&drift)).unwrap();
+        assert_eq!(value["status"], "fail");
+        assert_eq!(value["artifacts"][0]["state"], "size-drift");
     }
 }

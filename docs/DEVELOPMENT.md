@@ -160,11 +160,37 @@ cargo run -p soroban-forge-cli -- verify --expected <64-hex-sha256> --package so
 
 # Check every artifact in the manifest
 cargo run -p soroban-forge-cli -- verify --manifest provenance-manifest.json
+
+# Emit an offline machine-readable summary for CI or release tooling
+cargo run -p soroban-forge-cli -- verify --manifest provenance-manifest.json --json
 ```
 
-`--wasm <PATH>` hashes the given artifact on disk (SHA-256) and optionally
-compares it against `--expected` or the manifest entry for the package
-inferred from the file name (`soroban_forge_escrow.wasm` →
+Example JSON output for a clean verification run, with no secrets and no remote
+network access needed:
+
+```json
+{
+  "status": "pass",
+  "artifacts": [
+    {
+      "name": "soroban_forge_escrow.wasm",
+      "state": "match",
+      "expected_sha256": "ccbb6603cce6d194407b822df110c91324939cea92ba21937a6d9f1e2c9e48b9",
+      "actual_sha256": "ccbb6603cce6d194407b822df110c91324939cea92ba21937a6d9f1e2c9e48b9",
+      "recorded_bytes": 18054,
+      "actual_bytes": 18054,
+      "message": null
+    }
+  ]
+}
+```
+
+A drifted or missing artifact is surfaced as `"state": "size-drift"` or
+`"state": "missing"`, while a hash mismatch reports `"state": "mismatch"`.
+The command exits non-zero whenever the summarized verification is not fully
+pass. `--wasm <PATH>` hashes the given artifact on disk (SHA-256) and
+optionally compares it against `--expected` or the manifest entry for the
+package inferred from the file name (`soroban_forge_escrow.wasm` →
 `soroban-forge-escrow`). `--expected` triggers a deterministic rebuild of the
 selected package and compares the resulting artifact's hash. `--manifest`
 verifies every artifact listed in the manifest by rebuilding each package.
