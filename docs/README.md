@@ -27,6 +27,9 @@ Read these before relying on or contributing to the contracts:
   flagship escrow port (SDK 27, SEP-41 settlement, disputes, events)
 - [Reviewer Walkthrough](WALKTHROUGH.md) — verify the repo end-to-end in
   ~5 minutes: tests, live testnet demo with expected output, on-chain checks
+- [Resource Budgets](resource-budgets.md) — the resource & budget regression
+  gates for contract entrypoints, their thresholds, and the intentional
+  baseline update process
 
 ## Quick Links
 

@@ -132,6 +132,30 @@ jobs:
             exit 1
           fi
 
+  resource-budget:
+    name: Resource Budget Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The gate needs no wasm target or stellar-cli: benchmark flows run
+      # natively in the Soroban test host (deterministic, network-independent)
+      # and compare against budgets/resource-baseline.json. Regressions beyond
+      # the documented thresholds fail this job; the report identifies the
+      # affected package and entrypoint. Baselines are only ever updated via
+      # scripts/update-resource-baseline.sh (see docs/resource-budgets.md).
+      - name: Run resource budget regression gate
+        run: cargo test -p soroban-forge-resource-budget --locked -- --nocapture
+      - name: Publish resource report to job summary
+        if: always()
+        run: |
+          if [ -f target/resource-budget-report.md ]; then
+            cat target/resource-budget-report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "resource-budget-report.md was not produced (gate crashed early?)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   scaffold:
     name: Scaffold Check
     runs-on: ubuntu-latest

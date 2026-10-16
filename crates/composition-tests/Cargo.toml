@@ -5,14 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Cross-contract composition integration tests for Soroban Forge"
 
 [lib]
 name = "composition_tests"
 doctest = false
 
-# Only include minimal dependencies needed for basic testing
 [dev-dependencies]
-soroban-sdk.workspace = true
-soroban-forge-shared-utils = { path = "../shared-utils" }
-soroban-forge-test-utils = { path = "../test-utils" }
+soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-forge-shared-utils = { path = "../shared-utils", version = "0.2.0" }
+soroban-forge-test-utils = { path = "../test-utils", version = "0.2.0" }
+soroban-forge-escrow = { path = "../escrow", version = "0.2.0" }
+soroban-forge-vesting = { path = "../vesting", version = "0.2.0" }
+soroban-forge-multi-sig-wallet = { path = "../multi-sig-wallet", version = "0.2.0" }
+soroban-forge-dao-governance = { path = "../dao-governance", version = "0.2.0" }
+soroban-forge-subscription-payments = { path = "../subscription-payments", version = "0.2.0" }
+soroban-forge-marketplace-royalties = { path = "../marketplace-royalties", version = "0.2.0" }
 proptest = "1.0"

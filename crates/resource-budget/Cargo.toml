@@ -1,0 +1,33 @@
+[package]
+name = "soroban-forge-resource-budget"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Resource and budget regression gates for Soroban Forge contract entrypoints"
+
+# Not a contract crate: this is a host-side test harness (std + serde JSON
+# baseline I/O), so it deliberately declares no `cdylib` crate-type and is
+# skipped by `stellar contract build` / `scripts/provenance.sh`, which only
+# build cdylib workspace members.
+
+[lib]
+name = "resource_budget"
+
+doctest = false
+
+[dependencies]
+# testutils is required (not optional) here: the whole crate exists to read
+# `Env::cost_estimate()` invocation resources, which only exists under the
+# testutils feature. This crate is never compiled for wasm32v1-none.
+soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-forge-test-utils = { path = "../test-utils", version = "0.2.0" }
+soroban-forge-escrow = { path = "../escrow", version = "0.2.0" }
+soroban-forge-vesting = { path = "../vesting", version = "0.2.0" }
+soroban-forge-multi-sig-wallet = { path = "../multi-sig-wallet", version = "0.2.0" }
+soroban-forge-dao-governance = { path = "../dao-governance", version = "0.2.0" }
+soroban-forge-subscription-payments = { path = "../subscription-payments", version = "0.2.0" }
+soroban-forge-marketplace-royalties = { path = "../marketplace-royalties", version = "0.2.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
