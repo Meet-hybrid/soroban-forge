@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "description": "Deterministic vesting reassignment events for the Soroban Forge indexer fixture set.",
+  "contract": {
+    "id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+    "name": "soroban-forge-vesting"
+  },
+  "events": [
+    {
+      "type": "contract",
+      "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+      "ledger": 0,
+      "ledgerClosedAt": "2026-09-23T00:00:00.000Z",
+      "transactionHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "operationIndex": 0,
+      "eventIndex": 0,
+      "id": "0-0",
+      "pagingToken": "0-0",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "beneficiary_reassigned_from",
+        "1",
+        "GBX2E2O4AZ67M7C2A4R5FZL7D3K5Q6R4Z7F6Q7D2J6V4JQ4K2A4V3I6C"
+      ],
+      "value": "placeholder"
+    }
+  ]
+}

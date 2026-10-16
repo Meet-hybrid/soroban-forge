@@ -18,7 +18,7 @@
     "generate:clients": "node scripts/generate.mjs",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && tsc --project tsconfig.test.json && node --test dist-test/tests/escrow-client.test.js",
+    "test": "tsc && tsc --project tsconfig.test.json && node --test dist-test/tests/*.test.js",
     "verify:testnet": "npm run build && tsc --project tsconfig.scripts.json && node dist-scripts/verify-testnet.js"
   },
   "dependencies": {
