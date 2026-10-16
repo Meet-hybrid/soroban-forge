@@ -57,7 +57,8 @@ fn generate() -> Value {
     let schedule_id = client.create_schedule(
         &funder,
         &beneficiary,
-        &env.register_stellar_asset_contract_v2(accounts.deployer.clone()).address(),
+        &env.register_stellar_asset_contract_v2(accounts.deployer.clone())
+            .address(),
         &1_000_i128,
         &100_u64,
         &1_000_u64,
