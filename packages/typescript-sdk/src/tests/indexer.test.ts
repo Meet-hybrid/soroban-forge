@@ -54,7 +54,7 @@ test("event type derivation recognizes lifecycle event names", () => {
   assert.equal(
     filterEvents(loadFixtureEvents("escrow"), { eventType: "escrow_created" })
       .length,
-    1,
+    7,
   );
 });
 

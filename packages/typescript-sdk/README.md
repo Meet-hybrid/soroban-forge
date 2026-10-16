@@ -13,23 +13,23 @@ access.
 
 Contract errors returned by the client use the shared `ForgeError` codes:
 
-| Code | Variant | Meaning |
-|---:|---|---|
-| 1 | `Unauthorized` | The caller is not permitted to perform this action. |
-| 2 | `NotFound` | The requested entity does not exist. |
-| 3 | `InvalidInput` | One or more arguments failed validation. |
-| 4 | `InsufficientFunds` | The contract does not hold enough balance to satisfy the operation. |
-| 5 | `AlreadyInitialized` | The entity was already initialized; re-initialization is rejected. |
-| 6 | `NotInitialized` | The entity was expected to be initialized but was not. |
-| 7 | `DeadlineReached` | The operation was attempted after its deadline elapsed. |
-| 8 | `InsufficientAllowance` | A required token allowance was lower than the amount being spent. |
-| 9 | `ArithmeticOverflow` | An arithmetic operation overflowed. |
-| 10 | `Custom` | A contract-specific error that does not map to the other categories. |
-| 11 | `TokenTransferFailed` | A SEP-41 token invocation failed; the raw token error is bucketed, with the cause available in transaction diagnostic events. |
-| 12 | `ContractInvocationFailed` | A cross-contract invocation failed; the invoking transaction remains un-executed. |
-| 13 | `WithdrawalLimitExceeded` | The withdrawal would exceed the token's configured rolling-window limit. |
-| 14 | `SubscriptionPastDue` | The subscription is lapsed; a catch-up charge must restore it to `Active` before the operation can proceed. |
-| 15 | `ProposerCooldown` | The proposer reached the maximum concurrent active proposals or is within the cooldown window. |
+| Code | Variant                    | Meaning                                                                                                                       |
+| ---: | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+|    1 | `Unauthorized`             | The caller is not permitted to perform this action.                                                                           |
+|    2 | `NotFound`                 | The requested entity does not exist.                                                                                          |
+|    3 | `InvalidInput`             | One or more arguments failed validation.                                                                                      |
+|    4 | `InsufficientFunds`        | The contract does not hold enough balance to satisfy the operation.                                                           |
+|    5 | `AlreadyInitialized`       | The entity was already initialized; re-initialization is rejected.                                                            |
+|    6 | `NotInitialized`           | The entity was expected to be initialized but was not.                                                                        |
+|    7 | `DeadlineReached`          | The operation was attempted after its deadline elapsed.                                                                       |
+|    8 | `InsufficientAllowance`    | A required token allowance was lower than the amount being spent.                                                             |
+|    9 | `ArithmeticOverflow`       | An arithmetic operation overflowed.                                                                                           |
+|   10 | `Custom`                   | A contract-specific error that does not map to the other categories.                                                          |
+|   11 | `TokenTransferFailed`      | A SEP-41 token invocation failed; the raw token error is bucketed, with the cause available in transaction diagnostic events. |
+|   12 | `ContractInvocationFailed` | A cross-contract invocation failed; the invoking transaction remains un-executed.                                             |
+|   13 | `WithdrawalLimitExceeded`  | The withdrawal would exceed the token's configured rolling-window limit.                                                      |
+|   14 | `SubscriptionPastDue`      | The subscription is lapsed; a catch-up charge must restore it to `Active` before the operation can proceed.                   |
+|   15 | `ProposerCooldown`         | The proposer reached the maximum concurrent active proposals or is within the cooldown window.                                |
 
 The canonical error list is maintained in [`crates/shared-utils/src/errors.rs`](../../crates/shared-utils/src/errors.rs); update this table when that definition changes.
 
@@ -47,7 +47,7 @@ Compile the TypeScript source to `dist/`:
 npm run build
 ```
 
-The compiled output is what consumers import.  The `dist/` directory is
+The compiled output is what consumers import. The `dist/` directory is
 published; the `src/` source is authoritative.
 
 ## Usage
@@ -99,6 +99,30 @@ Signers/wallets are supplied per call via `MethodOptions` (`sign`, `simulate`,
 etc.). See the
 [stellar-sdk contract client docs](https://stellar.github.io/js-stellar-sdk/).
 
+### Decode escrow simulation results
+
+For local debugging and offline verification, the package exports a narrow
+helper that decodes the generated escrow result payloads into a readable shape:
+
+```ts
+import { decodeEscrowResult } from "@soroban-forge/escrow-client";
+
+const successful = decodeEscrowResult<{ tag: "Funded"; values: null }>({
+  ok: true,
+  value: { tag: "Funded", values: null },
+});
+
+const failed = decodeEscrowResult<void>({
+  ok: false,
+  error: { code: 3, message: "InvalidInput" },
+});
+```
+
+The helper accepts the generated `Result<T>` form used by the escrow client and
+returns either `{ ok: true, value }` for successful outcomes or a normalized
+failure object with `code`, `message`, and the original raw payload. Malformed
+input falls back to a safe error object instead of throwing.
+
 ## Generate all clients
 
 From this directory, run:
@@ -127,18 +151,18 @@ differences if the checked-in output is stale. Generation requires stable Rust,
 the `wasm32v1-none` target, the Stellar CLI, and SDK dependencies installed by
 `npm ci`; it does not require network access after setup.
 
-| Contract | Unified package export | Standalone package |
-| --- | --- | --- |
-| Escrow | `escrow` | `@soroban-forge/escrow-client` |
-| Vesting | `vesting` | `@soroban-forge/vesting-client` |
-| Multi-Sig Wallet | `multisig` | `@soroban-forge/multi-sig-wallet-client` |
-| DAO Governance | `dao` | `@soroban-forge/dao-governance-client` |
-| Subscription Payments | `subscription` | `@soroban-forge/subscription-payments-client` |
-| Marketplace Royalties | `marketplace` | `@soroban-forge/marketplace-royalties-client` |
+| Contract              | Unified package export | Standalone package                            |
+| --------------------- | ---------------------- | --------------------------------------------- |
+| Escrow                | `escrow`               | `@soroban-forge/escrow-client`                |
+| Vesting               | `vesting`              | `@soroban-forge/vesting-client`               |
+| Multi-Sig Wallet      | `multisig`             | `@soroban-forge/multi-sig-wallet-client`      |
+| DAO Governance        | `dao`                  | `@soroban-forge/dao-governance-client`        |
+| Subscription Payments | `subscription`         | `@soroban-forge/subscription-payments-client` |
+| Marketplace Royalties | `marketplace`          | `@soroban-forge/marketplace-royalties-client` |
 
 ## Offline tests
 
-The test suite runs completely offline.  It does **not** require:
+The test suite runs completely offline. It does **not** require:
 
 - network access
 - private keys
@@ -174,7 +198,7 @@ npm run typecheck
 A separate, **opt-in** script performs one live read-only call (`get_status`)
 against the deployed testnet contract to confirm end-to-end connectivity.
 
-This is **not** part of `npm test`.  Run it only when you have network access
+This is **not** part of `npm test`. Run it only when you have network access
 and a valid escrow ID:
 
 ```bash
@@ -201,7 +225,7 @@ suitable as a post-deployment smoke check in a manual release workflow.
 
 ## Provenance
 
-This package replaces the v0.1.0 console-log placeholder SDK.  The contract
+This package replaces the v0.1.0 console-log placeholder SDK. The contract
 itself, its testnet receipt rounds, and the conservation property are
 documented in the [repository README](https://github.com/Meet-hybrid/soroban-forge).
 
