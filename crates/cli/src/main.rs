@@ -148,4 +148,30 @@ mod tests {
         assert!(help.contains("--expected"));
         assert!(help.contains("--manifest"));
     }
+
+    #[test]
+    fn inspect_dry_run_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "inspect",
+            "--dry-run",
+            "--wasm",
+            "target/wasm32v1-none/release/soroban_forge_escrow.wasm",
+            "--expected",
+            &"a".repeat(64),
+        ])
+        .unwrap();
+
+        let Commands::Inspect(args) = cli.command else {
+            panic!("expected inspect command");
+        };
+        assert!(args.dry_run);
+        assert_eq!(
+            args.wasm.as_deref(),
+            Some(std::path::Path::new(
+                "target/wasm32v1-none/release/soroban_forge_escrow.wasm"
+            ))
+        );
+        assert_eq!(args.expected.as_deref(), Some("a".repeat(64).as_str()));
+    }
 }
