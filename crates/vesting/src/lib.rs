@@ -1147,6 +1147,9 @@ fn transfer_from_contract(
 }
 
 #[cfg(test)]
+mod indexer_fixtures;
+
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]

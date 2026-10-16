@@ -1,0 +1,51 @@
+{
+  "contract": {
+    "id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+    "name": "soroban-forge-vesting"
+  },
+  "description": "Deterministic lifecycle fixtures emitted by the Soroban Forge vesting contract; this fixture is intentionally minimal but stable for the shared event indexer.",
+  "events": [
+    {
+      "type": "contract",
+      "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+      "ledger": 1000,
+      "ledgerClosedAt": "2026-09-23T00:16:40.000Z",
+      "transactionHash": "0000000000001000",
+      "operationIndex": 0,
+      "eventIndex": 0,
+      "id": "1000-0",
+      "pagingToken": "1000-0",
+      "inSuccessfulContractCall": true,
+      "topic": ["AAAA", "AAAA", "AAAA"],
+      "value": "AAAA"
+    },
+    {
+      "type": "contract",
+      "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+      "ledger": 1001,
+      "ledgerClosedAt": "2026-09-23T00:16:41.000Z",
+      "transactionHash": "0000000000001001",
+      "operationIndex": 0,
+      "eventIndex": 0,
+      "id": "1001-0",
+      "pagingToken": "1001-0",
+      "inSuccessfulContractCall": true,
+      "topic": ["AAAA", "AAAA", "AAAA"],
+      "value": "AAAA"
+    },
+    {
+      "type": "contract",
+      "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+      "ledger": 1002,
+      "ledgerClosedAt": "2026-09-23T00:16:42.000Z",
+      "transactionHash": "0000000000001002",
+      "operationIndex": 0,
+      "eventIndex": 0,
+      "id": "1002-0",
+      "pagingToken": "1002-0",
+      "inSuccessfulContractCall": true,
+      "topic": ["AAAA", "AAAA", "AAAA"],
+      "value": "AAAA"
+    }
+  ]
+}

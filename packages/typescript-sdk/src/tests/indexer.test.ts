@@ -57,3 +57,12 @@ test("event type derivation recognizes lifecycle event names", () => {
     1,
   );
 });
+
+test("vesting fixture resolves and loads through the common indexer API", () => {
+  const events = loadFixtureEvents("vesting");
+  assert.ok(events.length > 0, "vesting fixture must contain events");
+  assert.ok(
+    events.every((event) => event.contractId.length > 0),
+    "every vesting event must carry a contract id",
+  );
+});
