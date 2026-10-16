@@ -117,7 +117,7 @@ non-required means a transient bot/API problem can never block a valid PR.
 Human review stays mandatory and is unchanged by ForgeBot:
 
 - `@Meet-hybrid` is the CODEOWNER for the whole repository.
-- Branch protection on `main` requires one approving review for contributor pull
+- Branch protection on `develop` requires one approving review for contributor pull
   requests.
 - CODEOWNER review, branch protection, required reviews, and required status
   checks are **not** modified by ForgeBot.
@@ -181,7 +181,7 @@ and a token-issuing step.
 - **Disable completely:** delete `.github/workflows/forgebot.yml`, or disable the
   workflow in **Actions → ForgeBot → "…" → Disable workflow** (this setting
   lives in GitHub, not in the repository).
-- **Stop reporting on pushes only:** no change needed — pushes to `main` are
+- **Stop reporting on pushes only:** no change needed — pushes to `develop` are
   already filtered out.
 - **Pause for a specific PR:** no per-PR switch exists by design. Remove the
   sticky comment and disable the workflow if it must be silenced.
@@ -201,7 +201,7 @@ noted:
 | --- | --- | --- | --- |
 | Actions workflow permissions | Settings → Actions → General → Workflow permissions | "Read repository contents and packages permissions" (or "Read and write" with the workflow's own `permissions:` block kept in place) | Ensures the default token is not broader than ForgeBot's explicit scopes |
 | Allow GitHub Actions to create PRs | Settings → Actions → General | Any value; ForgeBot does not create PRs | ForgeBot needs no PR-creation right |
-| Branch protection / ruleset on `main` | Settings → Branches (or Rules → Rulesets) | Require a pull request before merging; required approvals ≥ 1; require review from CODEOWNERS if desired; require status checks = the existing CI checks | Guarantees human review and keeps ForgeBot informational |
+| Branch protection / ruleset on `develop` | Settings → Branches (or Rules → Rulesets) | Require a pull request before merging; required approvals ≥ 1; require review from CODEOWNERS if desired; require status checks = the existing CI checks | Guarantees human review and keeps ForgeBot informational |
 | Required status checks | Settings → Branches → required checks | The seven existing CI checks only: Rustfmt, Clippy, Build, Test, Security Audit, WASM Size Check, Provenance Manifest. **Do not** make `ForgeBot / ready-for-review` a required check | Auto-merge only completes when required checks pass; leaving ForgeBot informational means a transient bot/API hiccup cannot block an otherwise valid PR |
 | Allow Auto-Merge | Settings → General → Pull Requests → "Allow auto-merge" | Enabled (recommended for the campaign) | Lets GitHub complete the merge once required reviews **and** required checks are satisfied |
 | "Require approval for first-time contributors" | Settings → Actions → General (fork PR approval) | Maintainers' choice | Decides whether a maintainer must approve a first CI run from a fork before it executes |
@@ -214,13 +214,13 @@ exists in GitHub.
 
 > Note: `workflow_run`-triggered workflows only fire once
 > `.github/workflows/forgebot.yml` exists on the **default branch**. Until this
-> branch is merged/pushed to `main`, ForgeBot does not run at all.
+> branch is merged/pushed to `develop`, ForgeBot does not run at all.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| No ForgeBot comment on a PR | The workflow file is not on the default branch yet | Merge/push `.github/workflows/forgebot.yml` to `main` |
+| No ForgeBot comment on a PR | The workflow file is not on the default branch yet | Merge/push `.github/workflows/forgebot.yml` to `develop` |
 | No comment, CI green | The CI run was cancelled, or a newer run superseded it | Re-run the `ForgeBot` workflow with the CI `run_id` |
 | Comment never appears for a fork PR | The fork PR's CI run has not been approved/executed yet | Approve the workflow run as a maintainer |
 | Duplicate comments | A maintainer/contributor deleted the marker, so the sticky comment could not be found | Delete the extras; ForgeBot will keep one going forward |

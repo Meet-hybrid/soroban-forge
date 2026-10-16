@@ -17,7 +17,7 @@
 #   FORGEBOT_REPO          required  owner/repo
 #   FORGEBOT_RUN_ID        required  the completed `CI` workflow run to report on
 #   FORGEBOT_LOGIN         optional  comment author to update (default: github-actions[bot])
-#   FORGEBOT_BASE_BRANCH   optional  base branch of the campaign (default: main)
+#   FORGEBOT_BASE_BRANCH   optional  base branch of the campaign (default: develop)
 #   FORGEBOT_CI_WORKFLOW   optional  CI workflow file name (default: ci.yml)
 #   FORGEBOT_DRY_RUN       optional  set to 1 to print the comment instead of posting
 #
@@ -47,7 +47,7 @@ fail() {
   || fail "FORGEBOT_RUN_ID must be a numeric workflow run ID, got: ${FORGEBOT_RUN_ID}"
 
 FORGEBOT_LOGIN="${FORGEBOT_LOGIN:-github-actions[bot]}"
-FORGEBOT_BASE_BRANCH="${FORGEBOT_BASE_BRANCH:-main}"
+FORGEBOT_BASE_BRANCH="${FORGEBOT_BASE_BRANCH:-develop}"
 FORGEBOT_CI_WORKFLOW="${FORGEBOT_CI_WORKFLOW:-ci.yml}"
 FORGEBOT_DRY_RUN="${FORGEBOT_DRY_RUN:-0}"
 

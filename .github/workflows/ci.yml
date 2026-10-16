@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, integration]
+    branches: [develop, main, integration]
   pull_request:
-    branches: [main, integration]
+    branches: [develop, main, integration]
 
 jobs:
   rustfmt:
