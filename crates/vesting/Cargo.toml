@@ -24,3 +24,8 @@ soroban-forge-test-utils = { path = "../test-utils", version = "0.2.0" }
 proptest = "1"
 serde_json = "1"
 
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+soroban-forge-test-utils = { path = "../test-utils", version = "0.2.0" }
+proptest = "1"
+serde_json = "1"
