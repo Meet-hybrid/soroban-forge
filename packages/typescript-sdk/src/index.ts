@@ -278,6 +278,78 @@ export const ForgeError = {
 };
 
 /**
+ * A single escrow contract result, decoded from the Stellar SDK's `Result<T>`
+ * shape. A successful invocation includes the typed payload; a reverted call
+ * includes a structured error object that can be inspected by callers without
+ * spelunking through raw JSON.
+ */
+export type EscrowResult<T> =
+  | { ok: true; value: T }
+  | {
+      ok: false;
+      error: {
+        code?: number;
+        message?: string;
+        raw?: unknown;
+      };
+    };
+
+/**
+ * Decode a generated escrow invocation result into a small, inspectable
+ * JavaScript shape. This is intentionally narrow and escrow-specific: it
+ * handles the exact success/error payloads returned by the generated client
+ * without modifying the client surface itself.
+ */
+export function decodeEscrowResult<T>(raw: unknown): EscrowResult<T> {
+  if (!raw || typeof raw !== "object" || !("ok" in raw)) {
+    return {
+      ok: false,
+      error: {
+        message: "Malformed escrow result payload",
+        raw,
+      },
+    };
+  }
+
+  const result = raw as Record<string, unknown>;
+
+  if (result.ok === true) {
+    return {
+      ok: true,
+      value: result.value as T,
+    };
+  }
+
+  const error = result.error;
+  if (error && typeof error === "object") {
+    const errRecord = error as Record<string, unknown>;
+    const code =
+      typeof errRecord.code === "number" ? errRecord.code : undefined;
+    const message =
+      typeof errRecord.message === "string"
+        ? errRecord.message
+        : "Unknown error";
+
+    return {
+      ok: false,
+      error: {
+        code,
+        message,
+        raw: error,
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    error: {
+      message: "Unknown error",
+      raw: result.error ?? raw,
+    },
+  };
+}
+
+/**
  * Audit metadata attached to a persisted value.
  *
  * Contracts store domain data in Soroban instance storage; wrapping it with
