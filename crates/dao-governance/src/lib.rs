@@ -1187,7 +1187,7 @@ mod events {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_forge_test_utils::{MockTarget, MockTargetClient, RevertingTarget, TestAccounts};
+    use soroban_forge_test_utils::{MockTarget, MockTargetClient, TestAccounts};
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{Bytes, Env};
@@ -2107,13 +2107,15 @@ mod tests {
     }
 
     #[test]
-    fn execute_reverting_target_leaves_proposal_succeeded_and_target_unchanged() {
-        let (env, _token, _tc, _contract_id, client, accounts) = bonded_env!();
-        let reverting_target_id = env.register(RevertingTarget, ());
+    fn execute_dispatch_failure_is_retryable_and_preserves_bond_until_success() {
+        let (env, _token, tc, contract_id, client, accounts) = bonded_env!();
+        let target_id = env.register(MockTarget, ());
+        let mock_target = MockTargetClient::new(&env, &target_id);
+        mock_target.set_revert(&true);
 
         let proposal_id = client.propose(
             &accounts.user1,
-            &reverting_target_id,
+            &target_id,
             &payload(&env),
             &DURATION,
             &soroban_sdk::Vec::new(&env),
@@ -2129,16 +2131,51 @@ mod tests {
             client.get_proposal(&proposal_id).state,
             ProposalState::Succeeded
         );
+        assert_eq!(
+            client.get_proposal(&proposal_id).bond_state,
+            BondState::Posted
+        );
+        assert_eq!(tc.balance(&contract_id), BOND);
+        assert_eq!(tc.balance(&accounts.user1), FUNDS - BOND);
+        assert_eq!(bond_held(&env, &contract_id), BOND);
 
-        // Execution attempt against reverting target fails with ContractInvocationFailed
-        let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
-        assert_eq!(err, ForgeError::ContractInvocationFailed);
+        // Multiple failed dispatches do not terminalize the proposal or release
+        // its bond, and the target records no reverted invocation.
+        for _ in 0..2 {
+            let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
+            assert_eq!(err, ForgeError::ContractInvocationFailed);
+            assert_eq!(
+                client.get_proposal(&proposal_id).state,
+                ProposalState::Succeeded
+            );
+            assert_eq!(mock_target.count(), 0);
+            assert_eq!(tc.balance(&contract_id), BOND);
+            assert_eq!(bond_held(&env, &contract_id), BOND);
+        }
 
-        // Failure ordering guarantee: proposal remains Succeeded (NOT Executed)
+        // A later successful dispatch completes the proposal exactly once and
+        // refunds the bond. Terminal proposals reject further attempts.
+        mock_target.set_revert(&false);
+        client.execute(&proposal_id);
         assert_eq!(
             client.get_proposal(&proposal_id).state,
-            ProposalState::Succeeded
+            ProposalState::Executed
         );
+        assert_eq!(
+            client.get_proposal(&proposal_id).bond_state,
+            BondState::Refunded
+        );
+        assert_eq!(mock_target.count(), 1);
+        assert_eq!(tc.balance(&accounts.user1), FUNDS);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(bond_held(&env, &contract_id), 0);
+        assert_eq!(
+            client.try_execute(&proposal_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(mock_target.count(), 1);
+        assert_eq!(tc.balance(&accounts.user1), FUNDS);
+        assert_eq!(tc.balance(&contract_id), 0);
     }
 
     #[test]
