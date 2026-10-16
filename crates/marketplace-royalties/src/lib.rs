@@ -1197,10 +1197,18 @@ mod tests {
         // The contract settles through and never retains funds.
         assert_eq!(tc.balance(&contract_id), 0);
 
+        // A later one-shot payout accumulates rather than replaces totals.
+        let second_net = client.distribute(collection, &token, payer, seller, &500_i128);
+        assert_eq!(second_net, 475);
+        assert_eq!(tc.balance(payer), 925);
+        assert_eq!(tc.balance(recipient), 75);
+        assert_eq!(tc.balance(seller), 0);
+        assert_eq!(tc.balance(&contract_id), 0);
+
         let summary = client.get_settlement_summary(collection);
-        assert_eq!(summary.sales, 1);
-        assert_eq!(summary.gross_volume, 1_000);
-        assert_eq!(summary.royalties_paid, 50);
+        assert_eq!(summary.sales, 2);
+        assert_eq!(summary.gross_volume, 1_500);
+        assert_eq!(summary.royalties_paid, 75);
     }
 
     #[test]
@@ -1216,7 +1224,33 @@ mod tests {
         assert_eq!(net, 1_000);
         assert_eq!(tc.balance(payer), 1_000, "no transfer at zero bps");
         assert_eq!(tc.balance(recipient), 0);
-        assert_eq!(client.get_settlement_summary(collection).royalties_paid, 0);
+        let summary = client.get_settlement_summary(collection);
+        assert_eq!(summary.sales, 1);
+        assert_eq!(summary.gross_volume, 1_000);
+        assert_eq!(summary.royalties_paid, 0);
+    }
+
+    #[test]
+    fn distribute_rounded_to_zero_skips_recipient_transfer_and_records_sale() {
+        let (_env, token, tc, contract_id, client, accounts) = setup_settlement!();
+        let payer = &accounts.user1;
+        let recipient = &accounts.user2;
+        let seller = &accounts.user3;
+        let collection = &accounts.arbiter;
+
+        // 1 * 500 / 10_000 floors to zero; distribute must not invoke a
+        // zero-value recipient transfer, but still records the sale.
+        let net = client.distribute(collection, &token, payer, seller, &1_i128);
+        assert_eq!(net, 1);
+        assert_eq!(tc.balance(payer), 1_000);
+        assert_eq!(tc.balance(recipient), 0);
+        assert_eq!(tc.balance(seller), 0);
+        assert_eq!(tc.balance(&contract_id), 0);
+
+        let summary = client.get_settlement_summary(collection);
+        assert_eq!(summary.sales, 1);
+        assert_eq!(summary.gross_volume, 1);
+        assert_eq!(summary.royalties_paid, 0);
     }
 
     #[test]
@@ -1291,6 +1325,16 @@ mod tests {
         assert_eq!(net, 1_000);
         assert_eq!(tc.balance(payer), 1_000, "disabled config moves nothing");
         assert_eq!(tc.balance(recipient), 0);
+        assert_eq!(
+            tc.balance(seller),
+            0,
+            "distribute leaves seller payment external"
+        );
+        assert_eq!(tc.balance(&contract_id), 0);
+        let summary = client.get_settlement_summary(collection);
+        assert_eq!(summary.sales, 1);
+        assert_eq!(summary.gross_volume, 1_000);
+        assert_eq!(summary.royalties_paid, 0);
     }
 
     #[test]
