@@ -21,6 +21,8 @@ GitHub account and no GitHub App.
 - Surface the results of the existing CI workflow on every pull request.
 - Explain *which* check failed and point the contributor at the fix.
 - Give a concise, non-binding "ready for review" signal once CI is green.
+- Present a durable review brief with the PR target, scope, check breakdown, and
+  one recommended next step.
 - Keep the number of bot comments to **one per pull request** — it is updated in
   place, never re-posted.
 
@@ -90,6 +92,9 @@ maintainer sign-off:
 - Ignore superseded CI runs so the comment never reports stale results.
 - Stay silent on cancelled CI runs so contributors are not pinged with a false
   failure.
+- Report a review brief that separates passed, skipped, pending, and failed
+  checks, identifies the PR target and change scope, and gives a clear current
+  state.
 - Be re-run manually with `workflow_dispatch` for a specific CI run ID.
 
 ## What ForgeBot cannot do
