@@ -9,6 +9,7 @@ members = [
     "crates/dao-governance",
     "crates/subscription-payments",
     "crates/marketplace-royalties",
+    "crates/resource-budget",
     "crates/cli",
     "crates/composition-tests",
 ]

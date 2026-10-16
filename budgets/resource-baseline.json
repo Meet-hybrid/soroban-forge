@@ -1,0 +1,144 @@
+{
+  "schema": "soroban-forge/resource-baseline@1",
+  "note": "Initial baseline measured with the six deterministic benchmark flows on the pinned toolchain. Refresh intentionally via scripts/update-resource-baseline.sh and commit the diff with the change that justifies it.",
+  "thresholds": {
+    "max_regression_percent": 10,
+    "min_absolute_delta": {
+      "instructions": 20000,
+      "mem_bytes": 4096,
+      "memory_read_entries": 2,
+      "disk_read_entries": 2,
+      "write_entries": 2,
+      "disk_read_bytes": 1024,
+      "write_bytes": 1024,
+      "contract_events_size_bytes": 512,
+      "persistent_entry_rent_bumps": 2,
+      "temporary_entry_rent_bumps": 2,
+      "persistent_rent_ledger_bytes": 16384,
+      "temporary_rent_ledger_bytes": 16384,
+      "fee_total_stroops": 200000
+    }
+  },
+  "flows": [
+    {
+      "package": "soroban-forge-escrow",
+      "entrypoint": "release",
+      "scenario": "create_deposit_release",
+      "measured": {
+        "instructions": 383076,
+        "mem_bytes": 149637,
+        "memory_read_entries": 8,
+        "disk_read_entries": 1,
+        "write_entries": 5,
+        "disk_read_bytes": 92,
+        "write_bytes": 1176,
+        "contract_events_size_bytes": 788,
+        "persistent_entry_rent_bumps": 2,
+        "temporary_entry_rent_bumps": 1,
+        "persistent_rent_ledger_bytes": 118195200,
+        "temporary_rent_ledger_bytes": 454463928,
+        "fee_total_stroops": 3366270
+      }
+    },
+    {
+      "package": "soroban-forge-vesting",
+      "entrypoint": "claim",
+      "scenario": "create_schedule_claim_mid_vesting",
+      "measured": {
+        "instructions": 322443,
+        "mem_bytes": 134810,
+        "memory_read_entries": 6,
+        "disk_read_entries": 1,
+        "write_entries": 4,
+        "disk_read_bytes": 92,
+        "write_bytes": 1256,
+        "contract_events_size_bytes": 236,
+        "persistent_entry_rent_bumps": 1,
+        "temporary_entry_rent_bumps": 1,
+        "persistent_rent_ledger_bytes": 116121600,
+        "temporary_rent_ledger_bytes": 454463928,
+        "fee_total_stroops": 3337004
+      }
+    },
+    {
+      "package": "soroban-forge-multi-sig-wallet",
+      "entrypoint": "execute",
+      "scenario": "submit_confirm_execute",
+      "measured": {
+        "instructions": 158470,
+        "mem_bytes": 71051,
+        "memory_read_entries": 3,
+        "disk_read_entries": 0,
+        "write_entries": 2,
+        "disk_read_bytes": 0,
+        "write_bytes": 716,
+        "contract_events_size_bytes": 160,
+        "persistent_entry_rent_bumps": 1,
+        "temporary_entry_rent_bumps": 0,
+        "persistent_rent_ledger_bytes": 343980,
+        "temporary_rent_ledger_bytes": 0,
+        "fee_total_stroops": 15460
+      }
+    },
+    {
+      "package": "soroban-forge-dao-governance",
+      "entrypoint": "execute",
+      "scenario": "propose_vote_execute",
+      "measured": {
+        "instructions": 446940,
+        "mem_bytes": 170175,
+        "memory_read_entries": 6,
+        "disk_read_entries": 0,
+        "write_entries": 5,
+        "disk_read_bytes": 0,
+        "write_bytes": 1820,
+        "contract_events_size_bytes": 732,
+        "persistent_entry_rent_bumps": 1,
+        "temporary_entry_rent_bumps": 0,
+        "persistent_rent_ledger_bytes": 343980,
+        "temporary_rent_ledger_bytes": 0,
+        "fee_total_stroops": 31550
+      }
+    },
+    {
+      "package": "soroban-forge-subscription-payments",
+      "entrypoint": "charge",
+      "scenario": "subscribe_then_charge",
+      "measured": {
+        "instructions": 375075,
+        "mem_bytes": 150002,
+        "memory_read_entries": 6,
+        "disk_read_entries": 1,
+        "write_entries": 4,
+        "disk_read_bytes": 92,
+        "write_bytes": 1444,
+        "contract_events_size_bytes": 612,
+        "persistent_entry_rent_bumps": 1,
+        "temporary_entry_rent_bumps": 1,
+        "persistent_rent_ledger_bytes": 116121600,
+        "temporary_rent_ledger_bytes": 454463928,
+        "fee_total_stroops": 3339032
+      }
+    },
+    {
+      "package": "soroban-forge-marketplace-royalties",
+      "entrypoint": "settle_sale",
+      "scenario": "set_royalty_settle_sale",
+      "measured": {
+        "instructions": 568537,
+        "mem_bytes": 199070,
+        "memory_read_entries": 12,
+        "disk_read_entries": 1,
+        "write_entries": 6,
+        "disk_read_bytes": 92,
+        "write_bytes": 1060,
+        "contract_events_size_bytes": 956,
+        "persistent_entry_rent_bumps": 3,
+        "temporary_entry_rent_bumps": 2,
+        "persistent_rent_ledger_bytes": 358732800,
+        "temporary_rent_ledger_bytes": 908927856,
+        "fee_total_stroops": 7887915
+      }
+    }
+  ]
+}

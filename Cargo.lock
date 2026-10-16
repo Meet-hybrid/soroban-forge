@@ -2101,8 +2101,14 @@ name = "soroban-forge-composition-tests"
 version = "0.2.0"
 dependencies = [
  "proptest",
+ "soroban-forge-dao-governance",
+ "soroban-forge-escrow",
+ "soroban-forge-marketplace-royalties",
+ "soroban-forge-multi-sig-wallet",
  "soroban-forge-shared-utils",
+ "soroban-forge-subscription-payments",
  "soroban-forge-test-utils",
+ "soroban-forge-vesting",
  "soroban-sdk",
 ]
 
@@ -2148,6 +2154,22 @@ dependencies = [
  "serde_json",
  "soroban-forge-shared-utils",
  "soroban-forge-test-utils",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "soroban-forge-resource-budget"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soroban-forge-dao-governance",
+ "soroban-forge-escrow",
+ "soroban-forge-marketplace-royalties",
+ "soroban-forge-multi-sig-wallet",
+ "soroban-forge-subscription-payments",
+ "soroban-forge-test-utils",
+ "soroban-forge-vesting",
  "soroban-sdk",
 ]
 
