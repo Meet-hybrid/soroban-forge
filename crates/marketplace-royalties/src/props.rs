@@ -639,4 +639,57 @@ proptest! {
             "the single-sale cross-check leaves the summary untouched"
         );
     }
+
+    /// Multi-recipient `preview_settlement` and `preview_settlement_splits`
+    /// conserve the gross amount and sub-unit basis-point remainders across
+    /// arbitrary valid recipient splits, and match `settle_sale` + `quote_sale`
+    /// output identically.
+    #[test]
+    fn prop_settlement_preview_conservation_and_settle_parity(
+        amount in 1i128..=MAX_AMOUNT,
+        raw_rates in prop_vec(0u32..=2_000_u32, 1..=5),
+    ) {
+        let w = setup_world(0, amount);
+        let mut splits = soroban_sdk::Vec::new(&w.env);
+        let mut expected_total_bps = 0_u32;
+        for (idx, bps) in raw_rates.iter().enumerate() {
+            let recipient = w.sellers[idx % w.sellers.len()].clone();
+            expected_total_bps += *bps;
+            splits.push_back(crate::RoyaltyShare {
+                recipient,
+                bps: *bps,
+            });
+        }
+        w.client().set_royalty_splits(&w.collection, &splits);
+
+        let preview = w.client().preview_settlement(&w.collection, &amount);
+        let split_preview = w.client().preview_settlement_splits(&amount, &splits);
+        let quote = w.client().quote_sale(&w.collection, &amount);
+
+        prop_assert_eq!(&preview, &split_preview);
+        prop_assert_eq!(preview.gross, amount);
+        prop_assert_eq!(preview.royalty_bps, expected_total_bps);
+        prop_assert_eq!(preview.total_royalties, quote.royalty_amount);
+        prop_assert_eq!(preview.seller_proceeds, quote.seller_net);
+        prop_assert_eq!(preview.total_royalties + preview.seller_proceeds, amount);
+
+        let sum_recipient_amounts: i128 = preview.recipients.iter().map(|r| r.amount).sum();
+        let sum_sub_unit_bps: u32 = preview
+            .recipients
+            .iter()
+            .map(|r| r.sub_unit_residue_bps)
+            .sum();
+        prop_assert_eq!(sum_recipient_amounts, preview.total_royalties);
+        prop_assert_eq!((sum_sub_unit_bps / 10_000) as i128, preview.rounding_residue);
+
+        let settlement = w.client().settle_sale(
+            &w.collection,
+            &w.token,
+            &w.payer,
+            &w.seller,
+            &amount,
+        );
+        prop_assert_eq!(settlement.royalty_share, preview.total_royalties);
+        prop_assert_eq!(settlement.seller_net, preview.seller_proceeds);
+    }
 }
