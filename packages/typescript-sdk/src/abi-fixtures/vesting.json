@@ -1,0 +1,323 @@
+{
+  "schema": "soroban-forge/contract-abi@1",
+  "contract": "soroban-forge-vesting",
+  "functions": [
+    {
+      "name": "claim",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "claimable",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "create_schedule",
+      "inputs": [
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "total_amount",
+          "type": "i128"
+        },
+        {
+          "name": "cliff",
+          "type": "u64"
+        },
+        {
+          "name": "duration",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_status",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:VestingStatus,udt:ForgeError>"
+      ]
+    }
+  ],
+  "events": [],
+  "types": [
+    {
+      "kind": "error-enum",
+      "name": "ForgeError",
+      "variants": [
+        {
+          "name": "Unauthorized",
+          "value": 1
+        },
+        {
+          "name": "NotFound",
+          "value": 2
+        },
+        {
+          "name": "InvalidInput",
+          "value": 3
+        },
+        {
+          "name": "InsufficientFunds",
+          "value": 4
+        },
+        {
+          "name": "AlreadyInitialized",
+          "value": 5
+        },
+        {
+          "name": "NotInitialized",
+          "value": 6
+        },
+        {
+          "name": "DeadlineReached",
+          "value": 7
+        },
+        {
+          "name": "InsufficientAllowance",
+          "value": 8
+        },
+        {
+          "name": "ArithmeticOverflow",
+          "value": 9
+        },
+        {
+          "name": "Custom",
+          "value": 10
+        },
+        {
+          "name": "TokenTransferFailed",
+          "value": 11
+        },
+        {
+          "name": "ContractInvocationFailed",
+          "value": 12
+        },
+        {
+          "name": "WithdrawalLimitExceeded",
+          "value": 13
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "PaginatedResult",
+      "fields": [
+        {
+          "name": "cursor",
+          "type": "udt:PaginationCursor"
+        },
+        {
+          "name": "items",
+          "type": "vec<bytes>"
+        },
+        {
+          "name": "total",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "PaginationCursor",
+      "fields": [
+        {
+          "name": "limit",
+          "type": "u32"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Party",
+      "fields": [
+        {
+          "name": "address",
+          "type": "address"
+        },
+        {
+          "name": "approved",
+          "type": "bool"
+        },
+        {
+          "name": "role",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "StorageEntry",
+      "fields": [
+        {
+          "name": "updated_at",
+          "type": "u64"
+        },
+        {
+          "name": "value",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "TimeBounds",
+      "fields": [
+        {
+          "name": "end",
+          "type": "u64"
+        },
+        {
+          "name": "start",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "VestingSchedule",
+      "fields": [
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "claimed",
+          "type": "i128"
+        },
+        {
+          "name": "cliff",
+          "type": "u64"
+        },
+        {
+          "name": "duration",
+          "type": "u64"
+        },
+        {
+          "name": "start",
+          "type": "u64"
+        },
+        {
+          "name": "status",
+          "type": "udt:VestingStatus"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "total_amount",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "VestingStatus",
+      "variants": [
+        {
+          "name": "Locked",
+          "types": []
+        },
+        {
+          "name": "Vesting",
+          "types": []
+        },
+        {
+          "name": "Completed",
+          "types": []
+        },
+        {
+          "name": "Revoked",
+          "types": []
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "name": "Unauthorized",
+      "code": 1
+    },
+    {
+      "name": "NotFound",
+      "code": 2
+    },
+    {
+      "name": "InvalidInput",
+      "code": 3
+    },
+    {
+      "name": "InsufficientFunds",
+      "code": 4
+    },
+    {
+      "name": "AlreadyInitialized",
+      "code": 5
+    },
+    {
+      "name": "NotInitialized",
+      "code": 6
+    },
+    {
+      "name": "DeadlineReached",
+      "code": 7
+    },
+    {
+      "name": "InsufficientAllowance",
+      "code": 8
+    },
+    {
+      "name": "ArithmeticOverflow",
+      "code": 9
+    },
+    {
+      "name": "Custom",
+      "code": 10
+    },
+    {
+      "name": "TokenTransferFailed",
+      "code": 11
+    },
+    {
+      "name": "ContractInvocationFailed",
+      "code": 12
+    },
+    {
+      "name": "WithdrawalLimitExceeded",
+      "code": 13
+    }
+  ]
+}

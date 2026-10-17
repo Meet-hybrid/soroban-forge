@@ -1,0 +1,478 @@
+{
+  "schema": "soroban-forge/contract-abi@1",
+  "contract": "soroban-forge-subscription-payments",
+  "functions": [
+    {
+      "name": "authorize_provider",
+      "inputs": [
+        {
+          "name": "subscriber",
+          "type": "address"
+        },
+        {
+          "name": "provider",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "cancel",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "charge",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_subscription",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:Subscription,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_subscription_count",
+      "inputs": [],
+      "outputs": [
+        "u64"
+      ]
+    },
+    {
+      "name": "is_provider_authorized",
+      "inputs": [
+        {
+          "name": "subscriber",
+          "type": "address"
+        },
+        {
+          "name": "provider",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "bool"
+      ]
+    },
+    {
+      "name": "pause",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "resume",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "revoke_provider",
+      "inputs": [
+        {
+          "name": "subscriber",
+          "type": "address"
+        },
+        {
+          "name": "provider",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "subscribe",
+      "inputs": [
+        {
+          "name": "subscriber",
+          "type": "address"
+        },
+        {
+          "name": "provider",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "period",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "subscribe_on_behalf_of",
+      "inputs": [
+        {
+          "name": "provider",
+          "type": "address"
+        },
+        {
+          "name": "subscriber",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "period",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "subscriptions_for_provider",
+      "inputs": [
+        {
+          "name": "provider",
+          "type": "address"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<vec<udt:Subscription>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "subscriptions_for_subscriber",
+      "inputs": [
+        {
+          "name": "subscriber",
+          "type": "address"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<vec<udt:Subscription>,udt:ForgeError>"
+      ]
+    }
+  ],
+  "events": [],
+  "types": [
+    {
+      "kind": "error-enum",
+      "name": "ForgeError",
+      "variants": [
+        {
+          "name": "Unauthorized",
+          "value": 1
+        },
+        {
+          "name": "NotFound",
+          "value": 2
+        },
+        {
+          "name": "InvalidInput",
+          "value": 3
+        },
+        {
+          "name": "InsufficientFunds",
+          "value": 4
+        },
+        {
+          "name": "AlreadyInitialized",
+          "value": 5
+        },
+        {
+          "name": "NotInitialized",
+          "value": 6
+        },
+        {
+          "name": "DeadlineReached",
+          "value": 7
+        },
+        {
+          "name": "InsufficientAllowance",
+          "value": 8
+        },
+        {
+          "name": "ArithmeticOverflow",
+          "value": 9
+        },
+        {
+          "name": "Custom",
+          "value": 10
+        },
+        {
+          "name": "TokenTransferFailed",
+          "value": 11
+        },
+        {
+          "name": "ContractInvocationFailed",
+          "value": 12
+        },
+        {
+          "name": "WithdrawalLimitExceeded",
+          "value": 13
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "PaginatedResult",
+      "fields": [
+        {
+          "name": "cursor",
+          "type": "udt:PaginationCursor"
+        },
+        {
+          "name": "items",
+          "type": "vec<bytes>"
+        },
+        {
+          "name": "total",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "PaginationCursor",
+      "fields": [
+        {
+          "name": "limit",
+          "type": "u32"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Party",
+      "fields": [
+        {
+          "name": "address",
+          "type": "address"
+        },
+        {
+          "name": "approved",
+          "type": "bool"
+        },
+        {
+          "name": "role",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "StorageEntry",
+      "fields": [
+        {
+          "name": "updated_at",
+          "type": "u64"
+        },
+        {
+          "name": "value",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Subscription",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "failed_attempts",
+          "type": "u32"
+        },
+        {
+          "name": "last_charged",
+          "type": "u64"
+        },
+        {
+          "name": "paused_at",
+          "type": "option<u64>"
+        },
+        {
+          "name": "period",
+          "type": "u64"
+        },
+        {
+          "name": "provider",
+          "type": "address"
+        },
+        {
+          "name": "status",
+          "type": "udt:SubscriptionStatus"
+        },
+        {
+          "name": "subscriber",
+          "type": "address"
+        },
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "SubscriptionStatus",
+      "variants": [
+        {
+          "name": "Active",
+          "types": []
+        },
+        {
+          "name": "Cancelled",
+          "types": []
+        },
+        {
+          "name": "PastDue",
+          "types": []
+        },
+        {
+          "name": "Paused",
+          "types": []
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "TimeBounds",
+      "fields": [
+        {
+          "name": "end",
+          "type": "u64"
+        },
+        {
+          "name": "start",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "name": "Unauthorized",
+      "code": 1
+    },
+    {
+      "name": "NotFound",
+      "code": 2
+    },
+    {
+      "name": "InvalidInput",
+      "code": 3
+    },
+    {
+      "name": "InsufficientFunds",
+      "code": 4
+    },
+    {
+      "name": "AlreadyInitialized",
+      "code": 5
+    },
+    {
+      "name": "NotInitialized",
+      "code": 6
+    },
+    {
+      "name": "DeadlineReached",
+      "code": 7
+    },
+    {
+      "name": "InsufficientAllowance",
+      "code": 8
+    },
+    {
+      "name": "ArithmeticOverflow",
+      "code": 9
+    },
+    {
+      "name": "Custom",
+      "code": 10
+    },
+    {
+      "name": "TokenTransferFailed",
+      "code": 11
+    },
+    {
+      "name": "ContractInvocationFailed",
+      "code": 12
+    },
+    {
+      "name": "WithdrawalLimitExceeded",
+      "code": 13
+    }
+  ]
+}

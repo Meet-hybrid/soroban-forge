@@ -64,13 +64,13 @@ function run(command, args, cwd = rootDir) {
 }
 
 console.log(`==> Building contract WASMs for target '${target}'`);
-run("cargo", [
+run("stellar", [
+  "contract",
   "build",
   "--locked",
-  "--release",
-  "--target",
-  target,
-  ...contracts.flatMap(({ crate }) => ["--package", crate]),
+  "--profile",
+  "release",
+  "--optimize=false",
 ]);
 
 mkdirSync(sdkClientsDir, { recursive: true });

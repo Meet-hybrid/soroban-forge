@@ -1,0 +1,560 @@
+{
+  "schema": "soroban-forge/contract-abi@1",
+  "contract": "soroban-forge-escrow",
+  "functions": [
+    {
+      "name": "cancel",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "create_escrow",
+      "inputs": [
+        {
+          "name": "buyer",
+          "type": "address"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "arbiter",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "timeout",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "deposit",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "dispute",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "claimant",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "escrows_for_participant",
+      "inputs": [
+        {
+          "name": "participant",
+          "type": "address"
+        },
+        {
+          "name": "cursor",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "udt:ParticipantEscrowsPage"
+      ]
+    },
+    {
+      "name": "get_escrow",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:EscrowData,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_status",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:EscrowStatus,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "refund",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "release",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "resolve",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "in_favor_of_seller",
+          "type": "bool"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "touch_ttl",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "Cancelled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "Deposited",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "Disputed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "EscrowCreated",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "Refunded",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "Released",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "Resolved",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        },
+        {
+          "name": "in_favor_of_seller",
+          "type": "bool"
+        }
+      ]
+    }
+  ],
+  "types": [
+    {
+      "kind": "struct",
+      "name": "EscrowData",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "arbiter",
+          "type": "address"
+        },
+        {
+          "name": "buyer",
+          "type": "address"
+        },
+        {
+          "name": "created_at",
+          "type": "u64"
+        },
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "status",
+          "type": "udt:EscrowStatus"
+        },
+        {
+          "name": "timeout",
+          "type": "u64"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "EscrowStatus",
+      "variants": [
+        {
+          "name": "Pending",
+          "types": []
+        },
+        {
+          "name": "Funded",
+          "types": []
+        },
+        {
+          "name": "Completed",
+          "types": []
+        },
+        {
+          "name": "Refunded",
+          "types": []
+        },
+        {
+          "name": "Disputed",
+          "types": []
+        },
+        {
+          "name": "Cancelled",
+          "types": []
+        }
+      ]
+    },
+    {
+      "kind": "error-enum",
+      "name": "ForgeError",
+      "variants": [
+        {
+          "name": "Unauthorized",
+          "value": 1
+        },
+        {
+          "name": "NotFound",
+          "value": 2
+        },
+        {
+          "name": "InvalidInput",
+          "value": 3
+        },
+        {
+          "name": "InsufficientFunds",
+          "value": 4
+        },
+        {
+          "name": "AlreadyInitialized",
+          "value": 5
+        },
+        {
+          "name": "NotInitialized",
+          "value": 6
+        },
+        {
+          "name": "DeadlineReached",
+          "value": 7
+        },
+        {
+          "name": "InsufficientAllowance",
+          "value": 8
+        },
+        {
+          "name": "ArithmeticOverflow",
+          "value": 9
+        },
+        {
+          "name": "Custom",
+          "value": 10
+        },
+        {
+          "name": "TokenTransferFailed",
+          "value": 11
+        },
+        {
+          "name": "ContractInvocationFailed",
+          "value": 12
+        },
+        {
+          "name": "WithdrawalLimitExceeded",
+          "value": 13
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "PaginatedResult",
+      "fields": [
+        {
+          "name": "cursor",
+          "type": "udt:PaginationCursor"
+        },
+        {
+          "name": "items",
+          "type": "vec<bytes>"
+        },
+        {
+          "name": "total",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "PaginationCursor",
+      "fields": [
+        {
+          "name": "limit",
+          "type": "u32"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ParticipantEscrowsPage",
+      "fields": [
+        {
+          "name": "ids",
+          "type": "vec<u64>"
+        },
+        {
+          "name": "next_cursor",
+          "type": "option<u32>"
+        },
+        {
+          "name": "total",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Party",
+      "fields": [
+        {
+          "name": "address",
+          "type": "address"
+        },
+        {
+          "name": "approved",
+          "type": "bool"
+        },
+        {
+          "name": "role",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "StorageEntry",
+      "fields": [
+        {
+          "name": "updated_at",
+          "type": "u64"
+        },
+        {
+          "name": "value",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "TimeBounds",
+      "fields": [
+        {
+          "name": "end",
+          "type": "u64"
+        },
+        {
+          "name": "start",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "name": "Unauthorized",
+      "code": 1
+    },
+    {
+      "name": "NotFound",
+      "code": 2
+    },
+    {
+      "name": "InvalidInput",
+      "code": 3
+    },
+    {
+      "name": "InsufficientFunds",
+      "code": 4
+    },
+    {
+      "name": "AlreadyInitialized",
+      "code": 5
+    },
+    {
+      "name": "NotInitialized",
+      "code": 6
+    },
+    {
+      "name": "DeadlineReached",
+      "code": 7
+    },
+    {
+      "name": "InsufficientAllowance",
+      "code": 8
+    },
+    {
+      "name": "ArithmeticOverflow",
+      "code": 9
+    },
+    {
+      "name": "Custom",
+      "code": 10
+    },
+    {
+      "name": "TokenTransferFailed",
+      "code": 11
+    },
+    {
+      "name": "ContractInvocationFailed",
+      "code": 12
+    },
+    {
+      "name": "WithdrawalLimitExceeded",
+      "code": 13
+    }
+  ]
+}

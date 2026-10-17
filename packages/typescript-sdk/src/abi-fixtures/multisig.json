@@ -1,0 +1,783 @@
+{
+  "schema": "soroban-forge/contract-abi@1",
+  "contract": "soroban-forge-multi-sig-wallet",
+  "functions": [
+    {
+      "name": "add_owner",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "address"
+        },
+        {
+          "name": "new_owner",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "balance",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "i128"
+      ]
+    },
+    {
+      "name": "confirm",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        },
+        {
+          "name": "signer",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "deposit",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "from",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "execute",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_confirmations",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<vec<address>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_owners",
+      "inputs": [],
+      "outputs": [
+        "result<vec<address>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_rejections",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<vec<address>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_threshold",
+      "inputs": [],
+      "outputs": [
+        "result<u32,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_transactions",
+      "inputs": [
+        {
+          "name": "offset",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<vec<udt:WalletTx>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_transactions_by_status",
+      "inputs": [
+        {
+          "name": "status",
+          "type": "udt:TxStatus"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<vec<udt:WalletTx>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_tx",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:WalletTx,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_tx_count",
+      "inputs": [],
+      "outputs": [
+        "u64"
+      ]
+    },
+    {
+      "name": "get_window_usage",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "i128"
+      ]
+    },
+    {
+      "name": "get_withdrawal_limit",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "option<udt:WithdrawalLimit>"
+      ]
+    },
+    {
+      "name": "initialize",
+      "inputs": [
+        {
+          "name": "owners",
+          "type": "vec<address>"
+        },
+        {
+          "name": "threshold",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "is_owner",
+      "inputs": [
+        {
+          "name": "address",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "bool"
+      ]
+    },
+    {
+      "name": "reject",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        },
+        {
+          "name": "signer",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "remove_owner",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "address"
+        },
+        {
+          "name": "existing_owner",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "remove_withdrawal_limit",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_threshold",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "address"
+        },
+        {
+          "name": "new_threshold",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_withdrawal_limit",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "window_seconds",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "submit",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "address"
+        },
+        {
+          "name": "target",
+          "type": "address"
+        },
+        {
+          "name": "tx",
+          "type": "bytes"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "submit_withdrawal",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "destination",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "touch_ttl",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "TxConfirmed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        },
+        {
+          "name": "signer",
+          "type": "address"
+        },
+        {
+          "name": "confirmations_count",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "TxExecuted",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        },
+        {
+          "name": "confirmations_count",
+          "type": "u32"
+        },
+        {
+          "name": "threshold",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "TxSubmitted",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        },
+        {
+          "name": "submitter",
+          "type": "address"
+        },
+        {
+          "name": "payload_len",
+          "type": "u32"
+        }
+      ]
+    }
+  ],
+  "types": [
+    {
+      "kind": "error-enum",
+      "name": "ForgeError",
+      "variants": [
+        {
+          "name": "Unauthorized",
+          "value": 1
+        },
+        {
+          "name": "NotFound",
+          "value": 2
+        },
+        {
+          "name": "InvalidInput",
+          "value": 3
+        },
+        {
+          "name": "InsufficientFunds",
+          "value": 4
+        },
+        {
+          "name": "AlreadyInitialized",
+          "value": 5
+        },
+        {
+          "name": "NotInitialized",
+          "value": 6
+        },
+        {
+          "name": "DeadlineReached",
+          "value": 7
+        },
+        {
+          "name": "InsufficientAllowance",
+          "value": 8
+        },
+        {
+          "name": "ArithmeticOverflow",
+          "value": 9
+        },
+        {
+          "name": "Custom",
+          "value": 10
+        },
+        {
+          "name": "TokenTransferFailed",
+          "value": 11
+        },
+        {
+          "name": "ContractInvocationFailed",
+          "value": 12
+        },
+        {
+          "name": "WithdrawalLimitExceeded",
+          "value": 13
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "LimitChange",
+      "variants": [
+        {
+          "name": "Set",
+          "types": [
+            "udt:WithdrawalLimit"
+          ]
+        },
+        {
+          "name": "Remove",
+          "types": [
+            "address"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "PaginatedResult",
+      "fields": [
+        {
+          "name": "cursor",
+          "type": "udt:PaginationCursor"
+        },
+        {
+          "name": "items",
+          "type": "vec<bytes>"
+        },
+        {
+          "name": "total",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "PaginationCursor",
+      "fields": [
+        {
+          "name": "limit",
+          "type": "u32"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Party",
+      "fields": [
+        {
+          "name": "address",
+          "type": "address"
+        },
+        {
+          "name": "approved",
+          "type": "bool"
+        },
+        {
+          "name": "role",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "StorageEntry",
+      "fields": [
+        {
+          "name": "updated_at",
+          "type": "u64"
+        },
+        {
+          "name": "value",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "TimeBounds",
+      "fields": [
+        {
+          "name": "end",
+          "type": "u64"
+        },
+        {
+          "name": "start",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "TxKind",
+      "variants": [
+        {
+          "name": "Opaque",
+          "types": []
+        },
+        {
+          "name": "Withdrawal",
+          "types": [
+            "udt:Withdrawal"
+          ]
+        },
+        {
+          "name": "LimitChange",
+          "types": [
+            "udt:LimitChange"
+          ]
+        },
+        {
+          "name": "AddOwner",
+          "types": [
+            "address"
+          ]
+        },
+        {
+          "name": "RemoveOwner",
+          "types": [
+            "address"
+          ]
+        },
+        {
+          "name": "SetThreshold",
+          "types": [
+            "u32"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "TxStatus",
+      "variants": [
+        {
+          "name": "Pending",
+          "types": []
+        },
+        {
+          "name": "Executed",
+          "types": []
+        },
+        {
+          "name": "Rejected",
+          "types": []
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "WalletTx",
+      "fields": [
+        {
+          "name": "confirmations",
+          "type": "vec<address>"
+        },
+        {
+          "name": "kind",
+          "type": "udt:TxKind"
+        },
+        {
+          "name": "payload",
+          "type": "bytes"
+        },
+        {
+          "name": "rejections",
+          "type": "vec<address>"
+        },
+        {
+          "name": "status",
+          "type": "udt:TxStatus"
+        },
+        {
+          "name": "submitter",
+          "type": "address"
+        },
+        {
+          "name": "target",
+          "type": "address"
+        },
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "WindowEntry",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "submitted_at",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Withdrawal",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "destination",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "WithdrawalLimit",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "window_seconds",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "name": "Unauthorized",
+      "code": 1
+    },
+    {
+      "name": "NotFound",
+      "code": 2
+    },
+    {
+      "name": "InvalidInput",
+      "code": 3
+    },
+    {
+      "name": "InsufficientFunds",
+      "code": 4
+    },
+    {
+      "name": "AlreadyInitialized",
+      "code": 5
+    },
+    {
+      "name": "NotInitialized",
+      "code": 6
+    },
+    {
+      "name": "DeadlineReached",
+      "code": 7
+    },
+    {
+      "name": "InsufficientAllowance",
+      "code": 8
+    },
+    {
+      "name": "ArithmeticOverflow",
+      "code": 9
+    },
+    {
+      "name": "Custom",
+      "code": 10
+    },
+    {
+      "name": "TokenTransferFailed",
+      "code": 11
+    },
+    {
+      "name": "ContractInvocationFailed",
+      "code": 12
+    },
+    {
+      "name": "WithdrawalLimitExceeded",
+      "code": 13
+    }
+  ]
+}
