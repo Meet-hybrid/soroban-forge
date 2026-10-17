@@ -1,66 +1,5 @@
 {
   "contract": {
- feat-indexer-add-a-restartable-multi-contract-event-indexer-with-cursor-checkpoints-Repo-Avatar
-    "id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-    "name": "soroban-forge-vesting"
-  },
-  "description": "Deterministic lifecycle fixtures emitted by the Soroban Forge vesting contract (soroban-sdk 27 testutils). Generated and validated by crates/vesting/src/indexer_fixtures.rs; consumed by the reference indexer tests in packages/typescript-sdk.",
-  "events": [
-    {
-      "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-      "eventIndex": 0,
-      "id": "1001-0",
-      "inSuccessfulContractCall": true,
-      "ledger": 1001,
-      "ledgerClosedAt": "2026-09-23T00:16:41.000Z",
-      "operationIndex": 0,
-      "pagingToken": "1001-0",
-      "topic": [
-        "AAAADwAAABtiZW5lZmljaWFyeV9yZWFzc2lnbmVkX2Zyb20A",
-        "AAAABQAAAAAAAAAB",
-        "AAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQ=="
-      ],
-      "transactionHash": "0000000000001001",
-      "type": "contract",
-      "value": "AAAAEQAAAAEAAAADAAAADwAAAA9uZXdfYmVuZWZpY2lhcnkAAAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABgAAAA8AAAAScmVhc3NpZ25tZW50X2NvdW50AAAAAAADAAAAAQAAAA8AAAAQdmVzdGVkX3VuY2xhaW1lZAAAAAoAAAAAAAAAAAAAAAAAAA0F"
-    },
-    {
-      "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-      "eventIndex": 1,
-      "id": "1001-1",
-      "inSuccessfulContractCall": true,
-      "ledger": 1001,
-      "ledgerClosedAt": "2026-09-23T00:16:41.000Z",
-      "operationIndex": 0,
-      "pagingToken": "1001-1",
-      "topic": [
-        "AAAADwAAABliZW5lZmljaWFyeV9yZWFzc2lnbmVkX3RvAAAA",
-        "AAAABQAAAAAAAAAB",
-        "AAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABg=="
-      ],
-      "transactionHash": "0000000000001001",
-      "type": "contract",
-      "value": "AAAAEQAAAAEAAAADAAAADwAAAA9vbGRfYmVuZWZpY2lhcnkAAAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAA8AAAAScmVhc3NpZ25tZW50X2NvdW50AAAAAAADAAAAAQAAAA8AAAAQdmVzdGVkX3VuY2xhaW1lZAAAAAoAAAAAAAAAAAAAAAAAAA0F"
-    },
-    {
-      "contractId": "CBEPDNVYXQGWB5YUBXKJWYJA7OXTZW5LFLNO5JRRGE6Z6C5OSUZPCCEL",
-      "eventIndex": 0,
-      "id": "1002-0",
-      "inSuccessfulContractCall": true,
-      "ledger": 1002,
-      "ledgerClosedAt": "2026-09-23T00:16:42.000Z",
-      "operationIndex": 0,
-      "pagingToken": "1002-0",
-      "topic": [
-        "AAAADwAAAAh0cmFuc2Zlcg==",
-        "AAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAw==",
-        "AAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABg==",
-        "AAAADgAAADxhYWE6R0FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUVHV0Y="
-      ],
-      "transactionHash": "0000000000001002",
-      "type": "contract",
-      "value": "AAAACgAAAAAAAAAAAAAAAAAAGgs="
-
     "id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
     "name": "soroban-forge-vesting"
   },
@@ -101,7 +40,6 @@
       "transactionHash": "0000000000000000000000000000000000000000000000000000000000000000",
       "type": "contract",
       "value": "AAAAEQAAAAEAAAADAAAADwAAAA9vbGRfYmVuZWZpY2lhcnkAAAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAA8AAAAScmVhc3NpZ25tZW50X2NvdW50AAAAAAADAAAAAQAAAA8AAAAQdmVzdGVkX3VuY2xhaW1lZAAAAAoAAAAAAAAAAAAAAAAAAAAA"
- develop
     }
   ],
   "schema": 1
