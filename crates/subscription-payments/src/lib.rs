@@ -416,6 +416,76 @@ pub trait SorobanForgeSubscriptionPayments {
         offset: u32,
         limit: u32,
     ) -> Result<Vec<Subscription>, soroban_forge_shared_utils::ForgeError>;
+
+    /// Preview the financial and status outcome of settling up to `max_periods`
+    /// overdue periods for `subscription_id` (read-only view; requires no
+    /// authorization).
+    ///
+    /// Reuses the exact period derivation and catch-up bounds used by
+    /// [`Self::charge`] and [`Self::charge_catchup`], reporting the chargeable
+    /// amount, prepaid balance consumed, remaining arrears, and resulting
+    /// subscription status without mutating balances, indexes, or TTL state.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no such subscription.
+    /// * [`ForgeError::InvalidInput`] — `max_periods > MAX_CATCHUP_PERIODS`, or
+    ///   the subscription is `Cancelled` or `Paused`.
+    /// * [`ForgeError::ArithmeticOverflow`] — timestamp or amount calculation
+    ///   overflowed.
+    fn preview_arrears_settlement(
+        env: Env,
+        subscription_id: u64,
+        max_periods: u32,
+    ) -> Result<ArrearsSettlementPreview, soroban_forge_shared_utils::ForgeError>;
+
+    /// Preview the default arrears settlement for `subscription_id` (read-only
+    /// view; requires no authorization).
+    ///
+    /// Equivalent to calling [`Self::preview_arrears_settlement`] with the
+    /// maximum period count applicable to the subscription's current mode (`1`
+    /// for prepaid or `PastDue` single-period settlement, or
+    /// [`MAX_CATCHUP_PERIODS`] for active pull-mode catch-up).
+    fn get_arrears_preview(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<ArrearsSettlementPreview, soroban_forge_shared_utils::ForgeError>;
+}
+
+/// Read-only preview of catching up or settling an overdue subscription.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArrearsSettlementPreview {
+    /// Subscription identifier inspected.
+    pub subscription_id: u64,
+    /// Stored status prior to settlement.
+    pub current_status: SubscriptionStatus,
+    /// Status that will result from executing the settlement step.
+    pub resulting_status: SubscriptionStatus,
+    /// Whether at least one full billing period has elapsed since `last_charged`.
+    pub is_overdue: bool,
+    /// Whether all overdue arrears are covered by the settlement step (or prepaid balance).
+    pub is_fully_covered: bool,
+    /// Total full billing periods elapsed since `last_charged`.
+    pub elapsed_periods: u64,
+    /// Number of overdue periods settled in this step.
+    pub settled_periods: u64,
+    /// Number of overdue periods remaining unsettled after this step.
+    pub remaining_periods: u64,
+    /// Total arrears accumulated across all `elapsed_periods` full periods.
+    pub total_arrears: i128,
+    /// Amount settled/billed to the provider in this settlement step.
+    pub chargeable_amount: i128,
+    /// Prepaid custody balance consumed in this settlement step (`0` in pull mode).
+    pub prepaid_consumed: i128,
+    /// Prepaid custody balance remaining after this settlement step (`0` in pull mode).
+    pub prepaid_remaining: i128,
+    /// Arrears remaining unsettled after this settlement step (`total_arrears - chargeable_amount`).
+    pub arrears_remaining: i128,
+    /// Portion of `total_arrears` not covered by the current prepaid balance.
+    pub uncovered_arrears: i128,
+    /// Resulting `last_charged` timestamp after `settled_periods` are applied.
+    pub next_last_charged: u64,
 }
 
 /// Lifecycle state of a subscription.
@@ -1210,6 +1280,223 @@ impl SubscriptionPayments {
         }
         let ids = Self::index_ids(&env, &DataKey::ProviderSubscriptions(provider));
         Self::resolve_page(&env, &ids, offset, limit)
+    }
+
+    /// Preview the financial and status outcome of settling up to `max_periods`
+    /// overdue periods for `subscription_id` (read-only view).
+    ///
+    /// Reuses the exact period derivation and catch-up arithmetic used by
+    /// `charge` and `charge_catchup`. Never mutates balances, indexes, or TTLs.
+    pub fn preview_arrears_settlement(
+        env: Env,
+        subscription_id: u64,
+        max_periods: u32,
+    ) -> Result<ArrearsSettlementPreview, ForgeError> {
+        if max_periods > MAX_CATCHUP_PERIODS {
+            return Err(ForgeError::InvalidInput);
+        }
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        if subscription.status == SubscriptionStatus::Cancelled
+            || subscription.status == SubscriptionStatus::Paused
+        {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let now = env.ledger().timestamp();
+        let elapsed = now
+            .checked_sub(subscription.last_charged)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let elapsed_periods = elapsed / subscription.period;
+        let current_status = subscription.status.clone();
+
+        if elapsed_periods == 0 {
+            let prepaid_remaining = subscription.prepaid_balance.unwrap_or(0);
+            return Ok(ArrearsSettlementPreview {
+                subscription_id,
+                current_status: current_status.clone(),
+                resulting_status: current_status,
+                is_overdue: false,
+                is_fully_covered: true,
+                elapsed_periods: 0,
+                settled_periods: 0,
+                remaining_periods: 0,
+                total_arrears: 0,
+                chargeable_amount: 0,
+                prepaid_consumed: 0,
+                prepaid_remaining,
+                arrears_remaining: 0,
+                uncovered_arrears: 0,
+                next_last_charged: subscription.last_charged,
+            });
+        }
+
+        let (total_arrears, _) =
+            Self::calculate_series_total(&env, &subscription, elapsed_periods)?;
+
+        if let Some(balance) = subscription.prepaid_balance {
+            let uncovered_arrears = total_arrears.saturating_sub(balance).max(0);
+            if max_periods == 0 {
+                return Ok(ArrearsSettlementPreview {
+                    subscription_id,
+                    current_status: current_status.clone(),
+                    resulting_status: current_status,
+                    is_overdue: true,
+                    is_fully_covered: false,
+                    elapsed_periods,
+                    settled_periods: 0,
+                    remaining_periods: elapsed_periods,
+                    total_arrears,
+                    chargeable_amount: 0,
+                    prepaid_consumed: 0,
+                    prepaid_remaining: balance,
+                    arrears_remaining: total_arrears,
+                    uncovered_arrears,
+                    next_last_charged: subscription.last_charged,
+                });
+            }
+
+            let (open_period_due, next_due) = Self::calculate_series_total(&env, &subscription, 1)?;
+            if balance >= open_period_due {
+                let prepaid_remaining = balance
+                    .checked_sub(open_period_due)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+                let arrears_remaining = total_arrears
+                    .checked_sub(open_period_due)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+                let remaining_periods = elapsed_periods.saturating_sub(1);
+                return Ok(ArrearsSettlementPreview {
+                    subscription_id,
+                    current_status,
+                    resulting_status: SubscriptionStatus::Active,
+                    is_overdue: true,
+                    is_fully_covered: arrears_remaining == 0,
+                    elapsed_periods,
+                    settled_periods: 1,
+                    remaining_periods,
+                    total_arrears,
+                    chargeable_amount: open_period_due,
+                    prepaid_consumed: open_period_due,
+                    prepaid_remaining,
+                    arrears_remaining,
+                    uncovered_arrears,
+                    next_last_charged: next_due,
+                });
+            }
+
+            let failed = subscription.failed_attempts.saturating_add(1);
+            let resulting_status = if failed >= MAX_RETRIES {
+                SubscriptionStatus::Cancelled
+            } else {
+                SubscriptionStatus::PastDue
+            };
+            let prepaid_remaining = if resulting_status == SubscriptionStatus::Cancelled {
+                0
+            } else {
+                balance
+            };
+            return Ok(ArrearsSettlementPreview {
+                subscription_id,
+                current_status,
+                resulting_status,
+                is_overdue: true,
+                is_fully_covered: false,
+                elapsed_periods,
+                settled_periods: 0,
+                remaining_periods: elapsed_periods,
+                total_arrears,
+                chargeable_amount: 0,
+                prepaid_consumed: 0,
+                prepaid_remaining,
+                arrears_remaining: total_arrears,
+                uncovered_arrears,
+                next_last_charged: subscription.last_charged,
+            });
+        }
+
+        // Pull mode: PastDue settles 1 period via `charge`; Active settles up to `max_periods` via `charge_catchup`.
+        let effective_cap = if subscription.status == SubscriptionStatus::PastDue {
+            u64::from(max_periods.min(1))
+        } else {
+            u64::from(max_periods)
+        };
+        let settled_periods = core::cmp::min(effective_cap, elapsed_periods);
+        let (chargeable_amount, next_last_charged) =
+            Self::calculate_series_total(&env, &subscription, settled_periods)?;
+        let arrears_remaining = total_arrears
+            .checked_sub(chargeable_amount)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let remaining_periods = elapsed_periods.saturating_sub(settled_periods);
+        let resulting_status = if settled_periods > 0 {
+            SubscriptionStatus::Active
+        } else {
+            current_status.clone()
+        };
+
+        Ok(ArrearsSettlementPreview {
+            subscription_id,
+            current_status,
+            resulting_status,
+            is_overdue: true,
+            is_fully_covered: arrears_remaining == 0,
+            elapsed_periods,
+            settled_periods,
+            remaining_periods,
+            total_arrears,
+            chargeable_amount,
+            prepaid_consumed: 0,
+            prepaid_remaining: 0,
+            arrears_remaining,
+            uncovered_arrears: total_arrears,
+            next_last_charged,
+        })
+    }
+
+    /// Preview the default arrears settlement for `subscription_id` (read-only
+    /// view).
+    pub fn get_arrears_preview(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<ArrearsSettlementPreview, ForgeError> {
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        let default_max = if subscription.prepaid_balance.is_some()
+            || subscription.status == SubscriptionStatus::PastDue
+        {
+            1
+        } else {
+            MAX_CATCHUP_PERIODS
+        };
+        Self::preview_arrears_settlement(env, subscription_id, default_max)
+    }
+
+    /// Compute the total amount and resulting `last_charged` timestamp across
+    /// `periods` consecutive billing periods starting at `subscription.last_charged`.
+    ///
+    /// Period 0 uses `derive_period_amount` (base + open-period metered overage);
+    /// subsequent periods in the same catch-up batch bill the base `amount`
+    /// because meters are rolled over when period 0 closes.
+    fn calculate_series_total(
+        env: &Env,
+        subscription: &Subscription,
+        periods: u64,
+    ) -> Result<(i128, u64), ForgeError> {
+        let mut total = 0_i128;
+        let mut cursor = subscription.last_charged;
+        let mut idx = 0_u64;
+        while idx < periods {
+            cursor = cursor
+                .checked_add(subscription.period)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            let period_bill = if idx == 0 {
+                Self::derive_period_amount(env, subscription)?
+            } else {
+                period_amount(subscription.amount, &subscription.quotas, &Vec::new(env))?
+            };
+            total = total
+                .checked_add(period_bill)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            idx += 1;
+        }
+        Ok((total, cursor))
     }
 
     /// Create a new subscription through the single shared creation path used
@@ -2662,5 +2949,150 @@ mod tests {
         });
         assert!(after >= before);
         assert_eq!(client.get_subscription(&id).subscription_id, id);
+    }
+
+    #[test]
+    fn arrears_preview_matches_current_overdue_catchup_and_metered_settlement() {
+        let (env, _token, tc, contract_id, client, accounts, id) = setup!();
+
+        // 1. Current subscription (not yet overdue): chargeable = 0, arrears = 0.
+        let current = client.get_arrears_preview(&id);
+        assert!(!current.is_overdue);
+        assert!(current.is_fully_covered);
+        assert_eq!(current.elapsed_periods, 0);
+        assert_eq!(current.settled_periods, 0);
+        assert_eq!(current.total_arrears, 0);
+        assert_eq!(current.chargeable_amount, 0);
+        assert_eq!(current.prepaid_consumed, 0);
+        assert_eq!(current.arrears_remaining, 0);
+        assert_eq!(current.resulting_status, SubscriptionStatus::Active);
+
+        // Configure metered quota and record usage with odd units to verify bucket ceil rounding matches settlement.
+        let metric = Symbol::new(&env, "api_calls");
+        let mut quotas = Vec::new(&env);
+        quotas.push_back(MetricQuota {
+            metric: metric.clone(),
+            included_units: 100,
+            overage_price: 30,
+            bucket_units: 50,
+            max_overage_units: Some(200),
+        });
+        client.set_quotas(&id, &quotas);
+        // 175 units -> 75 overage -> ceil(75 / 50) = 2 buckets * 30 = 60 overage -> open period = 250 + 60 = 310.
+        client.record_usage(&id, &metric, &175);
+
+        // Advance 3 full periods: period 1 = 310, period 2 = 250, period 3 = 250 -> total_arrears = 810.
+        env.ledger().set_timestamp(START + PERIOD * 3);
+
+        let ttl_before = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Subscription(id))
+        });
+        let sub_before = client.get_subscription(&id);
+        let provider_bal_before = tc.balance(&accounts.validator);
+
+        // Preview partial catch-up of 2 periods: 310 + 250 = 560 chargeable, 250 remaining arrears.
+        let partial_preview = client.preview_arrears_settlement(&id, &2);
+        assert!(partial_preview.is_overdue);
+        assert!(!partial_preview.is_fully_covered);
+        assert_eq!(partial_preview.elapsed_periods, 3);
+        assert_eq!(partial_preview.settled_periods, 2);
+        assert_eq!(partial_preview.remaining_periods, 1);
+        assert_eq!(partial_preview.total_arrears, 810);
+        assert_eq!(partial_preview.chargeable_amount, 560);
+        assert_eq!(partial_preview.prepaid_consumed, 0);
+        assert_eq!(partial_preview.arrears_remaining, 250);
+        assert_eq!(partial_preview.resulting_status, SubscriptionStatus::Active);
+        assert_eq!(partial_preview.next_last_charged, START + PERIOD * 2);
+
+        // Preview must not mutate state, balances, or TTL.
+        assert_eq!(client.get_subscription(&id), sub_before);
+        assert_eq!(tc.balance(&accounts.validator), provider_bal_before);
+        let ttl_after = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Subscription(id))
+        });
+        assert_eq!(ttl_after, ttl_before);
+
+        // Execute the exact 2-period catch-up and prove settlement matches preview.
+        let billed = client.charge_catchup(&id, &2);
+        assert_eq!(billed, partial_preview.chargeable_amount);
+        let sub_after = client.get_subscription(&id);
+        assert_eq!(sub_after.status, partial_preview.resulting_status);
+        assert_eq!(sub_after.last_charged, partial_preview.next_last_charged);
+
+        // Remaining 1 period preview matches final catch-up.
+        let final_preview = client.get_arrears_preview(&id);
+        assert_eq!(final_preview.chargeable_amount, 250);
+        assert_eq!(final_preview.arrears_remaining, 0);
+        assert!(final_preview.is_fully_covered);
+        let final_billed = client.charge_catchup(&id, &2);
+        assert_eq!(final_billed, final_preview.chargeable_amount);
+    }
+
+    #[test]
+    fn arrears_preview_handles_prepaid_coverage_and_past_due_transitions() {
+        let (env, _token, _tc, _contract_id, client, _accounts, id) = setup!();
+
+        // Opt into prepaid mode with 400 tokens (covers 1 period of 250, leaving 150).
+        client.deposit(&id, &400);
+        env.ledger().set_timestamp(START + PERIOD);
+
+        // 1. Fully covered overdue period in prepaid mode.
+        let covered = client.get_arrears_preview(&id);
+        assert!(covered.is_overdue);
+        assert!(covered.is_fully_covered);
+        assert_eq!(covered.total_arrears, AMOUNT);
+        assert_eq!(covered.chargeable_amount, AMOUNT);
+        assert_eq!(covered.prepaid_consumed, AMOUNT);
+        assert_eq!(covered.prepaid_remaining, 150);
+        assert_eq!(covered.arrears_remaining, 0);
+        assert_eq!(covered.uncovered_arrears, 0);
+        assert_eq!(covered.resulting_status, SubscriptionStatus::Active);
+
+        // Settlement via `charge` matches the preview exactly.
+        let billed = client.charge(&id);
+        assert_eq!(billed, covered.chargeable_amount);
+        let after_first = client.get_subscription(&id);
+        assert_eq!(after_first.prepaid_balance, Some(covered.prepaid_remaining));
+        assert_eq!(after_first.status, covered.resulting_status);
+        assert_eq!(after_first.last_charged, covered.next_last_charged);
+
+        // 2. Next period elapses with only 150 prepaid balance (< 250 due): preview predicts PastDue.
+        env.ledger().set_timestamp(START + PERIOD * 2);
+        let insufficient = client.get_arrears_preview(&id);
+        assert!(insufficient.is_overdue);
+        assert!(!insufficient.is_fully_covered);
+        assert_eq!(insufficient.total_arrears, AMOUNT);
+        assert_eq!(insufficient.chargeable_amount, 0);
+        assert_eq!(insufficient.prepaid_consumed, 0);
+        assert_eq!(insufficient.prepaid_remaining, 150);
+        assert_eq!(insufficient.arrears_remaining, AMOUNT);
+        assert_eq!(insufficient.uncovered_arrears, 100);
+        assert_eq!(insufficient.resulting_status, SubscriptionStatus::PastDue);
+
+        // First two failed charges transition to PastDue; third failed charge transitions to Cancelled and refunds prepaid.
+        assert_eq!(client.charge(&id), insufficient.chargeable_amount);
+        assert_eq!(
+            client.get_subscription(&id).status,
+            insufficient.resulting_status
+        );
+        assert_eq!(client.charge(&id), 0);
+
+        let third_fail_preview = client.get_arrears_preview(&id);
+        assert_eq!(
+            third_fail_preview.resulting_status,
+            SubscriptionStatus::Cancelled
+        );
+        assert_eq!(third_fail_preview.prepaid_remaining, 0);
+        assert_eq!(client.charge(&id), 0);
+        let cancelled = client.get_subscription(&id);
+        assert_eq!(cancelled.status, third_fail_preview.resulting_status);
+        assert_eq!(
+            cancelled.prepaid_balance,
+            Some(third_fail_preview.prepaid_remaining)
+        );
     }
 }
