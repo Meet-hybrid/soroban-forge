@@ -45,6 +45,15 @@ use soroban_sdk::{Address, Env, IntoVal, Val};
 /// tests reason about the same time units as production code.
 pub const DAY_IN_LEDGERS: u32 = 17_280;
 
+/// Default ledger close interval in seconds used by [`LedgerProgressionFixture`].
+pub const DEFAULT_SECONDS_PER_LEDGER: u64 = 5;
+
+/// Default starting ledger sequence applied by [`LedgerProgressionFixture::new`].
+pub const DEFAULT_INITIAL_SEQUENCE: u32 = 100;
+
+/// Default starting ledger timestamp (Unix seconds) applied by [`LedgerProgressionFixture::new`].
+pub const DEFAULT_INITIAL_TIMESTAMP: u64 = 1_700_000_000;
+
 /// Default TTL horizon applied by workspace contracts when bumping entries
 /// (30 days of ledgers).
 pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
@@ -52,6 +61,379 @@ pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
 /// Bump threshold used by workspace contracts: entries are only extended
 /// when they are within one day of expiry.
 pub const BUMP_THRESHOLD: u32 = BUMP_AMOUNT - DAY_IN_LEDGERS;
+
+/// Point-in-time snapshot of the test environment's ledger sequence and timestamp.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LedgerSnapshot {
+    /// Current ledger sequence number.
+    pub sequence: u32,
+    /// Current ledger timestamp in Unix seconds.
+    pub timestamp: u64,
+}
+
+/// Errors returned when a requested ledger or timestamp progression violates
+/// monotonicity or arithmetic bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProgressionError {
+    /// Target sequence is strictly less than the current ledger sequence.
+    BackwardsSequence {
+        /// Current ledger sequence.
+        current: u32,
+        /// Requested target ledger sequence.
+        target: u32,
+    },
+    /// Target timestamp is strictly less than the current ledger timestamp.
+    BackwardsTimestamp {
+        /// Current ledger timestamp.
+        current: u64,
+        /// Requested target ledger timestamp.
+        target: u64,
+    },
+    /// Advancing the sequence by `delta` would overflow `u32`.
+    SequenceOverflow {
+        /// Current ledger sequence.
+        current: u32,
+        /// Requested ledger delta.
+        delta: u32,
+    },
+    /// Advancing the timestamp by `delta` would overflow `u64`.
+    TimestampOverflow {
+        /// Current ledger timestamp.
+        current: u64,
+        /// Requested timestamp delta in seconds.
+        delta: u64,
+    },
+    /// `seconds_per_ledger` was configured as `0`.
+    InvalidSecondsPerLedger,
+    /// Target entry is not live or has zero remaining TTL for boundary progression.
+    EntryNotLive,
+}
+
+impl fmt::Display for ProgressionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BackwardsSequence { current, target } => write!(
+                f,
+                "ledger sequence must not move backwards (current={current}, target={target})"
+            ),
+            Self::BackwardsTimestamp { current, target } => write!(
+                f,
+                "ledger timestamp must not move backwards (current={current}, target={target})"
+            ),
+            Self::SequenceOverflow { current, delta } => write!(
+                f,
+                "ledger sequence overflow (current={current}, delta={delta})"
+            ),
+            Self::TimestampOverflow { current, delta } => write!(
+                f,
+                "ledger timestamp overflow (current={current}, delta={delta})"
+            ),
+            Self::InvalidSecondsPerLedger => {
+                write!(f, "seconds_per_ledger must be greater than zero")
+            }
+            Self::EntryNotLive => {
+                write!(
+                    f,
+                    "persistent entry is not live for TTL boundary progression"
+                )
+            }
+        }
+    }
+}
+
+/// Deterministic fixture for advancing both ledger sequence and timestamp in lockstep
+/// or to explicit monotonic targets during contract tests.
+///
+/// # Examples
+///
+/// ```ignore
+/// use soroban_forge_test_utils::{new_env, LedgerProgressionFixture};
+///
+/// let env = new_env();
+/// let clock = LedgerProgressionFixture::new(&env);
+/// let snap = clock.advance_ledgers(10);
+/// assert_eq!(snap.sequence, 110);
+/// assert_eq!(snap.timestamp, 1_700_000_050);
+/// ```
+#[derive(Clone)]
+pub struct LedgerProgressionFixture {
+    env: Env,
+    seconds_per_ledger: u64,
+    initial: LedgerSnapshot,
+}
+
+impl fmt::Debug for LedgerProgressionFixture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LedgerProgressionFixture")
+            .field("seconds_per_ledger", &self.seconds_per_ledger)
+            .field("initial", &self.initial)
+            .field("current", &self.snapshot())
+            .finish()
+    }
+}
+
+impl LedgerProgressionFixture {
+    /// Initialize `env` to [`DEFAULT_INITIAL_SEQUENCE`] and [`DEFAULT_INITIAL_TIMESTAMP`]
+    /// using [`DEFAULT_SECONDS_PER_LEDGER`] (5 seconds per ledger).
+    pub fn new(env: &Env) -> Self {
+        Self::with_start(
+            env,
+            DEFAULT_INITIAL_SEQUENCE,
+            DEFAULT_INITIAL_TIMESTAMP,
+            DEFAULT_SECONDS_PER_LEDGER,
+        )
+        .expect("default ledger progression parameters must be valid")
+    }
+
+    /// Construct a fixture around `env`'s current ledger sequence and timestamp
+    /// without resetting them, using [`DEFAULT_SECONDS_PER_LEDGER`].
+    pub fn from_current(env: &Env) -> Self {
+        let initial = LedgerSnapshot {
+            sequence: env.ledger().sequence(),
+            timestamp: env.ledger().timestamp(),
+        };
+        Self {
+            env: env.clone(),
+            seconds_per_ledger: DEFAULT_SECONDS_PER_LEDGER,
+            initial,
+        }
+    }
+
+    /// Initialize `env` to `initial_sequence` and `initial_timestamp` with a custom
+    /// `seconds_per_ledger` cadence.
+    ///
+    /// Returns [`ProgressionError::InvalidSecondsPerLedger`] if `seconds_per_ledger == 0`.
+    pub fn with_start(
+        env: &Env,
+        initial_sequence: u32,
+        initial_timestamp: u64,
+        seconds_per_ledger: u64,
+    ) -> Result<Self, ProgressionError> {
+        if seconds_per_ledger == 0 {
+            return Err(ProgressionError::InvalidSecondsPerLedger);
+        }
+        env.ledger().with_mut(|ledger| {
+            ledger.sequence_number = initial_sequence;
+            ledger.timestamp = initial_timestamp;
+        });
+        let initial = LedgerSnapshot {
+            sequence: initial_sequence,
+            timestamp: initial_timestamp,
+        };
+        Ok(Self {
+            env: env.clone(),
+            seconds_per_ledger,
+            initial,
+        })
+    }
+
+    /// Borrow the underlying Soroban [`Env`].
+    pub const fn env(&self) -> &Env {
+        &self.env
+    }
+
+    /// Configured seconds per ledger.
+    pub const fn seconds_per_ledger(&self) -> u64 {
+        self.seconds_per_ledger
+    }
+
+    /// Initial snapshot recorded when the fixture was created.
+    pub const fn initial_snapshot(&self) -> LedgerSnapshot {
+        self.initial
+    }
+
+    /// Current ledger sequence and timestamp snapshot.
+    pub fn snapshot(&self) -> LedgerSnapshot {
+        LedgerSnapshot {
+            sequence: self.env.ledger().sequence(),
+            timestamp: self.env.ledger().timestamp(),
+        }
+    }
+
+    /// Current ledger sequence number.
+    pub fn sequence(&self) -> u32 {
+        self.env.ledger().sequence()
+    }
+
+    /// Current ledger timestamp in Unix seconds.
+    pub fn timestamp(&self) -> u64 {
+        self.env.ledger().timestamp()
+    }
+
+    /// Total ledgers elapsed since [`Self::initial_snapshot`].
+    pub fn elapsed_ledgers(&self) -> u32 {
+        self.sequence().saturating_sub(self.initial.sequence)
+    }
+
+    /// Total seconds elapsed since [`Self::initial_snapshot`].
+    pub fn elapsed_seconds(&self) -> u64 {
+        self.timestamp().saturating_sub(self.initial.timestamp)
+    }
+
+    /// Advance the ledger by `delta_ledgers` and the timestamp by
+    /// `delta_ledgers * seconds_per_ledger`.
+    pub fn try_advance_ledgers(
+        &self,
+        delta_ledgers: u32,
+    ) -> Result<LedgerSnapshot, ProgressionError> {
+        let current = self.snapshot();
+        let next_sequence = current.sequence.checked_add(delta_ledgers).ok_or(
+            ProgressionError::SequenceOverflow {
+                current: current.sequence,
+                delta: delta_ledgers,
+            },
+        )?;
+        let delta_seconds = u64::from(delta_ledgers)
+            .checked_mul(self.seconds_per_ledger)
+            .ok_or(ProgressionError::TimestampOverflow {
+                current: current.timestamp,
+                delta: u64::MAX,
+            })?;
+        let next_timestamp = current.timestamp.checked_add(delta_seconds).ok_or(
+            ProgressionError::TimestampOverflow {
+                current: current.timestamp,
+                delta: delta_seconds,
+            },
+        )?;
+        set_ledger_monotonic(&self.env, next_sequence, next_timestamp)
+    }
+
+    /// Advance the ledger by `delta_ledgers` and timestamp proportionally, panicking on overflow.
+    pub fn advance_ledgers(&self, delta_ledgers: u32) -> LedgerSnapshot {
+        self.try_advance_ledgers(delta_ledgers)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Advance the timestamp by `delta_seconds` and the ledger sequence by
+    /// `delta_seconds / seconds_per_ledger`.
+    pub fn try_advance_seconds(
+        &self,
+        delta_seconds: u64,
+    ) -> Result<LedgerSnapshot, ProgressionError> {
+        let current = self.snapshot();
+        let next_timestamp = current.timestamp.checked_add(delta_seconds).ok_or(
+            ProgressionError::TimestampOverflow {
+                current: current.timestamp,
+                delta: delta_seconds,
+            },
+        )?;
+        let raw_ledgers = delta_seconds / self.seconds_per_ledger;
+        let delta_ledgers =
+            u32::try_from(raw_ledgers).map_err(|_| ProgressionError::SequenceOverflow {
+                current: current.sequence,
+                delta: u32::MAX,
+            })?;
+        let next_sequence = current.sequence.checked_add(delta_ledgers).ok_or(
+            ProgressionError::SequenceOverflow {
+                current: current.sequence,
+                delta: delta_ledgers,
+            },
+        )?;
+        set_ledger_monotonic(&self.env, next_sequence, next_timestamp)
+    }
+
+    /// Advance the timestamp by `delta_seconds` and ledger sequence proportionally,
+    /// panicking on overflow.
+    pub fn advance_seconds(&self, delta_seconds: u64) -> LedgerSnapshot {
+        self.try_advance_seconds(delta_seconds)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Advance both ledger sequence and timestamp to explicit target values.
+    ///
+    /// Rejects movement if either `target_sequence < current.sequence` or
+    /// `target_timestamp < current.timestamp`.
+    pub fn try_advance_to(
+        &self,
+        target_sequence: u32,
+        target_timestamp: u64,
+    ) -> Result<LedgerSnapshot, ProgressionError> {
+        set_ledger_monotonic(&self.env, target_sequence, target_timestamp)
+    }
+
+    /// Advance both ledger sequence and timestamp to explicit targets, panicking if
+    /// either value would move backwards.
+    pub fn advance_to(&self, target_sequence: u32, target_timestamp: u64) -> LedgerSnapshot {
+        self.try_advance_to(target_sequence, target_timestamp)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Advance ledger sequence to `target_sequence` and advance timestamp proportionally.
+    ///
+    /// Returns [`ProgressionError::BackwardsSequence`] if `target_sequence < self.sequence()`.
+    pub fn try_advance_to_sequence(
+        &self,
+        target_sequence: u32,
+    ) -> Result<LedgerSnapshot, ProgressionError> {
+        let current = self.snapshot();
+        if target_sequence < current.sequence {
+            return Err(ProgressionError::BackwardsSequence {
+                current: current.sequence,
+                target: target_sequence,
+            });
+        }
+        self.try_advance_ledgers(target_sequence - current.sequence)
+    }
+
+    /// Advance ledger sequence to `target_sequence` and timestamp proportionally,
+    /// panicking if `target_sequence` is behind the current sequence.
+    pub fn advance_to_sequence(&self, target_sequence: u32) -> LedgerSnapshot {
+        self.try_advance_to_sequence(target_sequence)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Advance timestamp to `target_timestamp` and advance ledger sequence proportionally.
+    ///
+    /// Returns [`ProgressionError::BackwardsTimestamp`] if `target_timestamp < self.timestamp()`.
+    pub fn try_advance_to_timestamp(
+        &self,
+        target_timestamp: u64,
+    ) -> Result<LedgerSnapshot, ProgressionError> {
+        let current = self.snapshot();
+        if target_timestamp < current.timestamp {
+            return Err(ProgressionError::BackwardsTimestamp {
+                current: current.timestamp,
+                target: target_timestamp,
+            });
+        }
+        self.try_advance_seconds(target_timestamp - current.timestamp)
+    }
+
+    /// Advance timestamp to `target_timestamp` and ledger sequence proportionally,
+    /// panicking if `target_timestamp` is behind the current timestamp.
+    pub fn advance_to_timestamp(&self, target_timestamp: u64) -> LedgerSnapshot {
+        self.try_advance_to_timestamp(target_timestamp)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Advance to the last live ledger of a persistent storage entry (`remaining_ttl == 1`).
+    ///
+    /// Returns [`ProgressionError::EntryNotLive`] if the entry is absent or already expired.
+    pub fn try_advance_to_ttl_boundary<K>(
+        &self,
+        contract: &Address,
+        key: &K,
+    ) -> Result<LedgerSnapshot, ProgressionError>
+    where
+        K: IntoVal<Env, Val>,
+    {
+        let ttl = entry_ttl(&self.env, contract, key);
+        if ttl == 0 {
+            return Err(ProgressionError::EntryNotLive);
+        }
+        self.try_advance_ledgers(ttl - 1)
+    }
+
+    /// Advance to the last live ledger of a persistent storage entry (`remaining_ttl == 1`),
+    /// panicking if the entry is not live.
+    pub fn advance_to_ttl_boundary<K>(&self, contract: &Address, key: &K) -> LedgerSnapshot
+    where
+        K: IntoVal<Env, Val>,
+    {
+        self.try_advance_to_ttl_boundary(contract, key)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+}
 
 /// Outcome of a single chaos step.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -129,6 +511,74 @@ pub fn advance_ledger(env: &Env, n: u32) {
     assert!(next >= current, "ledger sequence must not move backwards");
     env.ledger()
         .with_mut(|ledger| ledger.sequence_number = next);
+}
+
+/// Move the test environment's ledger timestamp forward by `delta_seconds`.
+///
+/// # Panics
+///
+/// Panics if `delta_seconds` would cause the timestamp to overflow `u64`.
+pub fn advance_timestamp(env: &Env, delta_seconds: u64) {
+    let current = env.ledger().timestamp();
+    let next = current
+        .checked_add(delta_seconds)
+        .expect("ledger timestamp must not overflow");
+    assert!(next >= current, "ledger timestamp must not move backwards");
+    env.ledger().with_mut(|ledger| ledger.timestamp = next);
+}
+
+/// Move the test environment's ledger sequence forward by `delta_ledgers` and
+/// timestamp forward by `delta_seconds` in a single atomic ledger update.
+///
+/// # Panics
+///
+/// Panics if either addition overflows.
+pub fn advance_ledger_and_timestamp(env: &Env, delta_ledgers: u32, delta_seconds: u64) {
+    let current_seq = env.ledger().sequence();
+    let current_ts = env.ledger().timestamp();
+    let next_seq = current_seq
+        .checked_add(delta_ledgers)
+        .expect("ledger sequence must not overflow");
+    let next_ts = current_ts
+        .checked_add(delta_seconds)
+        .expect("ledger timestamp must not overflow");
+    env.ledger().with_mut(|ledger| {
+        ledger.sequence_number = next_seq;
+        ledger.timestamp = next_ts;
+    });
+}
+
+/// Monotonically set the test environment's ledger sequence and timestamp.
+///
+/// Rejects backwards movement in either sequence or timestamp without mutating
+/// the environment.
+pub fn set_ledger_monotonic(
+    env: &Env,
+    target_sequence: u32,
+    target_timestamp: u64,
+) -> Result<LedgerSnapshot, ProgressionError> {
+    let current_seq = env.ledger().sequence();
+    let current_ts = env.ledger().timestamp();
+    if target_sequence < current_seq {
+        return Err(ProgressionError::BackwardsSequence {
+            current: current_seq,
+            target: target_sequence,
+        });
+    }
+    if target_timestamp < current_ts {
+        return Err(ProgressionError::BackwardsTimestamp {
+            current: current_ts,
+            target: target_timestamp,
+        });
+    }
+    env.ledger().with_mut(|ledger| {
+        ledger.sequence_number = target_sequence;
+        ledger.timestamp = target_timestamp;
+    });
+    Ok(LedgerSnapshot {
+        sequence: target_sequence,
+        timestamp: target_timestamp,
+    })
 }
 
 /// Return the remaining TTL of a persistent entry in `contract`'s storage.
@@ -316,8 +766,11 @@ mod tests {
     use std::string::String;
 
     use super::{
-        advance_ledger, assert_no_violations, chaos_drive, entry_is_live, entry_ttl, ChaosTarget,
-        StepOutcome, BUMP_AMOUNT, BUMP_THRESHOLD,
+        advance_ledger, advance_ledger_and_timestamp, advance_timestamp, assert_no_violations,
+        chaos_drive, entry_is_live, entry_ttl, set_ledger_monotonic, ChaosTarget,
+        LedgerProgressionFixture, LedgerSnapshot, ProgressionError, StepOutcome, BUMP_AMOUNT,
+        BUMP_THRESHOLD, DEFAULT_INITIAL_SEQUENCE, DEFAULT_INITIAL_TIMESTAMP,
+        DEFAULT_SECONDS_PER_LEDGER,
     };
     use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
 
@@ -661,5 +1114,154 @@ mod tests {
         };
         let trace = chaos_drive(&env, &mut target, 7_777, 4, 1_000);
         assert_no_violations(&trace);
+    }
+
+    // -------------------------------------------------------------------
+    // Deterministic LedgerProgressionFixture & monotonicity guards
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn fixture_initializes_deterministic_defaults_and_advances_in_lockstep() {
+        let env = Env::default();
+        let fixture = LedgerProgressionFixture::new(&env);
+
+        assert_eq!(fixture.sequence(), DEFAULT_INITIAL_SEQUENCE);
+        assert_eq!(fixture.timestamp(), DEFAULT_INITIAL_TIMESTAMP);
+        assert_eq!(fixture.seconds_per_ledger(), DEFAULT_SECONDS_PER_LEDGER);
+        assert_eq!(
+            fixture.initial_snapshot(),
+            LedgerSnapshot {
+                sequence: DEFAULT_INITIAL_SEQUENCE,
+                timestamp: DEFAULT_INITIAL_TIMESTAMP,
+            }
+        );
+
+        let snap = fixture.advance_ledgers(12);
+        assert_eq!(snap.sequence, DEFAULT_INITIAL_SEQUENCE + 12);
+        assert_eq!(
+            snap.timestamp,
+            DEFAULT_INITIAL_TIMESTAMP + 12 * DEFAULT_SECONDS_PER_LEDGER
+        );
+        assert_eq!(fixture.elapsed_ledgers(), 12);
+        assert_eq!(fixture.elapsed_seconds(), 60);
+    }
+
+    #[test]
+    fn fixture_advance_seconds_updates_sequence_by_configured_cadence() {
+        let env = Env::default();
+        let fixture = LedgerProgressionFixture::with_start(&env, 500, 10_000, 10).unwrap();
+
+        // 35 seconds with 10s/ledger advances 3 full ledgers and 35 seconds.
+        let snap = fixture.advance_seconds(35);
+        assert_eq!(snap.sequence, 503);
+        assert_eq!(snap.timestamp, 10_035);
+        assert_eq!(fixture.elapsed_ledgers(), 3);
+        assert_eq!(fixture.elapsed_seconds(), 35);
+    }
+
+    #[test]
+    fn fixture_rejects_zero_seconds_per_ledger() {
+        let env = Env::default();
+        assert_eq!(
+            LedgerProgressionFixture::with_start(&env, 1, 100, 0).unwrap_err(),
+            ProgressionError::InvalidSecondsPerLedger
+        );
+    }
+
+    #[test]
+    fn fixture_rejects_backwards_sequence_and_timestamp_without_mutating_env() {
+        let env = Env::default();
+        let fixture = LedgerProgressionFixture::with_start(&env, 200, 5_000, 5).unwrap();
+
+        assert_eq!(
+            fixture.try_advance_to(199, 5_000),
+            Err(ProgressionError::BackwardsSequence {
+                current: 200,
+                target: 199,
+            })
+        );
+        assert_eq!(
+            fixture.try_advance_to(200, 4_999),
+            Err(ProgressionError::BackwardsTimestamp {
+                current: 5_000,
+                target: 4_999,
+            })
+        );
+        assert_eq!(
+            fixture.try_advance_to_sequence(150),
+            Err(ProgressionError::BackwardsSequence {
+                current: 200,
+                target: 150,
+            })
+        );
+        assert_eq!(
+            fixture.try_advance_to_timestamp(4_000),
+            Err(ProgressionError::BackwardsTimestamp {
+                current: 5_000,
+                target: 4_000,
+            })
+        );
+
+        // State must remain unchanged after rejected transitions.
+        assert_eq!(fixture.sequence(), 200);
+        assert_eq!(fixture.timestamp(), 5_000);
+    }
+
+    #[test]
+    fn fixture_advance_to_targets_and_standalone_helpers_work() {
+        let env = Env::default();
+        let fixture = LedgerProgressionFixture::from_current(&env);
+        let start = fixture.snapshot();
+
+        advance_timestamp(&env, 25);
+        assert_eq!(fixture.timestamp(), start.timestamp + 25);
+
+        advance_ledger_and_timestamp(&env, 4, 20);
+        assert_eq!(fixture.sequence(), start.sequence + 4);
+        assert_eq!(fixture.timestamp(), start.timestamp + 45);
+
+        let snap = set_ledger_monotonic(&env, start.sequence + 10, start.timestamp + 100).unwrap();
+        assert_eq!(snap.sequence, start.sequence + 10);
+        assert_eq!(snap.timestamp, start.timestamp + 100);
+
+        let snap_seq = fixture.advance_to_sequence(start.sequence + 20);
+        assert_eq!(snap_seq.sequence, start.sequence + 20);
+        assert_eq!(snap_seq.timestamp, start.timestamp + 150);
+
+        let snap_ts = fixture.advance_to_timestamp(start.timestamp + 200);
+        assert_eq!(snap_ts.timestamp, start.timestamp + 200);
+        assert_eq!(snap_ts.sequence, start.sequence + 30);
+    }
+
+    #[test]
+    fn fixture_drives_ttl_boundary_and_refresh_deterministically() {
+        let (env, contract) = setup_probe();
+        let fixture = LedgerProgressionFixture::new(&env);
+
+        // Missing entry cannot advance to a TTL boundary.
+        assert_eq!(
+            fixture.try_advance_to_ttl_boundary(&contract, &ProbeKey::Value),
+            Err(ProgressionError::EntryNotLive)
+        );
+
+        env.as_contract(&contract, || TtlProbe::write(env.clone()));
+        assert_eq!(entry_ttl(&env, &contract, &ProbeKey::Value), BUMP_AMOUNT);
+
+        // Advance right to the last live ledger (remaining TTL == 1).
+        let boundary = fixture.advance_to_ttl_boundary(&contract, &ProbeKey::Value);
+        assert_eq!(
+            boundary.sequence,
+            DEFAULT_INITIAL_SEQUENCE + BUMP_AMOUNT - 1
+        );
+        assert_eq!(
+            boundary.timestamp,
+            DEFAULT_INITIAL_TIMESTAMP + u64::from(BUMP_AMOUNT - 1) * DEFAULT_SECONDS_PER_LEDGER
+        );
+        assert_eq!(entry_ttl(&env, &contract, &ProbeKey::Value), 1);
+        assert!(entry_is_live(&env, &contract, &ProbeKey::Value));
+
+        // Rewriting at the boundary refreshes the TTL back to BUMP_AMOUNT.
+        env.as_contract(&contract, || TtlProbe::write(env.clone()));
+        assert_eq!(entry_ttl(&env, &contract, &ProbeKey::Value), BUMP_AMOUNT);
     }
 }
