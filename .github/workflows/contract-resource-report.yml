@@ -1,0 +1,58 @@
+name: Contract Resource Report
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  resource-report:
+    name: Contract resource regression report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate current report
+        run: python3 scripts/contract-resource-report.py generate --output contract-resource-report.json
+      - name: Select base-branch baseline
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          BASELINE=reports/contract-resource-baseline.json
+          if [ "$EVENT_NAME" = "pull_request" ] && git cat-file -e "$BASE_SHA:$BASELINE" 2>/dev/null; then
+            git show "$BASE_SHA:$BASELINE" > contract-resource-baseline.json
+            echo "Using resource baseline from pull request base $BASE_SHA"
+          elif [ -f "$BASELINE" ]; then
+            cp "$BASELINE" contract-resource-baseline.json
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              echo "::notice::The base branch predates resource reports; using the checked-in bootstrap baseline."
+            fi
+          else
+            cp contract-resource-report.json contract-resource-baseline.json
+            echo "::notice::No resource baseline exists on the base branch yet; this run bootstraps the measured baseline from its report artifact."
+          fi
+      - name: Compare entrypoint metrics
+        run: |
+          python3 scripts/contract-resource-report.py compare \
+            --baseline contract-resource-baseline.json \
+            --current contract-resource-report.json \
+            --output contract-resource-comparison.json
+      - name: Upload machine-readable resource reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-resource-report-${{ github.run_id }}
+          path: |
+            contract-resource-report.json
+            contract-resource-baseline.json
+            contract-resource-comparison.json
+          if-no-files-found: warn
