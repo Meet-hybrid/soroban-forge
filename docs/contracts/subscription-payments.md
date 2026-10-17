@@ -26,12 +26,21 @@ fn get_usage(subscription_id, metric: Symbol) -> Result<UsageRecord, ForgeError>
 fn get_subscription_count() -> u64
 fn subscriptions_for_subscriber(subscriber, offset, limit) -> Result<Vec<Subscription>, ForgeError>
 fn subscriptions_for_provider(provider, offset, limit) -> Result<Vec<Subscription>, ForgeError>
+fn preview_arrears_settlement(subscription_id, max_periods: u32) -> Result<ArrearsSettlementPreview, ForgeError>
+fn get_arrears_preview(subscription_id) -> Result<ArrearsSettlementPreview, ForgeError>
 // Plan registry (issue #116)
 fn create_plan(provider, token, amount, period, quotas: Vec<MetricQuota>) -> Result<u64, ForgeError>
 fn subscribe_to_plan(plan_id, subscriber) -> Result<u64, ForgeError>
 fn get_plan(plan_id) -> Result<Plan, ForgeError>
 fn plan_count() -> u64
 ```
+
+## Read-Only Arrears Settlement Preview
+
+`preview_arrears_settlement(subscription_id, max_periods)` and `get_arrears_preview(subscription_id)` expose the contract's settlement arithmetic without mutating balances, indexes, or TTLs:
+
+- **Shared calculation**: Reuses `derive_period_amount` and `period_amount` across elapsed billing windows so metered usage bucket rounding (`ceil`) and multi-period catch-up totals match `charge` and `charge_catchup`.
+- **Reported fields (`ArrearsSettlementPreview`)**: `chargeable_amount`, `prepaid_consumed`, `prepaid_remaining`, `total_arrears`, `arrears_remaining`, `uncovered_arrears`, `elapsed_periods`, `settled_periods`, `remaining_periods`, `is_overdue`, `is_fully_covered`, `current_status`, `resulting_status`, and `next_last_charged`.
 
 - `subscribe` requires the subscriber and returns a stable, monotonic id.
 - `charge` requires the provider and settles at most one full period per call.
