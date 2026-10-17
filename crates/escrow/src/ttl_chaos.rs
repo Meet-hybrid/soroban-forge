@@ -11,7 +11,8 @@ extern crate std;
 use crate::{DataKey, Escrow, EscrowStatus, SorobanForgeEscrowClient};
 use soroban_forge_shared_utils::ForgeError;
 use soroban_forge_test_utils::ttl::{
-    advance_ledger, assert_no_violations, chaos_drive, entry_is_live, ChaosTarget, StepOutcome,
+    advance_ledger, assert_no_violations, chaos_drive, entry_is_live, entry_ttl, ChaosTarget,
+    LedgerProgressionFixture, ProgressionError, StepOutcome, BUMP_AMOUNT,
 };
 use soroban_forge_test_utils::TestAccounts;
 use soroban_sdk::testutils::{Address as _, Ledger as _};
@@ -212,4 +213,52 @@ fn escrow_chaos_trace_is_printable() {
     // The trace must be deterministic and contain at least one step.
     assert!(!trace.steps.is_empty());
     let _ = trace.to_string();
+}
+
+/// Representative contract TTL boundary test driven by [`LedgerProgressionFixture`].
+#[test]
+fn escrow_ttl_boundary_and_timeout_progression_with_fixture() {
+    let env = Env::default();
+    let target = EscrowTarget::setup(&env);
+    let fixture = LedgerProgressionFixture::with_start(&env, 500, START_TIME, 5).unwrap();
+
+    let id = target.client.create_escrow(
+        &target.accounts.user1,
+        &target.accounts.user2,
+        &target.accounts.arbiter,
+        &target.token,
+        &AMOUNT,
+        &TIMEOUT,
+    );
+    let key = DataKey::Escrow(id);
+    assert_eq!(entry_ttl(&env, &target.client.address, &key), BUMP_AMOUNT);
+
+    // Advance right to the last live ledger of the newly created escrow record.
+    let boundary = fixture.advance_to_ttl_boundary(&target.client.address, &key);
+    assert_eq!(boundary.sequence, 500 + BUMP_AMOUNT - 1);
+    assert_eq!(entry_ttl(&env, &target.client.address, &key), 1);
+    assert!(entry_is_live(&env, &target.client.address, &key));
+
+    // Deposit at the TTL boundary refreshes the persistent record back to BUMP_AMOUNT.
+    target.client.deposit(&id);
+    assert_eq!(entry_ttl(&env, &target.client.address, &key), BUMP_AMOUNT);
+
+    // Reject backwards progression attempts during the flow.
+    assert_eq!(
+        fixture.try_advance_to_sequence(boundary.sequence - 1),
+        Err(ProgressionError::BackwardsSequence {
+            current: boundary.sequence,
+            target: boundary.sequence - 1,
+        })
+    );
+
+    // Advance past timeout and to the next TTL boundary via deterministic fixture progression,
+    // then verify refund succeeds and refreshes TTL back to BUMP_AMOUNT.
+    fixture.advance_seconds(TIMEOUT + 5);
+    let second_boundary = fixture.advance_to_ttl_boundary(&target.client.address, &key);
+    assert!(second_boundary.timestamp > START_TIME + TIMEOUT);
+    assert_eq!(entry_ttl(&env, &target.client.address, &key), 1);
+
+    target.client.refund(&id);
+    assert_eq!(entry_ttl(&env, &target.client.address, &key), BUMP_AMOUNT);
 }

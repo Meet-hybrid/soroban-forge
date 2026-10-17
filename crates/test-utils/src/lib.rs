@@ -5,6 +5,8 @@
 //! Provides lightweight helpers used by contract integration tests:
 //! - [`new_env`] to construct a configured [`Env`]
 //! - [`TestAccounts`] to obtain deterministic, distinct mock addresses
+//! - [`LedgerProgressionFixture`] for deterministic monotonic ledger sequence,
+//!   timestamp, and TTL boundary progression
 //! - [`ttl`] for ledger-sequence manipulation, entry-liveness introspection,
 //!   and the deterministic TTL chaos harness ([`chaos_drive`])
 //!
@@ -19,8 +21,11 @@ pub use mocks::{
     MockTarget, MockTargetClient, RevertingTarget, RevertingTargetClient, TestAccounts,
 };
 pub use ttl::{
-    advance_ledger, assert_no_violations, chaos_drive, entry_is_live, entry_ttl, ChaosStep,
-    ChaosTarget, ChaosTrace, StepOutcome, BUMP_AMOUNT, BUMP_THRESHOLD, DAY_IN_LEDGERS,
+    advance_ledger, advance_ledger_and_timestamp, advance_timestamp, assert_no_violations,
+    chaos_drive, entry_is_live, entry_ttl, set_ledger_monotonic, ChaosStep, ChaosTarget,
+    ChaosTrace, LedgerProgressionFixture, LedgerSnapshot, ProgressionError, StepOutcome,
+    BUMP_AMOUNT, BUMP_THRESHOLD, DAY_IN_LEDGERS, DEFAULT_INITIAL_SEQUENCE,
+    DEFAULT_INITIAL_TIMESTAMP, DEFAULT_SECONDS_PER_LEDGER,
 };
 
 /// Create a [`Env`] configured for contract testing.
