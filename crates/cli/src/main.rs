@@ -112,6 +112,16 @@ mod tests {
     }
 
     #[test]
+    fn doctor_json_flag_parses() {
+        let cli = Cli::try_parse_from(["soroban-forge", "doctor", "--json"]).unwrap();
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(args.json);
+    }
+
+    #[test]
     fn verify_flags_parse() {
         let cli = Cli::try_parse_from([
             "soroban-forge",
