@@ -872,6 +872,9 @@ impl SubscriptionPayments {
         let balance = subscription
             .prepaid_balance
             .ok_or(ForgeError::InsufficientFunds)?;
+        if amount > balance {
+            return Err(ForgeError::InsufficientFunds);
+        }
         let remaining = balance
             .checked_sub(amount)
             .ok_or(ForgeError::InsufficientFunds)?;

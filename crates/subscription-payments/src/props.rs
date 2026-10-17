@@ -378,4 +378,143 @@ proptest! {
             prop_assert_eq!(token.balance(&w.provider), debits);
         }
     }
+
+    #[test]
+    fn prop_prepaid_invalid_and_boundary_operations_preserve_supply_and_state(
+        period_amount in 50i128..=500_i128,
+        period in 10u64..=1_000_u64,
+        steps in prop::collection::vec((0u8..9, 1i128..=800_i128), 1..40),
+    ) {
+        let initial_supply = 1_000_000_i128;
+        let w = setup_world(initial_supply);
+        let id = w.subscribe(period_amount, period);
+        let client = w.client();
+        let token = soroban_sdk::token::Client::new(&w.env, &w.token);
+
+        let mut now = START;
+        client.deposit(&id, &period_amount);
+
+        for (op, raw_amount) in steps {
+            let before_sub = client.get_subscription(&id);
+            let before_user = token.balance(&w.subscriber);
+            let before_contract = token.balance(&w.contract_id);
+            let before_provider = token.balance(&w.provider);
+
+            match op {
+                0 => {
+                    // Valid deposit when not cancelled
+                    if before_sub.status == SubscriptionStatus::Cancelled {
+                        let res = client.try_deposit(&id, &raw_amount);
+                        prop_assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+                        prop_assert_eq!(client.get_subscription(&id), before_sub.clone());
+                    } else {
+                        let updated = client.deposit(&id, &raw_amount);
+                        prop_assert_eq!(updated, before_contract + raw_amount);
+                    }
+                }
+                1 => {
+                    // Invalid non-positive deposit
+                    let res = client.try_deposit(&id, &(-raw_amount));
+                    prop_assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+                    prop_assert_eq!(client.get_subscription(&id), before_sub.clone());
+                }
+                2 => {
+                    // Boundary over-withdrawal (balance + raw_amount)
+                    let over = before_contract + raw_amount;
+                    let res = client.try_withdraw_balance(&id, &over);
+                    let expected_err = if before_sub.status == SubscriptionStatus::Cancelled {
+                        ForgeError::InvalidInput
+                    } else {
+                        ForgeError::InsufficientFunds
+                    };
+                    prop_assert_eq!(res.unwrap_err().unwrap(), expected_err);
+                    prop_assert_eq!(client.get_subscription(&id), before_sub.clone());
+                }
+                3 => {
+                    // Partial or exact withdrawal when positive balance exists
+                    if before_sub.status != SubscriptionStatus::Cancelled && before_contract > 0 {
+                        let withdraw_amt = (raw_amount % before_contract) + 1;
+                        let rem = client.withdraw_balance(&id, &withdraw_amt);
+                        prop_assert_eq!(rem, before_contract - withdraw_amt);
+                    }
+                }
+                4 => {
+                    // Catch-up is always rejected once prepaid mode is enabled
+                    let res = client.try_charge_catchup(&id, &1);
+                    prop_assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+                    prop_assert_eq!(client.get_subscription(&id), before_sub.clone());
+                }
+                5 => {
+                    // Advance one full period and attempt charge
+                    now += period;
+                    w.env.ledger().set_timestamp(now);
+                    if before_sub.status == SubscriptionStatus::Cancelled
+                        || before_sub.status == SubscriptionStatus::Paused
+                    {
+                        let res = client.try_charge(&id);
+                        prop_assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+                        prop_assert_eq!(client.get_subscription(&id), before_sub.clone());
+                    } else {
+                        let billed = client.charge(&id);
+                        if before_contract >= period_amount {
+                            prop_assert_eq!(billed, period_amount);
+                        } else {
+                            prop_assert_eq!(billed, 0);
+                        }
+                    }
+                }
+                6 => {
+                    // Pause transition (only valid when Active)
+                    let res = client.try_pause(&id);
+                    if before_sub.status == SubscriptionStatus::Active {
+                        prop_assert!(res.is_ok());
+                    } else {
+                        prop_assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+                        prop_assert_eq!(client.get_subscription(&id), before_sub.clone());
+                    }
+                }
+                7 => {
+                    // Resume transition (only valid when Paused)
+                    now += period / 2;
+                    w.env.ledger().set_timestamp(now);
+                    let res = client.try_resume(&id);
+                    if before_sub.status == SubscriptionStatus::Paused {
+                        prop_assert!(res.is_ok());
+                    } else {
+                        prop_assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+                        prop_assert_eq!(client.get_subscription(&id), before_sub.clone());
+                    }
+                }
+                _ => {
+                    // Cancel transition (valid unless already Cancelled)
+                    let res = client.try_cancel(&id);
+                    if before_sub.status == SubscriptionStatus::Cancelled {
+                        prop_assert_eq!(res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+                        prop_assert_eq!(client.get_subscription(&id), before_sub.clone());
+                    } else {
+                        prop_assert!(res.is_ok());
+                        prop_assert_eq!(
+                            client.get_subscription(&id).prepaid_balance,
+                            Some(0)
+                        );
+                    }
+                }
+            }
+
+            let after_sub = client.get_subscription(&id);
+            let after_user = token.balance(&w.subscriber);
+            let after_contract = token.balance(&w.contract_id);
+            let after_provider = token.balance(&w.provider);
+            let tracked = after_sub.prepaid_balance.unwrap_or(0);
+
+            prop_assert!(tracked >= 0, "prepaid_balance must never be negative");
+            prop_assert_eq!(after_contract, tracked, "contract custody must equal prepaid_balance");
+            prop_assert_eq!(
+                after_user + after_contract + after_provider,
+                initial_supply,
+                "total token supply must be conserved across subscriber, contract, and provider"
+            );
+            let _ = (before_user, before_provider);
+        }
+    }
 }
