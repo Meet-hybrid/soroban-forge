@@ -998,6 +998,9 @@ mod props;
 mod indexer_fixtures;
 
 #[cfg(test)]
+mod resource_report;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
