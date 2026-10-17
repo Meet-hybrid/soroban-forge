@@ -1418,3 +1418,398 @@ fn governance_entrypoints_require_the_declared_submitter_and_preserve_state() {
     assert_eq!(client.get_tx_count(), count_before);
     assert!(!client.is_owner(&new_owner));
 }
+
+// -----------------------------------------------------------------------
+// Owner-rotation and threshold invariants across in-flight, rejected,
+// and terminal transactions (issue #440)
+// -----------------------------------------------------------------------
+
+#[test]
+fn invalid_thresholds_and_owner_sets_are_rejected_without_wallet_mutation() {
+    let (env, _contract_id, client, accounts) = setup!();
+
+    // 1. Initialization boundary rejections must leave the wallet uninitialized.
+    let empty_owners: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+    assert_eq!(
+        client
+            .try_initialize(&empty_owners, &1)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_initialize(&owner_vec(&env, &accounts), &0)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_initialize(&owner_vec(&env, &accounts), &4)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    let duplicate_owners = soroban_sdk::vec![
+        &env,
+        accounts.user1.clone(),
+        accounts.user2.clone(),
+        accounts.user1.clone()
+    ];
+    assert_eq!(
+        client
+            .try_initialize(&duplicate_owners, &2)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_get_owners().unwrap_err().unwrap(),
+        soroban_forge_shared_utils::ForgeError::NotInitialized
+    );
+    assert_eq!(
+        client.try_get_threshold().unwrap_err().unwrap(),
+        soroban_forge_shared_utils::ForgeError::NotInitialized
+    );
+    assert_eq!(client.get_tx_count(), 0);
+
+    // 2. Initialize 3-of-2 wallet and verify submission-time rejections preserve state.
+    initialize_wallet(&env, &client, &accounts);
+    let owners_before = client.get_owners();
+    let threshold_before = client.get_threshold();
+
+    // Duplicate owner addition, unknown owner removal, and out-of-range thresholds.
+    assert_eq!(
+        client
+            .try_add_owner(&accounts.user1, &accounts.user2)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_remove_owner(&accounts.user1, &accounts.deployer)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_set_threshold(&accounts.user1, &0)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_set_threshold(&accounts.user1, &4)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+
+    // Non-owner governance proposals fail with Unauthorized and write nothing.
+    let candidate = Address::generate(&env);
+    assert_eq!(
+        client
+            .try_add_owner(&accounts.deployer, &candidate)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::Unauthorized
+    );
+    assert_eq!(
+        client
+            .try_remove_owner(&accounts.deployer, &accounts.user3)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::Unauthorized
+    );
+    assert_eq!(
+        client
+            .try_set_threshold(&accounts.deployer, &1)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::Unauthorized
+    );
+    assert_eq!(client.get_owners(), owners_before);
+    assert_eq!(client.get_threshold(), threshold_before);
+    assert_eq!(client.get_tx_count(), 0);
+
+    // 3. Execution-time revalidation: raise threshold to 3 (matching 3 owners),
+    // then attempt to execute a pending `remove_owner` that would leave threshold (3) > owners (2).
+    let remove_tx = client.remove_owner(&accounts.user1, &accounts.user3);
+    let raise_tx = client.set_threshold(&accounts.user1, &3);
+    client.confirm(&raise_tx, &accounts.user1);
+    client.confirm(&raise_tx, &accounts.user2);
+    client.execute(&raise_tx);
+    assert_eq!(client.get_threshold(), 3);
+
+    client.confirm(&remove_tx, &accounts.user1);
+    client.confirm(&remove_tx, &accounts.user2);
+    client.confirm(&remove_tx, &accounts.user3);
+    assert_eq!(
+        client.try_execute(&remove_tx).unwrap_err().unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(client.get_owners(), owners_before);
+    assert_eq!(client.get_threshold(), 3);
+    assert_eq!(client.get_tx(&remove_tx).status, TxStatus::Pending);
+}
+
+#[test]
+fn in_flight_transactions_follow_owner_rotation_and_threshold_semantics() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let target = env.register(MockTarget, ());
+    let target_client = soroban_forge_test_utils::MockTargetClient::new(&env, &target);
+
+    // Stage an in-flight transaction confirmed by user1 and user3 (threshold = 2).
+    // Before executing it, rotate out user3 and rotate in a new owner + raise threshold to 3.
+    let in_flight_tx = client.submit(&accounts.user1, &target, &payload(&env), &None);
+    client.confirm(&in_flight_tx, &accounts.user1);
+    client.confirm(&in_flight_tx, &accounts.user3);
+    assert_eq!(client.get_confirmations(&in_flight_tx).len(), 2);
+
+    // Rotate out user3.
+    let rm_tx = client.remove_owner(&accounts.user1, &accounts.user3);
+    client.confirm(&rm_tx, &accounts.user1);
+    client.confirm(&rm_tx, &accounts.user2);
+    client.execute(&rm_tx);
+
+    assert!(!client.is_owner(&accounts.user3));
+    assert_eq!(
+        client.get_owners(),
+        soroban_sdk::vec![&env, accounts.user1.clone(), accounts.user2.clone()]
+    );
+
+    // Removed owner's confirmation on the in-flight tx is scrubbed, so it drops below threshold (1 < 2).
+    assert_eq!(
+        client.get_confirmations(&in_flight_tx),
+        soroban_sdk::vec![&env, accounts.user1.clone()]
+    );
+    assert_eq!(
+        client.try_execute(&in_flight_tx).unwrap_err().unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(target_client.count(), 0);
+
+    // Removed owner can no longer confirm, reject, or submit.
+    assert_eq!(
+        client
+            .try_confirm(&in_flight_tx, &accounts.user3)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::Unauthorized
+    );
+    assert_eq!(
+        client
+            .try_reject(&in_flight_tx, &accounts.user3)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::Unauthorized
+    );
+
+    // Rotate in `new_owner` and raise threshold to 3.
+    let new_owner = Address::generate(&env);
+    let add_tx = client.add_owner(&accounts.user1, &new_owner);
+    client.confirm(&add_tx, &accounts.user1);
+    client.confirm(&add_tx, &accounts.user2);
+    client.execute(&add_tx);
+    assert!(client.is_owner(&new_owner));
+
+    let thresh_tx = client.set_threshold(&accounts.user1, &3);
+    client.confirm(&thresh_tx, &accounts.user1);
+    client.confirm(&thresh_tx, &accounts.user2);
+    client.execute(&thresh_tx);
+    assert_eq!(client.get_threshold(), 3);
+
+    // Confirm with user2: 2 confirmations (user1, user2) is now below the live threshold of 3.
+    client.confirm(&in_flight_tx, &accounts.user2);
+    assert_eq!(
+        client.try_execute(&in_flight_tx).unwrap_err().unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(target_client.count(), 0);
+
+    // Enforce-mode check: new_owner's explicit signature is required and accepted for the 3rd confirmation.
+    env.mock_auths(&[MockAuth {
+        address: &new_owner,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "confirm",
+            args: (in_flight_tx, &new_owner).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client
+        .try_confirm(&in_flight_tx, &new_owner)
+        .expect("outer ok")
+        .expect("contract ok");
+
+    env.set_auths(&[]);
+    client.execute(&in_flight_tx);
+    assert_eq!(client.get_tx(&in_flight_tx).status, TxStatus::Executed);
+    assert_eq!(target_client.count(), 1);
+}
+
+#[test]
+fn rejected_owner_change_and_threshold_transactions_never_mutate_wallet_state() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+
+    let candidate = Address::generate(&env);
+    let add_tx = client.add_owner(&accounts.user1, &candidate);
+    let rm_tx = client.remove_owner(&accounts.user1, &accounts.user3);
+    let thresh_tx = client.set_threshold(&accounts.user1, &3);
+
+    let owners_before = client.get_owners();
+    let threshold_before = client.get_threshold();
+
+    for tx_id in [add_tx, rm_tx, thresh_tx] {
+        // Confirm once, then veto with user2.
+        client.confirm(&tx_id, &accounts.user1);
+        client.reject(&tx_id, &accounts.user2);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Rejected);
+
+        // Further confirm, reject, or execute attempts on the rejected governance tx
+        // must fail with InvalidInput and leave owners/threshold untouched.
+        assert_eq!(
+            client
+                .try_confirm(&tx_id, &accounts.user3)
+                .unwrap_err()
+                .unwrap(),
+            soroban_forge_shared_utils::ForgeError::InvalidInput
+        );
+        assert_eq!(
+            client
+                .try_reject(&tx_id, &accounts.user3)
+                .unwrap_err()
+                .unwrap(),
+            soroban_forge_shared_utils::ForgeError::InvalidInput
+        );
+        assert_eq!(
+            client.try_execute(&tx_id).unwrap_err().unwrap(),
+            soroban_forge_shared_utils::ForgeError::InvalidInput
+        );
+        assert_eq!(client.get_owners(), owners_before);
+        assert_eq!(client.get_threshold(), threshold_before);
+    }
+
+    // Execute a valid governance tx and verify terminal replay protection.
+    let valid_add = client.add_owner(&accounts.user1, &candidate);
+    client.confirm(&valid_add, &accounts.user1);
+    client.confirm(&valid_add, &accounts.user2);
+    client.execute(&valid_add);
+    assert_eq!(client.get_tx(&valid_add).status, TxStatus::Executed);
+
+    let owners_after_add = client.get_owners();
+    assert_eq!(
+        client.try_execute(&valid_add).unwrap_err().unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_confirm(&valid_add, &accounts.user3)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_reject(&valid_add, &accounts.user3)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(client.get_owners(), owners_after_add);
+}
+
+#[test]
+fn one_owner_and_multi_owner_rotation_configurations_enforce_auth_and_invariants() {
+    let (env, contract_id, client, accounts) = setup!();
+
+    // Initialize a 1-of-1 wallet (`[user1]`, `threshold == 1`).
+    let single_owner = soroban_sdk::vec![&env, accounts.user1.clone()];
+    client.initialize(&single_owner, &1);
+    assert_eq!(client.get_owners(), single_owner);
+    assert_eq!(client.get_threshold(), 1);
+
+    // Cannot remove the sole owner or raise threshold above 1 in a 1-owner wallet.
+    assert_eq!(
+        client
+            .try_remove_owner(&accounts.user1, &accounts.user1)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_set_threshold(&accounts.user1, &2)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(client.get_tx_count(), 0);
+
+    // Expand from 1-of-1 to 2-of-2 by adding user2 and raising threshold to 2.
+    let add_u2 = client.add_owner(&accounts.user1, &accounts.user2);
+    client.confirm(&add_u2, &accounts.user1);
+    client.execute(&add_u2);
+    assert_eq!(
+        client.get_owners(),
+        soroban_sdk::vec![&env, accounts.user1.clone(), accounts.user2.clone()]
+    );
+
+    let raise_to_2 = client.set_threshold(&accounts.user1, &2);
+    client.confirm(&raise_to_2, &accounts.user1);
+    client.execute(&raise_to_2);
+    assert_eq!(client.get_threshold(), 2);
+
+    // Lower threshold back to 1 (requires both user1 and user2 under the active threshold of 2),
+    // then rotate out user1 so user2 becomes the sole owner.
+    let lower_to_1 = client.set_threshold(&accounts.user1, &1);
+    client.confirm(&lower_to_1, &accounts.user1);
+    assert_eq!(
+        client.try_execute(&lower_to_1).unwrap_err().unwrap(),
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    client.confirm(&lower_to_1, &accounts.user2);
+    client.execute(&lower_to_1);
+    assert_eq!(client.get_threshold(), 1);
+
+    let rm_u1 = client.remove_owner(&accounts.user2, &accounts.user1);
+    client.confirm(&rm_u1, &accounts.user2);
+    client.execute(&rm_u1);
+    assert!(!client.is_owner(&accounts.user1));
+    assert!(client.is_owner(&accounts.user2));
+    assert_eq!(
+        client.get_owners(),
+        soroban_sdk::vec![&env, accounts.user2.clone()]
+    );
+
+    // After rotation, former owner user1 is rejected while sole owner user2 is accepted under enforce mode.
+    let target = env.register(MockTarget, ());
+    assert_eq!(
+        client
+            .try_submit(&accounts.user1, &target, &payload(&env), &None)
+            .unwrap_err()
+            .unwrap(),
+        soroban_forge_shared_utils::ForgeError::Unauthorized
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user2,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "submit",
+            args: (&accounts.user2, &target, payload(&env), None::<u64>).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let tx_id = client
+        .try_submit(&accounts.user2, &target, &payload(&env), &None)
+        .expect("outer ok")
+        .expect("contract ok");
+    assert_eq!(client.get_tx(&tx_id).submitter, accounts.user2);
+}
