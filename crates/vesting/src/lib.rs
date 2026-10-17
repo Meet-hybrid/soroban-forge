@@ -1150,6 +1150,9 @@ fn transfer_from_contract(
 mod tests;
 
 #[cfg(test)]
+mod resource_report;
+
+#[cfg(test)]
 mod authz;
 
 #[cfg(test)]

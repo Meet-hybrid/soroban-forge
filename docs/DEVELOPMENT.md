@@ -323,6 +323,46 @@ The mapping of contract → package directory lives in
 
 ## Contract Testing Notes
 
+### Contract resource regression reports
+
+The CI resource-report workflow runs one deterministic, storage-writing
+entrypoint scenario for each contract and uploads a machine-readable report.
+For pull requests, it compares each metric with the baseline on the PR's base
+branch and lists deltas by entrypoint in the workflow summary. On the initial
+rollout, when the base branch has no report baseline, CI bootstraps from the
+current measured report; the uploaded report can then be committed as the
+checked-in baseline for future base-branch comparisons.
+
+The report includes host-estimated ledger entry accesses (read and write
+counts), CPU instructions, metered memory, and an estimated transaction fee.
+`footprint_entries` is the sum of the host-reported read and write entry
+counts; this native test-host approximation is not the exact XDR footprint.
+Soroban SDK's native test host undercounts WASM VM costs and the fee estimate
+does not model transaction size or RPC simulation. These reports are for
+relative regression detection only; they are not wall-clock benchmarks or
+mainnet cost guarantees.
+
+Any individual metric increase greater than **20%** fails comparison. Missing,
+malformed, or duplicated scenario metrics fail report generation rather than
+passing silently. To reproduce the checked-in baseline from a clean checkout,
+run:
+
+```bash
+python3 scripts/contract-resource-report.py update-baseline
+```
+
+Review the resulting `reports/contract-resource-baseline.json` diff and commit
+it only when the measured resource change is expected. To produce a report
+without changing the baseline, run:
+
+```bash
+python3 scripts/contract-resource-report.py generate --output contract-resource-report.json
+```
+
+If the local machine cannot link native Rust tests, run the
+**Contract Resource Report** workflow manually and use
+`contract-resource-report.json` from its artifact as the measured baseline.
+
 - Tests use Soroban SDK's `Env` test harness
 - Mock authentication (`mock_all_auths`) for positive tests
 - Integration tests use Stellar Asset Contract (SAC) fixtures
