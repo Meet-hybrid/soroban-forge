@@ -152,7 +152,11 @@ npm test
 ```
 
 The test script compiles TypeScript first (`tsconfig.test.json` → `dist-test/`)
-and then runs the compiled JavaScript with Node's built-in test runner. ABI
+and then runs the compiled JavaScript with Node's built-in test runner. In
+addition to escrow and ABI compatibility coverage, `vesting-client.test.ts`
+smoke-tests the generated vesting client's `claimable` simulation/read path
+and verifies that a failed `create_schedule` simulation surfaces the RPC error.
+Both cases use deterministic local RPC fixtures and do not contact testnet. ABI
 compatibility tests validate every generated client's functions, parameter and
 return types, events, enums, errors, and public type exports against its
 checked-in fixture. The existing escrow suite remains enabled.
