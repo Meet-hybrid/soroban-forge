@@ -56,9 +56,30 @@ returns an empty vector for a positive limit. These views do not require
 authorization and do not modify contract state.
 
 Additional views: `get_threshold`, `get_owners`, `is_owner`,
-`get_confirmations`, `get_rejections`, `get_tx_count`, `get_tx`, and the
+`get_confirmations`, `get_rejections`, `get_tx_count`, `get_tx`,
+`get_tx_preview`, `preview_tx`, `get_required_confirmations`, and the
 per-token views `get_withdrawal_limit` / `get_withdrawal_window` /
 `get_window_usage` / `check_withdrawal` / `balance`.
+
+## Transaction preview and confirmation queries
+
+```rust
+fn get_tx_preview(tx_id: u64) -> Result<TxPreview, ForgeError>
+fn preview_tx(tx_id: u64) -> Result<TxPreview, ForgeError>
+fn get_required_confirmations(tx_id: u64) -> Result<u32, ForgeError>
+```
+
+These read-only views allow clients to inspect transaction status and approval progress in a single call without manually aggregating the threshold and confirmation lists:
+
+- `TxPreview` reports:
+  - `status`: lifecycle status (`TxStatus::Pending`, `TxStatus::Executed`, or `TxStatus::Rejected`)
+  - `threshold`: wallet's configured approval threshold (`u32`)
+  - `approvals`: number of owner confirmations recorded so far (`u32`)
+  - `remaining_approvals`: confirmations still required before execution can proceed (`u32`)
+- For `Pending` transactions, `remaining_approvals` equals `threshold.saturating_sub(approvals)`.
+- For terminal transactions (`Executed` and `Rejected`), `remaining_approvals` is `0`.
+- Unknown transaction IDs and expired transactions whose persistent storage TTL lapsed consistently return `ForgeError::NotFound`.
+- The views require no authorization and never mutate wallet configuration or transaction storage.
 
 ## Withdrawal-limit views
 

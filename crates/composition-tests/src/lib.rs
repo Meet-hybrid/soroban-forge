@@ -38,4 +38,3 @@ fn composition_test_infrastructure() {
 fn cross_contract_settlement_harness_placeholder() {
     // TODO: Cross-contract settlement harness — shared SAC/auth fixtures and conservation assertions
 }
-

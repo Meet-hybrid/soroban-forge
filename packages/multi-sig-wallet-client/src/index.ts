@@ -49,6 +49,18 @@ export type TxKind = {tag: "Opaque", values: void} | {tag: "Withdrawal", values:
  */
 export type TxStatus = {tag: "Pending", values: void} | {tag: "Executed", values: void} | {tag: "Rejected", values: void};
 
+/**
+ * Read-only preview of a transaction's approval status and confirmation progress.
+ */
+export interface TxPreview {
+  approvals: u32;
+  remaining_approvals: u32;
+  status: TxStatus;
+  threshold: u32;
+}
+
+export type TransactionPreview = TxPreview;
+
 
 /**
  * A transaction awaiting multi-signature approval.
@@ -574,6 +586,23 @@ export interface Client {
    */
   get_transactions_by_status: ({status, offset, limit}: {status: TxStatus, offset: u32, limit: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Array<WalletTx>>>>
 
+  /**
+   * Read a summary preview of `tx_id`: its status, configured threshold,
+   * current approvals, and remaining confirmations required (read-only view).
+   */
+  get_tx_preview: ({tx_id}: {tx_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<TxPreview>>>
+
+  /**
+   * Read-only preview of a transaction (convenience alias for get_tx_preview).
+   */
+  preview_tx: ({tx_id}: {tx_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<TxPreview>>>
+
+  /**
+   * Read the number of confirmations still required for `tx_id` to reach the
+   * approval threshold (read-only view).
+   */
+  get_required_confirmations: ({tx_id}: {tx_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u32>>>
+
 }
 export class Client extends ContractClient {
   static async deploy<T = Client>(
@@ -661,6 +690,9 @@ export class Client extends ContractClient {
         get_withdrawal_limit: this.txFromJSON<Option<WithdrawalLimit>>,
         set_withdrawal_limit: this.txFromJSON<Result<u64>>,
         remove_withdrawal_limit: this.txFromJSON<Result<u64>>,
-        get_transactions_by_status: this.txFromJSON<Result<Array<WalletTx>>>
+        get_transactions_by_status: this.txFromJSON<Result<Array<WalletTx>>>,
+        get_tx_preview: this.txFromJSON<Result<TxPreview>>,
+        preview_tx: this.txFromJSON<Result<TxPreview>>,
+        get_required_confirmations: this.txFromJSON<Result<u32>>
   }
 }
