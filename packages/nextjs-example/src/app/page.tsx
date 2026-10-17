@@ -1,24 +1,14 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Networks } from "@stellar/stellar-sdk";
+import { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit/sdk";
+import { defaultModules } from "@creit.tech/stellar-wallets-kit/modules/utils";
 import {
   Client,
   networks,
   type EscrowData,
 } from "@soroban-forge/escrow-client";
-
-declare global {
-  interface Window {
-    freighterApi?: {
-      isConnected(): Promise<boolean>;
-      getPublicKey(): Promise<string>;
-      signTransaction(
-        xdr: string,
-        opts?: { networkPassphrase?: string; address?: string }
-      ): Promise<{ signedTxXdr: string }>;
-    };
-  }
-}
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE = networks.testnet.networkPassphrase;
@@ -42,6 +32,7 @@ function ts(): string {
 }
 
 export default function Home() {
+  const [mounted, setMounted] = useState(false);
   const [account, setAccount] = useState<string | null>(null);
   const [client, setClient] = useState<Client | null>(null);
   const [busy, setBusy] = useState(false);
@@ -82,8 +73,13 @@ export default function Home() {
     []
   );
 
-  const freighterMissing =
-    typeof window !== "undefined" && !window.freighterApi;
+  useEffect(() => {
+    // Wallet modules require browser APIs, so initialize them after hydration.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMounted(true);
+    StellarWalletsKit.init({ modules: defaultModules() });
+    StellarWalletsKit.setNetwork(Networks.TESTNET);
+  }, []);
 
   const listMine = useCallback(
     async (c: Client, addr: string) => {
@@ -112,28 +108,32 @@ export default function Home() {
   const connect = useCallback(async () => {
     setBusy(true);
     try {
-      if (typeof window === "undefined" || !window.freighterApi) {
-        pushLog(
-          "Freighter not detected. Install the Freighter wallet extension and reload.",
-          "err"
-        );
-        return;
+      if (!mounted) {
+        throw new Error("Wallet connectors are still loading; try again shortly.");
       }
-      if (!(await window.freighterApi.isConnected())) {
-        pushLog("Freighter is not connected yet. Allow access in the popup.", "err");
-      }
-      const pubkey = await window.freighterApi.getPublicKey();
+
+      const { address: pubkey } = await StellarWalletsKit.authModal();
       setAccount(pubkey);
+      // Keep the visible buyer value and the transaction payload in sync.
+      setBuyer((current) => current || pubkey);
       const c = new Client({
         rpcUrl: RPC_URL,
         networkPassphrase: NETWORK_PASSPHRASE,
         contractId: CONTRACT_ID,
         publicKey: pubkey,
-        signTransaction: (xdr: string, opts?: { networkPassphrase?: string; address?: string }) =>
-          window.freighterApi!.signTransaction(xdr, {
+        signTransaction: async (
+          xdr: string,
+          opts?: { networkPassphrase?: string; address?: string }
+        ) => {
+          const result = await StellarWalletsKit.signTransaction(xdr, {
             networkPassphrase: opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
             address: opts?.address ?? pubkey,
-          }),
+          });
+          if (!result.signedTxXdr) {
+            throw new Error("The selected wallet did not return a signed transaction.");
+          }
+          return { signedTxXdr: result.signedTxXdr };
+        },
       });
       setClient(c);
       pushLog(
@@ -146,9 +146,10 @@ export default function Home() {
     } finally {
       setBusy(false);
     }
-  }, [pushLog, listMine]);
+  }, [listMine, mounted, pushLog]);
 
   const disconnect = useCallback(() => {
+    void StellarWalletsKit.disconnect();
     setAccount(null);
     setClient(null);
     setEscrow(null);
@@ -193,12 +194,23 @@ export default function Home() {
         return;
       }
       const timeoutBig = BigInt(timeoutSecs || "0");
+      const buyerAddress = buyer.trim() || account?.trim() || "";
+      const sellerAddress = seller.trim();
+      const arbiterAddress = arbiter.trim();
+      const tokenAddress = token.trim();
+      if (!buyerAddress || !sellerAddress || !arbiterAddress || !tokenAddress) {
+        pushLog(
+          "Enter complete buyer, seller, arbiter, and token addresses before creating the escrow.",
+          "err"
+        );
+        return;
+      }
       const tx = await client.create_escrow(
         {
-          buyer,
-          seller,
-          arbiter,
-          token,
+          buyer: buyerAddress,
+          seller: sellerAddress,
+          arbiter: arbiterAddress,
+          token: tokenAddress,
           amount: amountBig,
           timeout: timeoutBig,
         },
@@ -223,6 +235,7 @@ export default function Home() {
       setCreating(false);
     }
   }, [
+    account,
     client,
     buyer,
     seller,
@@ -320,7 +333,12 @@ export default function Home() {
 
   return (
     <main className="mx-auto max-w-5xl p-6">
-      <h1 className="text-3xl font-bold mb-1">Soroban Forge — Escrow Testnet Demo</h1>
+      <div className="mb-3 flex items-center justify-between gap-4">
+        <h1 className="text-3xl font-bold">Soroban Forge — Escrow Testnet Demo</h1>
+        <a href="/issues" className="shrink-0 rounded border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
+          Issue board
+        </a>
+      </div>
       <p className="text-sm text-gray-500 mb-6">
         Contract{" "}
         <code className="break-all">{CONTRACT_ID}</code> ·{" "}
@@ -353,17 +371,14 @@ export default function Home() {
         ) : (
           <div>
             <button
-              {...(typeof window !== "undefined" && window.freighterApi
-                ? connectProps
-                : { disabled: true })}
+              {...(mounted ? connectProps : { disabled: true })}
               className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
             >
-              {busy ? "Connecting…" : "Connect Freighter"}
+              {busy ? "Connecting…" : "Connect wallet"}
             </button>
-            {freighterMissing && (
+            {!mounted && (
               <p className="mt-2 text-sm text-amber-700">
-                Freighter not detected. Install the Freighter wallet extension
-                for Stellar, create/import an account, and reload this page.
+                Loading Stellar wallet connectors…
               </p>
             )}
           </div>
