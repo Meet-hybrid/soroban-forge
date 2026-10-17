@@ -113,6 +113,11 @@ claims can never overpay or underpay: for either kind `claim` returns exactly
 compared on the elapsed offset rather than on `start + unlock_at`, so an offset
 of `u64::MAX` cannot overflow — that tranche simply never unlocks.
 
+This also means callers may make partial claims at arbitrary timestamps: each
+claim receives only the newly unlocked amount, while any floor-division residue
+remains in custody until the claim at or after the vesting end pays the exact
+remaining balance.
+
 On a `Revoked` linear schedule the vested amount is frozen at the revocation
 timestamp (`revoked_vested`): the release formula returns that frozen amount
 for every later time, so `claim` succeeds only up to it and `claimable`

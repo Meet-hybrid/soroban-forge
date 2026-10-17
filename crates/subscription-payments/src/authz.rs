@@ -9,7 +9,9 @@
 //! - `pause` and `resume` require the subscriber.
 //! - `charge_catchup` requires the provider and the subscriber for token transfer.
 
-use crate::{SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus};
+use crate::{
+    MetricQuota, SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus,
+};
 use soroban_sdk::testutils::{
     Address as _, AuthorizedFunction, AuthorizedInvocation, Ledger as _, MockAuth, MockAuthInvoke,
 };
@@ -765,6 +767,65 @@ fn blank_envelope_aborts_charge_catchup_without_changing_state_or_balances() {
     assert_eq!(client.get_subscription(&id), before);
     assert_eq!(token_client.balance(subscriber), subscriber_balance);
     assert_eq!(token_client.balance(provider), provider_balance);
+}
+
+#[test]
+fn set_quotas_rejects_provider_signature_and_preserves_subscription() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let id = client.subscribe(&accounts.user1, &accounts.user2, &token, &AMOUNT, &PERIOD);
+    let quotas = soroban_sdk::vec![
+        &env,
+        MetricQuota {
+            metric: Symbol::new(&env, "api_calls"),
+            included_units: 10,
+            overage_price: 2,
+            bucket_units: 5,
+            max_overage_units: None,
+        },
+    ];
+    let before = client.get_subscription(&id);
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user2,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_quotas",
+            args: (id, quotas.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_set_quotas(&id, &quotas));
+    assert_eq!(client.get_subscription(&id), before);
+}
+
+#[test]
+fn record_usage_rejects_subscriber_signature_and_preserves_meter() {
+    let (env, token, contract_id, client, accounts) = setup!();
+    let id = client.subscribe(&accounts.user1, &accounts.user2, &token, &AMOUNT, &PERIOD);
+    let quotas = soroban_sdk::vec![
+        &env,
+        MetricQuota {
+            metric: Symbol::new(&env, "api_calls"),
+            included_units: 10,
+            overage_price: 2,
+            bucket_units: 5,
+            max_overage_units: None,
+        },
+    ];
+    client.set_quotas(&id, &quotas);
+    let metric = Symbol::new(&env, "api_calls");
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "record_usage",
+            args: (id, metric.clone(), 3_u64).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_record_usage(&id, &metric, &3));
+    assert_eq!(client.get_usage(&id, &metric).units, 0);
 }
 
 #[test]
