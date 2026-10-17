@@ -1,0 +1,41 @@
+{
+  "schema": "soroban-forge/transaction-plan@1",
+  "network": "testnet",
+  "network_passphrase": "Test SDF Network ; September 2015",
+  "contract": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+  "contract_type": "escrow",
+  "method": "create_escrow",
+  "source": "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7",
+  "args": [
+    {
+      "name": "depositor",
+      "type": "address",
+      "value": "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7"
+    },
+    {
+      "name": "beneficiary",
+      "type": "address",
+      "value": "GBDEVU63Y6NTHJQQZIKVTC23NWLQVP3WJ2RI2OTSJTNYOIGICST6DUXR"
+    },
+    {
+      "name": "arbiter",
+      "type": "address",
+      "value": "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7"
+    },
+    {
+      "name": "token",
+      "type": "address",
+      "value": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+    },
+    {
+      "name": "amount",
+      "type": "i128",
+      "value": "500000"
+    },
+    {
+      "name": "timeout_duration",
+      "type": "u64",
+      "value": 86400
+    }
+  ]
+}

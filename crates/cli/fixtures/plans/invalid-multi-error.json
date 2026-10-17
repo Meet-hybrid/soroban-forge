@@ -1,0 +1,19 @@
+{
+  "schema": "soroban-forge/transaction-plan@1",
+  "network": "testnet",
+  "contract": "INVALID_CONTRACT_STRKEY",
+  "contract_type": "escrow",
+  "method": "unknown_escrow_method",
+  "args": [
+    {
+      "name": "amount",
+      "type": "i128",
+      "value": "not-an-integer"
+    },
+    {
+      "name": "depositor",
+      "type": "address",
+      "value": "not-a-valid-address"
+    }
+  ]
+}
