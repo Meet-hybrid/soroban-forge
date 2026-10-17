@@ -493,3 +493,465 @@ fn p3_against_majority_is_defeated() {
         "1 for / 2 against must produce Defeated"
     );
 }
+
+// -----------------------------------------------------------------------
+// P5 — Proposal expiry, quorum boundary, retryable dispatch, and terminal
+// state invariants (#438)
+// -----------------------------------------------------------------------
+
+struct BoundaryEnv {
+    env: Env,
+    token: Address,
+    contract_id: Address,
+    accounts: TestAccounts,
+    target: Address,
+}
+
+fn setup_boundary_env() -> BoundaryEnv {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(START);
+
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin);
+    let token = sac.address();
+    let token_admin = StellarAssetClient::new(&env, &token);
+
+    let contract_id = env.register(DaoGovernance, ());
+    let client = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
+
+    let accounts = TestAccounts::generate(&env);
+    client.configure_bond(&token, &BOND, &accounts.deployer);
+    client.initialize(&token);
+    token_admin.mint(&accounts.user1, &FUNDS);
+
+    let target = env.register(MockTarget, ());
+
+    BoundaryEnv {
+        env,
+        token,
+        contract_id,
+        accounts,
+        target,
+    }
+}
+
+impl BoundaryEnv {
+    fn client(&self) -> SorobanForgeDaoGovernanceClient<'_> {
+        SorobanForgeDaoGovernanceClient::new(&self.env, &self.contract_id)
+    }
+
+    fn token_client(&self) -> soroban_sdk::token::Client<'_> {
+        soroban_sdk::token::Client::new(&self.env, &self.token)
+    }
+
+    fn token_admin(&self) -> StellarAssetClient<'_> {
+        StellarAssetClient::new(&self.env, &self.token)
+    }
+
+    fn target_client(&self) -> soroban_forge_test_utils::MockTargetClient<'_> {
+        soroban_forge_test_utils::MockTargetClient::new(&self.env, &self.target)
+    }
+
+    fn payload(&self) -> Bytes {
+        Bytes::from_array(&self.env, &[0xCA, 0xFE, 0xBA, 0xBE])
+    }
+
+    fn propose(&self) -> u64 {
+        self.client().propose(
+            &self.accounts.user1,
+            &self.target,
+            &self.payload(),
+            &DURATION,
+            &soroban_sdk::Vec::new(&self.env),
+            &None,
+        )
+    }
+}
+
+#[test]
+fn quorum_threshold_below_at_and_above_boundary_invariants() {
+    let against_weight = 500_i128;
+
+    // 1. Below required threshold (`for_votes == against_votes - 1`) -> Defeated.
+    {
+        let b = setup_boundary_env();
+        let id = b.propose();
+        let for_voter = Address::generate(&b.env);
+        let against_voter = Address::generate(&b.env);
+        b.token_admin().mint(&for_voter, &(against_weight - 1));
+        b.token_admin().mint(&against_voter, &against_weight);
+
+        b.client().vote(&id, &for_voter, &true);
+        b.client().vote(&id, &against_voter, &false);
+
+        b.env.ledger().set_timestamp(START + DURATION);
+        b.client().execute(&id);
+
+        let proposal = b.client().get_proposal(&id);
+        assert_eq!(proposal.for_votes, against_weight - 1);
+        assert_eq!(proposal.against_votes, against_weight);
+        assert_eq!(proposal.state, ProposalState::Defeated);
+        assert_eq!(proposal.bond_state, crate::BondState::Forfeited);
+        assert_eq!(b.target_client().count(), 0);
+        assert_eq!(b.token_client().balance(&b.accounts.deployer), BOND);
+    }
+
+    // 2. Exactly at threshold / tie (`for_votes == against_votes`) -> Defeated.
+    {
+        let b = setup_boundary_env();
+        let id = b.propose();
+        let for_voter = Address::generate(&b.env);
+        let against_voter = Address::generate(&b.env);
+        b.token_admin().mint(&for_voter, &against_weight);
+        b.token_admin().mint(&against_voter, &against_weight);
+
+        b.client().vote(&id, &for_voter, &true);
+        b.client().vote(&id, &against_voter, &false);
+
+        b.env.ledger().set_timestamp(START + DURATION);
+        b.client().execute(&id);
+
+        let proposal = b.client().get_proposal(&id);
+        assert_eq!(proposal.for_votes, against_weight);
+        assert_eq!(proposal.against_votes, against_weight);
+        assert_eq!(proposal.state, ProposalState::Defeated);
+        assert_eq!(proposal.bond_state, crate::BondState::Forfeited);
+        assert_eq!(b.target_client().count(), 0);
+        assert_eq!(b.token_client().balance(&b.accounts.deployer), BOND);
+    }
+
+    // 3. Strictly above threshold (`for_votes == against_votes + 1`) -> Succeeded -> Executed.
+    {
+        let b = setup_boundary_env();
+        let id = b.propose();
+        let for_voter = Address::generate(&b.env);
+        let against_voter = Address::generate(&b.env);
+        b.token_admin().mint(&for_voter, &(against_weight + 1));
+        b.token_admin().mint(&against_voter, &against_weight);
+
+        b.client().vote(&id, &for_voter, &true);
+        b.client().vote(&id, &against_voter, &false);
+
+        b.env.ledger().set_timestamp(START + DURATION);
+        b.client().execute(&id);
+
+        let succeeded = b.client().get_proposal(&id);
+        assert_eq!(succeeded.for_votes, against_weight + 1);
+        assert_eq!(succeeded.against_votes, against_weight);
+        assert_eq!(succeeded.state, ProposalState::Succeeded);
+        assert_eq!(succeeded.bond_state, crate::BondState::Posted);
+        assert_eq!(b.target_client().count(), 0);
+
+        b.client().execute(&id);
+        let executed = b.client().get_proposal(&id);
+        assert_eq!(executed.state, ProposalState::Executed);
+        assert_eq!(executed.bond_state, crate::BondState::Refunded);
+        assert_eq!(b.target_client().count(), 1);
+        assert_eq!(b.token_client().balance(&b.accounts.user1), FUNDS);
+    }
+}
+
+#[test]
+fn voting_window_immediately_before_at_and_after_deadline_invariants() {
+    let b = setup_boundary_env();
+    let id = b.propose();
+    let voting_ends = b.client().get_proposal(&id).voting_ends;
+    assert_eq!(voting_ends, START + DURATION);
+
+    let voter_before = Address::generate(&b.env);
+    let voter_at = Address::generate(&b.env);
+    let voter_after = Address::generate(&b.env);
+    b.token_admin().mint(&voter_before, &300);
+    b.token_admin().mint(&voter_at, &400);
+    b.token_admin().mint(&voter_after, &500);
+
+    // 1. Immediately before deadline (`voting_ends - 1`): vote is accepted, execute is rejected.
+    b.env.ledger().set_timestamp(voting_ends - 1);
+    b.client().vote(&id, &voter_before, &true);
+    let snapshot_before = b.client().get_proposal(&id);
+    assert_eq!(snapshot_before.for_votes, 300);
+    assert_eq!(snapshot_before.state, ProposalState::Active);
+    assert!(b.client().has_voted(&id, &voter_before));
+
+    let early_exec_err = b.client().try_execute(&id).unwrap_err().unwrap();
+    assert_eq!(early_exec_err, ForgeError::InvalidInput);
+    assert_eq!(b.client().get_proposal(&id), snapshot_before);
+
+    // 2. Exactly at deadline (`voting_ends`): vote is rejected with DeadlineReached and state is unchanged.
+    b.env.ledger().set_timestamp(voting_ends);
+    let at_err = b
+        .client()
+        .try_vote(&id, &voter_at, &true)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(at_err, ForgeError::DeadlineReached);
+    assert_eq!(b.client().get_proposal(&id), snapshot_before);
+    assert!(!b.client().has_voted(&id, &voter_at));
+
+    // 3. Immediately after deadline (`voting_ends + 1`): vote is rejected with DeadlineReached and state is unchanged.
+    b.env.ledger().set_timestamp(voting_ends + 1);
+    let after_err = b
+        .client()
+        .try_vote(&id, &voter_after, &false)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(after_err, ForgeError::DeadlineReached);
+    assert_eq!(b.client().get_proposal(&id), snapshot_before);
+    assert!(!b.client().has_voted(&id, &voter_after));
+
+    // Finalizing after the deadline succeeds using only the pre-deadline vote.
+    b.client().execute(&id);
+    assert_eq!(b.client().get_proposal(&id).state, ProposalState::Succeeded);
+}
+
+#[test]
+fn expired_and_rejected_proposals_never_execute_target_or_reexecute() {
+    // Case A: Expired with zero votes.
+    let b = setup_boundary_env();
+    let expired_id = b.propose();
+    b.env.ledger().set_timestamp(START + DURATION);
+    b.client().execute(&expired_id);
+
+    let defeated_expired = b.client().get_proposal(&expired_id);
+    assert_eq!(defeated_expired.state, ProposalState::Defeated);
+    assert_eq!(defeated_expired.bond_state, crate::BondState::Forfeited);
+    assert_eq!(b.target_client().count(), 0);
+
+    // Re-executing an expired/defeated proposal is rejected and leaves state unchanged.
+    let reexec_expired = b.client().try_execute(&expired_id).unwrap_err().unwrap();
+    assert_eq!(reexec_expired, ForgeError::InvalidInput);
+    assert_eq!(b.client().get_proposal(&expired_id), defeated_expired);
+    assert_eq!(b.target_client().count(), 0);
+
+    // Case B: Rejected by majority against votes.
+    let rejected_id = b.propose();
+    let voter_for = Address::generate(&b.env);
+    let voter_against = Address::generate(&b.env);
+    b.token_admin().mint(&voter_for, &200);
+    b.token_admin().mint(&voter_against, &600);
+    b.client().vote(&rejected_id, &voter_for, &true);
+    b.client().vote(&rejected_id, &voter_against, &false);
+
+    b.env.ledger().set_timestamp(START + DURATION * 2);
+    b.client().execute(&rejected_id);
+
+    let defeated_rejected = b.client().get_proposal(&rejected_id);
+    assert_eq!(defeated_rejected.state, ProposalState::Defeated);
+    assert_eq!(defeated_rejected.bond_state, crate::BondState::Forfeited);
+    assert_eq!(b.target_client().count(), 0);
+
+    let reexec_rejected = b.client().try_execute(&rejected_id).unwrap_err().unwrap();
+    assert_eq!(reexec_rejected, ForgeError::InvalidInput);
+    assert_eq!(b.client().get_proposal(&rejected_id), defeated_rejected);
+    assert_eq!(b.target_client().count(), 0);
+}
+
+#[test]
+fn retryable_dispatch_failures_preserve_succeeded_state_and_allow_retry() {
+    let b = setup_boundary_env();
+    let id = b.propose();
+    let voter = Address::generate(&b.env);
+    b.token_admin().mint(&voter, &500);
+    b.client().vote(&id, &voter, &true);
+
+    b.env.ledger().set_timestamp(START + DURATION + 1);
+    b.client().execute(&id);
+
+    let succeeded_snapshot = b.client().get_proposal(&id);
+    assert_eq!(succeeded_snapshot.state, ProposalState::Succeeded);
+    assert_eq!(succeeded_snapshot.bond_state, crate::BondState::Posted);
+
+    // Force target revert and verify repeated dispatch attempts fail closed without state drift.
+    b.target_client().set_revert(&true);
+    for _ in 0..2 {
+        let err = b.client().try_execute(&id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::ContractInvocationFailed);
+        assert_eq!(b.client().get_proposal(&id), succeeded_snapshot);
+        assert_eq!(b.target_client().count(), 0);
+        assert_eq!(b.target_client().last_payload(), None);
+        assert_eq!(b.client().get_active_proposal_count(&b.accounts.user1), 1);
+        assert_eq!(b.token_client().balance(&b.contract_id), BOND);
+        assert_eq!(b.token_client().balance(&b.accounts.user1), FUNDS - BOND);
+    }
+
+    // Clear target revert and verify retry succeeds cleanly.
+    b.target_client().set_revert(&false);
+    b.client().execute(&id);
+
+    let executed = b.client().get_proposal(&id);
+    assert_eq!(executed.state, ProposalState::Executed);
+    assert_eq!(executed.bond_state, crate::BondState::Refunded);
+    assert_eq!(b.target_client().count(), 1);
+    assert_eq!(b.target_client().last_payload(), Some(b.payload()));
+    assert_eq!(b.client().get_active_proposal_count(&b.accounts.user1), 0);
+    assert_eq!(b.token_client().balance(&b.contract_id), 0);
+    assert_eq!(b.token_client().balance(&b.accounts.user1), FUNDS);
+}
+
+#[test]
+fn terminal_proposal_states_reject_reexecution_and_mutations_without_state_drift() {
+    let b = setup_boundary_env();
+    let voter = Address::generate(&b.env);
+    let late_voter = Address::generate(&b.env);
+    b.token_admin().mint(&voter, &500);
+    b.token_admin().mint(&late_voter, &500);
+
+    // 1. Cancelled (terminal)
+    let cancelled_id = b.propose();
+    b.client().cancel_proposal(&cancelled_id, &b.accounts.user1);
+    let cancelled_snapshot = b.client().get_proposal(&cancelled_id);
+    assert_eq!(cancelled_snapshot.state, ProposalState::Cancelled);
+
+    // 2. Defeated (terminal)
+    let defeated_id = b.propose();
+    b.client().vote(&defeated_id, &voter, &false);
+
+    // 3. Executed (terminal)
+    let executed_id = b.propose();
+    b.client().vote(&executed_id, &voter, &true);
+
+    b.env.ledger().set_timestamp(START + DURATION + 1);
+    b.client().execute(&defeated_id);
+    b.client().execute(&executed_id); // Active -> Succeeded
+    b.client().execute(&executed_id); // Succeeded -> Executed
+
+    let defeated_snapshot = b.client().get_proposal(&defeated_id);
+    let executed_snapshot = b.client().get_proposal(&executed_id);
+    assert_eq!(defeated_snapshot.state, ProposalState::Defeated);
+    assert_eq!(executed_snapshot.state, ProposalState::Executed);
+
+    let target_count_before = b.target_client().count();
+    let proposer_bal_before = b.token_client().balance(&b.accounts.user1);
+    let treasury_bal_before = b.token_client().balance(&b.accounts.deployer);
+    let custody_bal_before = b.token_client().balance(&b.contract_id);
+
+    for (id, snapshot) in [
+        (cancelled_id, &cancelled_snapshot),
+        (defeated_id, &defeated_snapshot),
+        (executed_id, &executed_snapshot),
+    ] {
+        assert_eq!(
+            b.client().try_execute(&id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(
+            b.client()
+                .try_vote(&id, &late_voter, &true)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(
+            b.client()
+                .try_cancel_proposal(&id, &b.accounts.user1)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(&b.client().get_proposal(&id), snapshot);
+        assert!(!b.client().has_voted(&id, &late_voter));
+    }
+
+    assert_eq!(b.target_client().count(), target_count_before);
+    assert_eq!(
+        b.token_client().balance(&b.accounts.user1),
+        proposer_bal_before
+    );
+    assert_eq!(
+        b.token_client().balance(&b.accounts.deployer),
+        treasury_bal_before
+    );
+    assert_eq!(b.token_client().balance(&b.contract_id), custody_bal_before);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn p5_quorum_expiry_and_retryable_execution_boundary_invariants(
+        for_weight in 0i128..=2_000_i128,
+        against_weight in 0i128..=2_000_i128,
+        revert_attempts in 0u8..=3u8,
+    ) {
+        let b = setup_boundary_env();
+        let id = b.propose();
+        let voting_ends = START + DURATION;
+
+        if for_weight > 0 {
+            let v_for = Address::generate(&b.env);
+            b.token_admin().mint(&v_for, &for_weight);
+            b.env.ledger().set_timestamp(voting_ends - 1);
+            b.client().vote(&id, &v_for, &true);
+        }
+        if against_weight > 0 {
+            let v_against = Address::generate(&b.env);
+            b.token_admin().mint(&v_against, &against_weight);
+            b.env.ledger().set_timestamp(voting_ends - 1);
+            b.client().vote(&id, &v_against, &false);
+        }
+
+        // Pre-deadline execute at `voting_ends - 1` must fail without mutating proposal state.
+        b.env.ledger().set_timestamp(voting_ends - 1);
+        let pre_deadline = b.client().get_proposal(&id);
+        prop_assert_eq!(
+            b.client().try_execute(&id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+        prop_assert_eq!(b.client().get_proposal(&id), pre_deadline.clone());
+
+        // Voting at exact `voting_ends` must fail with DeadlineReached and preserve tallies.
+        b.env.ledger().set_timestamp(voting_ends);
+        let late_voter = Address::generate(&b.env);
+        b.token_admin().mint(&late_voter, &100);
+        prop_assert_eq!(
+            b.client().try_vote(&id, &late_voter, &true).unwrap_err().unwrap(),
+            ForgeError::DeadlineReached
+        );
+        prop_assert_eq!(b.client().get_proposal(&id), pre_deadline);
+
+        // Finalize at exact `voting_ends`.
+        b.client().execute(&id);
+        let finalized = b.client().get_proposal(&id);
+
+        if for_weight > against_weight {
+            prop_assert_eq!(finalized.state.clone(), ProposalState::Succeeded);
+            prop_assert_eq!(finalized.bond_state.clone(), crate::BondState::Posted);
+
+            b.target_client().set_revert(&true);
+            for _ in 0..revert_attempts {
+                prop_assert_eq!(
+                    b.client().try_execute(&id).unwrap_err().unwrap(),
+                    ForgeError::ContractInvocationFailed
+                );
+                prop_assert_eq!(b.client().get_proposal(&id), finalized.clone());
+                prop_assert_eq!(b.target_client().count(), 0);
+            }
+
+            b.target_client().set_revert(&false);
+            b.client().execute(&id);
+            let executed = b.client().get_proposal(&id);
+            prop_assert_eq!(executed.state.clone(), ProposalState::Executed);
+            prop_assert_eq!(executed.bond_state.clone(), crate::BondState::Refunded);
+            prop_assert_eq!(b.target_client().count(), 1);
+
+            // Terminal Executed state rejects re-execution and mutation.
+            prop_assert_eq!(
+                b.client().try_execute(&id).unwrap_err().unwrap(),
+                ForgeError::InvalidInput
+            );
+            prop_assert_eq!(b.client().get_proposal(&id), executed);
+        } else {
+            prop_assert_eq!(finalized.state.clone(), ProposalState::Defeated);
+            prop_assert_eq!(finalized.bond_state.clone(), crate::BondState::Forfeited);
+            prop_assert_eq!(b.target_client().count(), 0);
+
+            // Terminal Defeated state rejects re-execution and mutation.
+            prop_assert_eq!(
+                b.client().try_execute(&id).unwrap_err().unwrap(),
+                ForgeError::InvalidInput
+            );
+            prop_assert_eq!(b.client().get_proposal(&id), finalized);
+        }
+    }
+}
