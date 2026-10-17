@@ -20,8 +20,16 @@ fn claim_for(schedule_id, beneficiary) -> Result<i128, ForgeError>
 fn claimable(schedule_id) -> Result<i128, ForgeError>
 fn claimable_for(schedule_id, beneficiary) -> Result<i128, ForgeError>
 fn get_status(schedule_id) -> Result<VestingStatus, ForgeError>
+fn get_schedule_summary(schedule_id) -> Result<ScheduleStatusSummary, ForgeError>
+fn get_schedule_summary_for(schedule_id, beneficiary) -> Result<ScheduleStatusSummary, ForgeError>
 fn touch_ttl(schedule_id) -> Result<(), ForgeError>
 ```
+
+`ScheduleStatusSummary { status, total_amount, unlocked_amount, claimed_amount, claimable_amount }`
+reports a read-only progress snapshot at the current ledger time without mutating
+schedule, claim, token, or TTL state. It reuses the exact production unlock,
+floor-division residue, tranche step-function, revocation freeze, and
+reassignment accrual calculations used by `claim` and `claim_for`.
 
 `Tranche { unlock_at: u64, amount: i128 }` is one entry of the unlock table:
 `unlock_at` is an **offset in seconds from the schedule start** (the ledger

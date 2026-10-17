@@ -325,6 +325,65 @@ pub trait SorobanForgeVesting {
         env: Env,
         schedule_id: u64,
     ) -> Result<VestingStatus, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read a combined status and claimable-amount summary for `schedule_id` at
+    /// the current ledger time without mutating state or transferring tokens.
+    ///
+    /// Reports the current lifecycle status, total schedule allocation,
+    /// unlocked/vested amount at the current ledger time, total claimed amount,
+    /// and the current beneficiary's claimable amount. Uses the exact same
+    /// floor-division, tranche step-function, revocation freeze, and
+    /// reassignment residue rules as [`claim`](Self::claim) and
+    /// [`claimable`](Self::claimable).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no linear or tranche schedule with this id.
+    /// * [`ForgeError::ArithmeticOverflow`] — unlock arithmetic overflowed.
+    fn get_schedule_summary(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<ScheduleStatusSummary, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read a combined status and claimable-amount summary for an explicit
+    /// `beneficiary` on `schedule_id` at the current ledger time without
+    /// mutating state or transferring tokens.
+    ///
+    /// Mirrors [`get_schedule_summary`](Self::get_schedule_summary), except
+    /// `claimable_amount` reflects the named beneficiary's claimable balance
+    /// (matching [`claim_for`](Self::claim_for) and
+    /// [`claimable_for`](Self::claimable_for), including frozen balances owed
+    /// to former beneficiaries after reassignment).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no linear or tranche schedule with this id.
+    /// * [`ForgeError::ArithmeticOverflow`] — unlock arithmetic overflowed.
+    fn get_schedule_summary_for(
+        env: Env,
+        schedule_id: u64,
+        beneficiary: Address,
+    ) -> Result<ScheduleStatusSummary, soroban_forge_shared_utils::ForgeError>;
+}
+
+/// Read-only snapshot of a vesting schedule's lifecycle status and unlock/claim
+/// accounting at the current ledger time.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleStatusSummary {
+    /// Current lifecycle status (`Locked`, `Vesting`, `Completed`, or `Revoked`).
+    pub status: VestingStatus,
+    /// Total token allocation of the schedule.
+    pub total_amount: i128,
+    /// Amount unlocked/vested at the current ledger timestamp (capped at
+    /// `revoked_vested` when the schedule has been revoked).
+    pub unlocked_amount: i128,
+    /// Cumulative amount already claimed from the schedule.
+    pub claimed_amount: i128,
+    /// Amount currently claimable by the queried beneficiary at this ledger
+    /// timestamp using the exact same floor-division and residue rules as
+    /// `claim` / `claim_for`.
+    pub claimable_amount: i128,
 }
 
 /// Lifecycle state of a vesting schedule.
@@ -758,6 +817,48 @@ impl Vesting {
         }
     }
 
+    /// Read a combined status and claimable-amount summary for `schedule_id` at
+    /// the current ledger time (read-only view; no state change or token transfer).
+    ///
+    /// Reuses the production unlock, floor-division, tranche step-function,
+    /// revocation freeze, and reassignment accrual calculations so query output
+    /// can never diverge from `get_status`, `claimable`, or `claim`.
+    pub fn get_schedule_summary(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<ScheduleStatusSummary, ForgeError> {
+        let now = env.ledger().timestamp();
+        match Self::load(&env, schedule_id)? {
+            Stored::Linear(schedule) => {
+                Self::linear_summary_for(&env, schedule_id, &schedule, &schedule.beneficiary, now)
+            }
+            Stored::Tranche(schedule) => {
+                Self::tranche_summary_for(&schedule, &schedule.beneficiary, now)
+            }
+        }
+    }
+
+    /// Read a combined status and claimable-amount summary for an explicit
+    /// `beneficiary` on `schedule_id` at the current ledger time (read-only
+    /// view; no state change or token transfer).
+    ///
+    /// Reuses the production unlock and beneficiary claimable calculations so
+    /// `claimable_amount` matches `claimable_for` and `claim_for` across
+    /// active, reassigned, former-beneficiary, revoked, and completed states.
+    pub fn get_schedule_summary_for(
+        env: Env,
+        schedule_id: u64,
+        beneficiary: Address,
+    ) -> Result<ScheduleStatusSummary, ForgeError> {
+        let now = env.ledger().timestamp();
+        match Self::load(&env, schedule_id)? {
+            Stored::Linear(schedule) => {
+                Self::linear_summary_for(&env, schedule_id, &schedule, &beneficiary, now)
+            }
+            Stored::Tranche(schedule) => Self::tranche_summary_for(&schedule, &beneficiary, now),
+        }
+    }
+
     /// Load a schedule of either kind by id.
     ///
     /// The two kinds occupy distinct [`DataKey`] variants under one id
@@ -1064,6 +1165,53 @@ impl Vesting {
         unlocked
             .checked_sub(schedule.claimed)
             .ok_or(ForgeError::ArithmeticOverflow)
+    }
+
+    /// Build a read-only [`ScheduleStatusSummary`] for a linear schedule and
+    /// explicit beneficiary by reusing [`Self::current_status`],
+    /// [`Self::vested_amount`], and [`Self::linear_claimable_for`].
+    fn linear_summary_for(
+        env: &Env,
+        schedule_id: u64,
+        schedule: &VestingSchedule,
+        beneficiary: &Address,
+        now: u64,
+    ) -> Result<ScheduleStatusSummary, ForgeError> {
+        let status = Self::current_status(schedule, now)?;
+        let unlocked_amount = Self::vested_amount(schedule, now)?;
+        let claimable_amount =
+            Self::linear_claimable_for(env, schedule_id, schedule, beneficiary, now)?;
+        Ok(ScheduleStatusSummary {
+            status,
+            total_amount: schedule.total_amount,
+            unlocked_amount,
+            claimed_amount: schedule.claimed,
+            claimable_amount,
+        })
+    }
+
+    /// Build a read-only [`ScheduleStatusSummary`] for a tranche schedule and
+    /// explicit beneficiary by reusing [`Self::tranche_status`],
+    /// [`Self::tranche_unlocked`], and [`Self::tranche_claimable`].
+    fn tranche_summary_for(
+        schedule: &TrancheSchedule,
+        beneficiary: &Address,
+        now: u64,
+    ) -> Result<ScheduleStatusSummary, ForgeError> {
+        let status = Self::tranche_status(schedule, now)?;
+        let unlocked_amount = Self::tranche_unlocked(schedule, now)?;
+        let claimable_amount = if beneficiary == &schedule.beneficiary {
+            Self::tranche_claimable(schedule, now)?
+        } else {
+            0
+        };
+        Ok(ScheduleStatusSummary {
+            status,
+            total_amount: schedule.total_amount,
+            unlocked_amount,
+            claimed_amount: schedule.claimed,
+            claimable_amount,
+        })
     }
 }
 
