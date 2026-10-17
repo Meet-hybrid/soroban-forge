@@ -2642,6 +2642,145 @@ mod tests {
         assert_eq!(receipt_after_transfer.weight, FUNDS);
     }
 
+    #[test]
+    fn test_voting_tally_conservation_and_duplicate_vote_rejection() {
+        let (env, token, _tc, _contract_id, client, accounts) = bonded_env!();
+        let target_id = env.register(MockTarget, ());
+
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+
+        let initial_proposal = client.get_proposal(&proposal_id);
+        assert_eq!(initial_proposal.for_votes, 0);
+        assert_eq!(initial_proposal.against_votes, 0);
+
+        // Track accepted votes and expected tally
+        let mut expected_for_tally: i128 = 0;
+        let mut expected_against_tally: i128 = 0;
+
+        // User2 votes YES
+        let u2_weight = FUNDS; // 10,000
+        client.vote(&proposal_id, &accounts.user2, &true);
+        expected_for_tally += u2_weight;
+
+        let p_after_u2 = client.get_proposal(&proposal_id);
+        assert_eq!(p_after_u2.for_votes, expected_for_tally);
+        assert_eq!(p_after_u2.against_votes, expected_against_tally);
+        assert_eq!(
+            p_after_u2.for_votes + p_after_u2.against_votes,
+            expected_for_tally + expected_against_tally
+        );
+
+        // Repeated submission by User2 must be rejected with InvalidInput
+        let dup_vote_err = client
+            .try_vote(&proposal_id, &accounts.user2, &true)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(dup_vote_err, ForgeError::InvalidInput);
+
+        // Also switching direction in duplicate vote must be rejected
+        let dup_vote_switch_err = client
+            .try_vote(&proposal_id, &accounts.user2, &false)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(dup_vote_switch_err, ForgeError::InvalidInput);
+
+        // Verify tally conservation: duplicate attempts must not alter tallies or receipt
+        let p_after_dup = client.get_proposal(&proposal_id);
+        assert_eq!(p_after_dup.for_votes, expected_for_tally);
+        assert_eq!(p_after_dup.against_votes, expected_against_tally);
+
+        let u2_receipt = client
+            .get_vote_receipt(&proposal_id, &accounts.user2)
+            .expect("receipt exists");
+        assert_eq!(u2_receipt.weight, u2_weight);
+        assert!(u2_receipt.support);
+
+        // User3 votes NO
+        let u3_weight = FUNDS;
+        client.vote(&proposal_id, &accounts.user3, &false);
+        expected_against_tally += u3_weight;
+
+        // Validator votes YES
+        let val_weight = FUNDS;
+        client.vote(&proposal_id, &accounts.validator, &true);
+        expected_for_tally += val_weight;
+
+        // Assert aggregate totals strictly equal the sum of accepted vote records
+        let final_proposal = client.get_proposal(&proposal_id);
+        assert_eq!(final_proposal.for_votes, expected_for_tally);
+        assert_eq!(final_proposal.against_votes, expected_against_tally);
+        assert_eq!(
+            final_proposal.for_votes + final_proposal.against_votes,
+            expected_for_tally + expected_against_tally
+        );
+
+        // Duplicate attempt from User3 leaves tally and receipts completely conserved
+        assert_eq!(
+            client
+                .try_vote(&proposal_id, &accounts.user3, &false)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        let p_after_u3_dup = client.get_proposal(&proposal_id);
+        assert_eq!(p_after_u3_dup.for_votes, expected_for_tally);
+        assert_eq!(p_after_u3_dup.against_votes, expected_against_tally);
+
+        // Zero balance voter cannot vote and does not alter tally
+        let zero_balance_voter = Address::generate(&env);
+        assert_eq!(
+            client
+                .try_vote(&proposal_id, &zero_balance_voter, &true)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        let p_after_zero = client.get_proposal(&proposal_id);
+        assert_eq!(p_after_zero.for_votes, expected_for_tally);
+        assert_eq!(p_after_zero.against_votes, expected_against_tally);
+        assert_eq!(
+            client.get_vote_receipt(&proposal_id, &zero_balance_voter),
+            None
+        );
+
+        // Boundary test: at exactly voting_ends, vote is rejected with DeadlineReached
+        let fresh_voter = Address::generate(&env);
+        let tc = TokenClient::new(&env, &token);
+        tc.transfer(&accounts.user1, &fresh_voter, &500);
+
+        env.ledger().set_timestamp(final_proposal.voting_ends);
+        assert_eq!(
+            client
+                .try_vote(&proposal_id, &fresh_voter, &true)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::DeadlineReached
+        );
+
+        // Past voting_ends also rejected
+        env.ledger().set_timestamp(final_proposal.voting_ends + 10);
+        assert_eq!(
+            client
+                .try_vote(&proposal_id, &fresh_voter, &true)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::DeadlineReached
+        );
+
+        // Proposal tally and state remain conserved after deadline rejection
+        let p_after_deadline = client.get_proposal(&proposal_id);
+        assert_eq!(p_after_deadline.for_votes, expected_for_tally);
+        assert_eq!(p_after_deadline.against_votes, expected_against_tally);
+        assert_eq!(client.get_vote_receipt(&proposal_id, &fresh_voter), None);
+    }
+
     // -------------------------------------------------------------------
     // Proposal bonds — configuration (Issue 142)
     // -------------------------------------------------------------------
