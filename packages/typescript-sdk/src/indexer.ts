@@ -65,6 +65,7 @@ function scValToJson(value: unknown): unknown {
   }
 
   const scValType = xdr.ScValType;
+  const scValType = xdr.ScValType as unknown as Record<string, unknown> | undefined;
   const maybe = value as { switch?: () => unknown; value?: () => unknown };
   if (typeof maybe.switch === "function") {
     const kind = maybe.switch();
