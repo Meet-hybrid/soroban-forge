@@ -600,6 +600,83 @@ pub trait SorobanForgeEscrow {
     ///
     /// The view is read-only and does not extend either persistent entry.
     fn ttl_info(env: Env, escrow_id: u64) -> Result<u32, ForgeError>;
+
+    /// Perform a read-only token balance and allowance preflight for a
+    /// prospective deposit of `amount` of `token` from `buyer` into this
+    /// escrow contract.
+    ///
+    /// Reports whether the buyer's token balance and allowance granted to this
+    /// contract cover `amount`, and distinguishes `Sufficient`,
+    /// `InsufficientBalance`, `InsufficientAllowance`, `Unavailable`, and
+    /// `InvalidInput` states without mutating escrow, token, allowance, or TTL
+    /// state.
+    fn preflight_token_balance(
+        env: Env,
+        buyer: Address,
+        token: Address,
+        amount: i128,
+    ) -> TokenBalancePreflight;
+
+    /// Perform a read-only token balance and allowance preflight for an
+    /// existing single-token escrow record's deposit parameters.
+    ///
+    /// Uses the stored `buyer`, `token`, and `amount` on the escrow record. If
+    /// the escrow is no longer `Pending`, the returned summary reports
+    /// [`TokenPreflightState::InvalidInput`] while still exposing the buyer's
+    /// live balance and allowance when available.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no single-token escrow with this id.
+    fn preflight_deposit(env: Env, escrow_id: u64) -> Result<TokenBalancePreflight, ForgeError>;
+}
+
+/// Classification of a read-only token balance or allowance preflight check.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenPreflightState {
+    /// The checked balance/allowance (or overall deposit check) meets the required amount.
+    Sufficient,
+    /// The buyer's token balance is below the required deposit amount.
+    InsufficientBalance,
+    /// The allowance granted to this escrow contract is below the required deposit amount.
+    InsufficientAllowance,
+    /// The token contract could not be queried (undeployed or non-SEP-41 contract).
+    Unavailable,
+    /// The requested amount is non-positive or the target escrow is not `Pending`.
+    InvalidInput,
+}
+
+/// Read-only preflight report for a prospective escrow deposit.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenBalancePreflight {
+    /// Buyer address whose balance and allowance were inspected.
+    pub buyer: Address,
+    /// SEP-41 token contract address inspected.
+    pub token: Address,
+    /// Spender address checked for allowance (this escrow contract).
+    pub spender: Address,
+    /// Deposit amount required by the escrow.
+    pub required_amount: i128,
+    /// Current token balance held by `buyer` (`0` when unavailable or invalid).
+    pub available_balance: i128,
+    /// Shortfall between `required_amount` and `available_balance` (`0` when sufficient).
+    pub balance_shortfall: i128,
+    /// Current allowance granted by `buyer` to `spender` (`0` when unavailable or invalid).
+    pub available_allowance: i128,
+    /// Shortfall between `required_amount` and `available_allowance` (`0` when sufficient).
+    pub allowance_shortfall: i128,
+    /// Whether `available_balance >= required_amount` for a valid input and reachable token.
+    pub balance_sufficient: bool,
+    /// Whether `available_allowance >= required_amount` for a valid input and reachable token.
+    pub allowance_sufficient: bool,
+    /// Specific state of the balance check (`Sufficient`, `InsufficientBalance`, `Unavailable`, or `InvalidInput`).
+    pub balance_state: TokenPreflightState,
+    /// Specific state of the allowance check (`Sufficient`, `InsufficientAllowance`, `Unavailable`, or `InvalidInput`).
+    pub allowance_state: TokenPreflightState,
+    /// Overall preflight classification across input validation, token availability, balance, and allowance.
+    pub status: TokenPreflightState,
 }
 
 /// Lifecycle state of an escrow.
@@ -1581,9 +1658,136 @@ impl Escrow {
         Ok(expiry.saturating_sub(env.ledger().sequence()))
     }
 
+    /// Perform a read-only token balance and allowance preflight for a
+    /// prospective deposit of `amount` of `token` from `buyer` into this
+    /// escrow contract.
+    ///
+    /// Never mutates escrow records, token balances, allowances, or TTLs.
+    pub fn preflight_token_balance(
+        env: Env,
+        buyer: Address,
+        token: Address,
+        amount: i128,
+    ) -> TokenBalancePreflight {
+        Self::evaluate_token_preflight(&env, buyer, token, amount, true)
+    }
+
+    /// Perform a read-only token balance and allowance preflight for an
+    /// existing single-token escrow record's deposit parameters.
+    ///
+    /// Never mutates escrow records, token balances, allowances, or TTLs.
+    pub fn preflight_deposit(
+        env: Env,
+        escrow_id: u64,
+    ) -> Result<TokenBalancePreflight, ForgeError> {
+        let escrow = Self::load_escrow(&env, escrow_id)?;
+        let is_pending = escrow.status == EscrowStatus::Pending;
+        Ok(Self::evaluate_token_preflight(
+            &env,
+            escrow.buyer,
+            escrow.token,
+            escrow.amount,
+            is_pending,
+        ))
+    }
+
     // -------------------------------------------------------------------
     // Internals
     // -------------------------------------------------------------------
+
+    /// Shared read-only evaluator for token balance and allowance preflight.
+    fn evaluate_token_preflight(
+        env: &Env,
+        buyer: Address,
+        token: Address,
+        required_amount: i128,
+        escrow_state_valid: bool,
+    ) -> TokenBalancePreflight {
+        let spender = env.current_contract_address();
+        if required_amount <= 0 || !escrow_state_valid {
+            return TokenBalancePreflight {
+                buyer,
+                token,
+                spender,
+                required_amount,
+                available_balance: 0,
+                balance_shortfall: 0,
+                available_allowance: 0,
+                allowance_shortfall: 0,
+                balance_sufficient: false,
+                allowance_sufficient: false,
+                balance_state: TokenPreflightState::InvalidInput,
+                allowance_state: TokenPreflightState::InvalidInput,
+                status: TokenPreflightState::InvalidInput,
+            };
+        }
+
+        let client = token::TokenClient::new(env, &token);
+        let balance_read = match client.try_balance(&buyer) {
+            Ok(Ok(val)) if val >= 0 => Some(val),
+            _ => None,
+        };
+        let allowance_read = match client.try_allowance(&buyer, &spender) {
+            Ok(Ok(val)) if val >= 0 => Some(val),
+            _ => None,
+        };
+
+        let (available_balance, balance_shortfall, balance_sufficient, balance_state) =
+            match balance_read {
+                Some(bal) if bal >= required_amount => {
+                    (bal, 0, true, TokenPreflightState::Sufficient)
+                }
+                Some(bal) => (
+                    bal,
+                    required_amount.saturating_sub(bal),
+                    false,
+                    TokenPreflightState::InsufficientBalance,
+                ),
+                None => (0, 0, false, TokenPreflightState::Unavailable),
+            };
+
+        let (available_allowance, allowance_shortfall, allowance_sufficient, allowance_state) =
+            match allowance_read {
+                Some(allow) if allow >= required_amount => {
+                    (allow, 0, true, TokenPreflightState::Sufficient)
+                }
+                Some(allow) => (
+                    allow,
+                    required_amount.saturating_sub(allow),
+                    false,
+                    TokenPreflightState::InsufficientAllowance,
+                ),
+                None => (0, 0, false, TokenPreflightState::Unavailable),
+            };
+
+        let status = if balance_state == TokenPreflightState::Unavailable
+            || allowance_state == TokenPreflightState::Unavailable
+        {
+            TokenPreflightState::Unavailable
+        } else if !balance_sufficient {
+            TokenPreflightState::InsufficientBalance
+        } else if !allowance_sufficient {
+            TokenPreflightState::InsufficientAllowance
+        } else {
+            TokenPreflightState::Sufficient
+        };
+
+        TokenBalancePreflight {
+            buyer,
+            token,
+            spender,
+            required_amount,
+            available_balance,
+            balance_shortfall,
+            available_allowance,
+            allowance_shortfall,
+            balance_sufficient,
+            allowance_sufficient,
+            balance_state,
+            allowance_state,
+            status,
+        }
+    }
 
     /// Load an escrow record by id with backward-compatible schema migration.
     ///

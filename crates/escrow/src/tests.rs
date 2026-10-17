@@ -19,7 +19,10 @@
 //! signature testing needs `set_auths` fixtures and is tracked in the
 //! security-invariant backlog.
 
-use crate::{DataKey, Escrow, EscrowData, EscrowDataV1, EscrowStatus, SorobanForgeEscrowClient};
+use crate::{
+    DataKey, Escrow, EscrowData, EscrowDataV1, EscrowStatus, SorobanForgeEscrowClient,
+    TokenBalancePreflight, TokenPreflightState,
+};
 use soroban_forge_shared_utils::{xdr_round_trip, ForgeError};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
@@ -1225,4 +1228,145 @@ fn conservation_holds_on_every_terminal_path() {
             );
         }
     }
+}
+
+// -----------------------------------------------------------------------
+// Token-balance and allowance preflight validation
+// -----------------------------------------------------------------------
+
+#[test]
+fn preflight_reports_sufficient_insufficient_balance_and_insufficient_allowance() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+
+    // Buyer starts with AMOUNT (1_000) balance and 0 allowance.
+    let no_allowance: TokenBalancePreflight = client.preflight_deposit(&id);
+    assert_eq!(
+        no_allowance,
+        TokenBalancePreflight {
+            buyer: buyer.clone(),
+            token: token.clone(),
+            spender: contract_id.clone(),
+            required_amount: AMOUNT,
+            available_balance: AMOUNT,
+            balance_shortfall: 0,
+            available_allowance: 0,
+            allowance_shortfall: AMOUNT,
+            balance_sufficient: true,
+            allowance_sufficient: false,
+            balance_state: TokenPreflightState::Sufficient,
+            allowance_state: TokenPreflightState::InsufficientAllowance,
+            status: TokenPreflightState::InsufficientAllowance,
+        }
+    );
+
+    // Partial allowance is still reported as InsufficientAllowance with exact shortfall.
+    tc.approve(buyer, &contract_id, &400, &(env.ledger().sequence() + 100));
+    let partial_allowance = client.preflight_token_balance(buyer, &token, &AMOUNT);
+    assert_eq!(partial_allowance.available_allowance, 400);
+    assert_eq!(partial_allowance.allowance_shortfall, 600);
+    assert!(partial_allowance.balance_sufficient);
+    assert!(!partial_allowance.allowance_sufficient);
+    assert_eq!(
+        partial_allowance.allowance_state,
+        TokenPreflightState::InsufficientAllowance
+    );
+    assert_eq!(
+        partial_allowance.status,
+        TokenPreflightState::InsufficientAllowance
+    );
+
+    // Full allowance makes both balance and allowance Sufficient.
+    tc.approve(
+        buyer,
+        &contract_id,
+        &AMOUNT,
+        &(env.ledger().sequence() + 100),
+    );
+    let sufficient = client.preflight_deposit(&id);
+    assert_eq!(
+        sufficient,
+        TokenBalancePreflight {
+            buyer: buyer.clone(),
+            token: token.clone(),
+            spender: contract_id.clone(),
+            required_amount: AMOUNT,
+            available_balance: AMOUNT,
+            balance_shortfall: 0,
+            available_allowance: AMOUNT,
+            allowance_shortfall: 0,
+            balance_sufficient: true,
+            allowance_sufficient: true,
+            balance_state: TokenPreflightState::Sufficient,
+            allowance_state: TokenPreflightState::Sufficient,
+            status: TokenPreflightState::Sufficient,
+        }
+    );
+
+    // Insufficient balance is reported even when allowance is sufficient.
+    let over_balance = client.preflight_token_balance(buyer, &token, &(AMOUNT + 250));
+    assert_eq!(over_balance.available_balance, AMOUNT);
+    assert_eq!(over_balance.balance_shortfall, 250);
+    assert!(!over_balance.balance_sufficient);
+    assert_eq!(
+        over_balance.balance_state,
+        TokenPreflightState::InsufficientBalance
+    );
+    assert_eq!(
+        over_balance.status,
+        TokenPreflightState::InsufficientBalance
+    );
+}
+
+#[test]
+fn preflight_distinguishes_invalid_input_unavailable_token_and_preserves_state() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    tc.approve(buyer, &contract_id, &500, &(env.ledger().sequence() + 100));
+
+    let ttl_before = client.ttl_info(&id);
+    let status_before = client.get_status(&id);
+    let balance_before = tc.balance(buyer);
+    let allowance_before = tc.allowance(buyer, &contract_id);
+
+    // Zero and negative amounts return InvalidInput without calling token state.
+    for invalid_amt in [0_i128, -1, -500] {
+        let invalid = client.preflight_token_balance(buyer, &token, &invalid_amt);
+        assert_eq!(invalid.status, TokenPreflightState::InvalidInput);
+        assert_eq!(invalid.balance_state, TokenPreflightState::InvalidInput);
+        assert_eq!(invalid.allowance_state, TokenPreflightState::InvalidInput);
+        assert!(!invalid.balance_sufficient);
+        assert!(!invalid.allowance_sufficient);
+    }
+
+    // Undeployed token contract address reports Unavailable.
+    let missing_token = Address::generate(&env);
+    let unavailable = client.preflight_token_balance(buyer, &missing_token, &AMOUNT);
+    assert_eq!(unavailable.status, TokenPreflightState::Unavailable);
+    assert_eq!(unavailable.balance_state, TokenPreflightState::Unavailable);
+    assert_eq!(
+        unavailable.allowance_state,
+        TokenPreflightState::Unavailable
+    );
+    assert!(!unavailable.balance_sufficient);
+    assert!(!unavailable.allowance_sufficient);
+
+    // Unknown escrow id returns ForgeError::NotFound.
+    assert_eq!(
+        client.try_preflight_deposit(&999).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+
+    // Preflight calls must not mutate escrow status, balances, allowances, or TTL.
+    assert_eq!(client.ttl_info(&id), ttl_before);
+    assert_eq!(client.get_status(&id), status_before);
+    assert_eq!(tc.balance(buyer), balance_before);
+    assert_eq!(tc.allowance(buyer, &contract_id), allowance_before);
+
+    // Once funded, preflight_deposit reports InvalidInput because deposit is only valid while Pending.
+    client.deposit(&id);
+    let after_deposit = client.preflight_deposit(&id);
+    assert_eq!(after_deposit.status, TokenPreflightState::InvalidInput);
 }
