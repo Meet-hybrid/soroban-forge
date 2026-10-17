@@ -6,5 +6,6 @@ pub mod inspect;
 pub mod invoke;
 pub mod lint;
 pub mod new;
+pub mod plan;
 pub mod test;
 pub mod verify;
