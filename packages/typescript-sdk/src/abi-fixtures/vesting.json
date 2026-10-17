@@ -15,6 +15,22 @@
       ]
     },
     {
+      "name": "claim_for",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "beneficiary",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "claimable",
       "inputs": [
         {
@@ -27,8 +43,28 @@
       ]
     },
     {
+      "name": "claimable_for",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "beneficiary",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "create_schedule",
       "inputs": [
+        {
+          "name": "funder",
+          "type": "address"
+        },
         {
           "name": "beneficiary",
           "type": "address"
@@ -55,6 +91,38 @@
       ]
     },
     {
+      "name": "create_tranche_schedule",
+      "inputs": [
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "tranches",
+          "type": "vec<udt:Tranche>"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_schedule",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:VestingSchedule,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_status",
       "inputs": [
         {
@@ -65,9 +133,102 @@
       "outputs": [
         "result<udt:VestingStatus,udt:ForgeError>"
       ]
+    },
+    {
+      "name": "get_tranche_schedule",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:TrancheSchedule,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "reassign_beneficiary",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "new_beneficiary",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "revoke",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
     }
   ],
-  "events": [],
+  "events": [
+    {
+      "name": "BeneficiaryReassignedFrom",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "new_beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "vested_unclaimed",
+          "type": "i128"
+        },
+        {
+          "name": "reassignment_count",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "BeneficiaryReassignedTo",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "old_beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "vested_unclaimed",
+          "type": "i128"
+        },
+        {
+          "name": "reassignment_count",
+          "type": "u32"
+        }
+      ]
+    }
+  ],
   "types": [
     {
       "kind": "error-enum",
@@ -124,84 +285,62 @@
         {
           "name": "WithdrawalLimitExceeded",
           "value": 13
+        },
+        {
+          "name": "SubscriptionPastDue",
+          "value": 14
+        },
+        {
+          "name": "ProposerCooldown",
+          "value": 15
         }
       ]
     },
     {
       "kind": "struct",
-      "name": "PaginatedResult",
+      "name": "Tranche",
       "fields": [
         {
-          "name": "cursor",
-          "type": "udt:PaginationCursor"
+          "name": "amount",
+          "type": "i128"
         },
         {
-          "name": "items",
-          "type": "vec<bytes>"
-        },
-        {
-          "name": "total",
-          "type": "u32"
+          "name": "unlock_at",
+          "type": "u64"
         }
       ]
     },
     {
       "kind": "struct",
-      "name": "PaginationCursor",
+      "name": "TrancheSchedule",
       "fields": [
         {
-          "name": "limit",
-          "type": "u32"
-        },
-        {
-          "name": "offset",
-          "type": "u32"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "Party",
-      "fields": [
-        {
-          "name": "address",
+          "name": "beneficiary",
           "type": "address"
         },
         {
-          "name": "approved",
-          "type": "bool"
-        },
-        {
-          "name": "role",
-          "type": "string"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "StorageEntry",
-      "fields": [
-        {
-          "name": "updated_at",
-          "type": "u64"
-        },
-        {
-          "name": "value",
-          "type": "bytes"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "TimeBounds",
-      "fields": [
-        {
-          "name": "end",
-          "type": "u64"
+          "name": "claimed",
+          "type": "i128"
         },
         {
           "name": "start",
           "type": "u64"
+        },
+        {
+          "name": "status",
+          "type": "udt:VestingStatus"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "total_amount",
+          "type": "i128"
+        },
+        {
+          "name": "tranches",
+          "type": "vec<udt:Tranche>"
         }
       ]
     },
@@ -214,6 +353,10 @@
           "type": "address"
         },
         {
+          "name": "beneficiary_claimed",
+          "type": "i128"
+        },
+        {
           "name": "claimed",
           "type": "i128"
         },
@@ -224,6 +367,22 @@
         {
           "name": "duration",
           "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "reassignment_count",
+          "type": "u32"
+        },
+        {
+          "name": "reassignment_vested",
+          "type": "i128"
+        },
+        {
+          "name": "revoked_vested",
+          "type": "option<i128>"
         },
         {
           "name": "start",
@@ -318,6 +477,14 @@
     {
       "name": "WithdrawalLimitExceeded",
       "code": 13
+    },
+    {
+      "name": "SubscriptionPastDue",
+      "code": 14
+    },
+    {
+      "name": "ProposerCooldown",
+      "code": 15
     }
   ]
 }

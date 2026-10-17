@@ -51,10 +51,34 @@
       ]
     },
     {
+      "name": "get_active_proposal_count",
+      "inputs": [
+        {
+          "name": "proposer",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "u32"
+      ]
+    },
+    {
       "name": "get_bond_config",
       "inputs": [],
       "outputs": [
         "result<udt:BondConfig,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_dependencies",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:DependencyView,udt:ForgeError>"
       ]
     },
     {
@@ -109,6 +133,18 @@
       ]
     },
     {
+      "name": "initialize",
+      "inputs": [
+        {
+          "name": "governance_token",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "propose",
       "inputs": [
         {
@@ -126,10 +162,30 @@
         {
           "name": "duration",
           "type": "u64"
+        },
+        {
+          "name": "requires",
+          "type": "vec<u64>"
+        },
+        {
+          "name": "conflicts_with",
+          "type": "option<u64>"
         }
       ],
       "outputs": [
         "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "touch_ttl",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -249,6 +305,10 @@
         {
           "name": "support",
           "type": "bool"
+        },
+        {
+          "name": "weight",
+          "type": "i128"
         }
       ]
     }
@@ -287,6 +347,20 @@
         {
           "name": "Forfeited",
           "types": []
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "DependencyView",
+      "fields": [
+        {
+          "name": "conflicts_with",
+          "type": "option<u64>"
+        },
+        {
+          "name": "requires",
+          "type": "vec<u64>"
         }
       ]
     },
@@ -345,56 +419,14 @@
         {
           "name": "WithdrawalLimitExceeded",
           "value": 13
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "PaginatedResult",
-      "fields": [
-        {
-          "name": "cursor",
-          "type": "udt:PaginationCursor"
         },
         {
-          "name": "items",
-          "type": "vec<bytes>"
+          "name": "SubscriptionPastDue",
+          "value": 14
         },
         {
-          "name": "total",
-          "type": "u32"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "PaginationCursor",
-      "fields": [
-        {
-          "name": "limit",
-          "type": "u32"
-        },
-        {
-          "name": "offset",
-          "type": "u32"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "Party",
-      "fields": [
-        {
-          "name": "address",
-          "type": "address"
-        },
-        {
-          "name": "approved",
-          "type": "bool"
-        },
-        {
-          "name": "role",
-          "type": "string"
+          "name": "ProposerCooldown",
+          "value": 15
         }
       ]
     },
@@ -423,6 +455,10 @@
           "type": "address"
         },
         {
+          "name": "conflicts_with",
+          "type": "option<u64>"
+        },
+        {
           "name": "for_votes",
           "type": "i128"
         },
@@ -433,6 +469,10 @@
         {
           "name": "proposer",
           "type": "address"
+        },
+        {
+          "name": "requires",
+          "type": "vec<u64>"
         },
         {
           "name": "state",
@@ -475,34 +515,6 @@
         {
           "name": "Cancelled",
           "types": []
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "StorageEntry",
-      "fields": [
-        {
-          "name": "updated_at",
-          "type": "u64"
-        },
-        {
-          "name": "value",
-          "type": "bytes"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "TimeBounds",
-      "fields": [
-        {
-          "name": "end",
-          "type": "u64"
-        },
-        {
-          "name": "start",
-          "type": "u64"
         }
       ]
     }
@@ -559,6 +571,14 @@
     {
       "name": "WithdrawalLimitExceeded",
       "code": 13
+    },
+    {
+      "name": "SubscriptionPastDue",
+      "code": 14
+    },
+    {
+      "name": "ProposerCooldown",
+      "code": 15
     }
   ]
 }

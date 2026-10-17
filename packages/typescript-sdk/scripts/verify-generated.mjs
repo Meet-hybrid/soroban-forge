@@ -7,10 +7,11 @@ const rootDir = resolve(sdkDir, "../..");
 const generatedPaths = [
   "packages/typescript-sdk/src/clients",
   "packages/typescript-sdk/src/abi-fixtures",
-  "packages/vesting-client",
-  "packages/multi-sig-wallet-client",
-  "packages/dao-governance-client",
-  "packages/subscription-payments-client",
+  "packages/vesting-client/src/index.ts",
+  "packages/multi-sig-wallet-client/src/index.ts",
+  "packages/dao-governance-client/src/index.ts",
+  "packages/subscription-payments-client/src/index.ts",
+  "packages/marketplace-royalties-client/src/index.ts",
 ];
 
 const result = spawnSync(

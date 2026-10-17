@@ -232,7 +232,6 @@ type _PublicContractTypes = [
   MultisigTypes.TxStatus,
   MultisigTypes.Withdrawal,
   MultisigTypes.LimitChange,
-  MultisigTypes.WindowEntry,
   MultisigTypes.WithdrawalLimit,
   DaoTypes.Proposal,
   DaoTypes.ProposalState,

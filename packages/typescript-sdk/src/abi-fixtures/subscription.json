@@ -43,6 +43,38 @@
       ]
     },
     {
+      "name": "charge_catchup",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "max_periods",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "deposit",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_subscription",
       "inputs": [
         {
@@ -59,6 +91,22 @@
       "inputs": [],
       "outputs": [
         "u64"
+      ]
+    },
+    {
+      "name": "get_usage",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "metric",
+          "type": "symbol"
+        }
+      ],
+      "outputs": [
+        "result<udt:UsageRecord,udt:ForgeError>"
       ]
     },
     {
@@ -90,6 +138,38 @@
       ]
     },
     {
+      "name": "quote_period",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "record_usage",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "metric",
+          "type": "symbol"
+        },
+        {
+          "name": "units",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "resume",
       "inputs": [
         {
@@ -111,6 +191,22 @@
         {
           "name": "provider",
           "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_quotas",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "quotas",
+          "type": "vec<udt:MetricQuota>"
         }
       ],
       "outputs": [
@@ -212,9 +308,168 @@
       "outputs": [
         "result<vec<udt:Subscription>,udt:ForgeError>"
       ]
+    },
+    {
+      "name": "touch_ttl",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "withdraw_balance",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
     }
   ],
-  "events": [],
+  "events": [
+    {
+      "name": "BalanceDebited",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "balance_after",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "name": "BalanceRefunded",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "balance_after",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "name": "Cancelled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "subscriber",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "name": "Charged",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "last_charged",
+          "type": "u64"
+        },
+        {
+          "name": "next_charge_at",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "Deposited",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "balance_after",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "name": "QuotasSet",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "quotas",
+          "type": "vec<udt:MetricQuota>"
+        }
+      ]
+    },
+    {
+      "name": "UsageRecorded",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "metric",
+          "type": "symbol"
+        },
+        {
+          "name": "units",
+          "type": "u64"
+        },
+        {
+          "name": "period_units",
+          "type": "u64"
+        },
+        {
+          "name": "period_start",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
   "types": [
     {
       "kind": "error-enum",
@@ -271,70 +526,40 @@
         {
           "name": "WithdrawalLimitExceeded",
           "value": 13
+        },
+        {
+          "name": "SubscriptionPastDue",
+          "value": 14
+        },
+        {
+          "name": "ProposerCooldown",
+          "value": 15
         }
       ]
     },
     {
       "kind": "struct",
-      "name": "PaginatedResult",
+      "name": "MetricQuota",
       "fields": [
         {
-          "name": "cursor",
-          "type": "udt:PaginationCursor"
-        },
-        {
-          "name": "items",
-          "type": "vec<bytes>"
-        },
-        {
-          "name": "total",
-          "type": "u32"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "PaginationCursor",
-      "fields": [
-        {
-          "name": "limit",
-          "type": "u32"
-        },
-        {
-          "name": "offset",
-          "type": "u32"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "Party",
-      "fields": [
-        {
-          "name": "address",
-          "type": "address"
-        },
-        {
-          "name": "approved",
-          "type": "bool"
-        },
-        {
-          "name": "role",
-          "type": "string"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "StorageEntry",
-      "fields": [
-        {
-          "name": "updated_at",
+          "name": "bucket_units",
           "type": "u64"
         },
         {
-          "name": "value",
-          "type": "bytes"
+          "name": "included_units",
+          "type": "u64"
+        },
+        {
+          "name": "max_overage_units",
+          "type": "option<u64>"
+        },
+        {
+          "name": "metric",
+          "type": "symbol"
+        },
+        {
+          "name": "overage_price",
+          "type": "i128"
         }
       ]
     },
@@ -355,6 +580,10 @@
           "type": "u64"
         },
         {
+          "name": "past_due_since",
+          "type": "option<u64>"
+        },
+        {
           "name": "paused_at",
           "type": "option<u64>"
         },
@@ -363,8 +592,16 @@
           "type": "u64"
         },
         {
+          "name": "prepaid_balance",
+          "type": "option<i128>"
+        },
+        {
           "name": "provider",
           "type": "address"
+        },
+        {
+          "name": "quotas",
+          "type": "vec<udt:MetricQuota>"
         },
         {
           "name": "status",
@@ -408,14 +645,22 @@
     },
     {
       "kind": "struct",
-      "name": "TimeBounds",
+      "name": "UsageRecord",
       "fields": [
         {
-          "name": "end",
+          "name": "metric",
+          "type": "symbol"
+        },
+        {
+          "name": "period_start",
           "type": "u64"
         },
         {
-          "name": "start",
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "units",
           "type": "u64"
         }
       ]
@@ -473,6 +718,14 @@
     {
       "name": "WithdrawalLimitExceeded",
       "code": 13
+    },
+    {
+      "name": "SubscriptionPastDue",
+      "code": 14
+    },
+    {
+      "name": "ProposerCooldown",
+      "code": 15
     }
   ]
 }

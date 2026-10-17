@@ -101,28 +101,20 @@ for (const contract of contracts) {
     throw new Error(`Expected generated binding missing: ${generatedSource}`);
   }
 
-  const clientClass = "export class Client extends ContractClient {";
   const generatedText = readFileSync(generatedSource, "utf8").replace(
     /[ \t]+(?=\r?$)/gm,
     "",
   );
-  if (!generatedText.includes(clientClass)) {
+  if (!generatedText.includes("export class Client extends ContractClient {")) {
     throw new Error(`Expected generated Client class in ${generatedSource}`);
   }
-  writeFileSync(
-    generatedSource,
-    generatedText.replace(
-      clientClass,
-      `export interface Client {\n  readonly spec: ContractSpec;\n  txFromJSON<T = unknown>(json: string): AssembledTransaction<T>;\n}\n${clientClass}`,
-    ),
-  );
+  writeFileSync(generatedSource, generatedText);
   cpSync(generatedSource, join(sdkClientsDir, `${contract.module}.ts`));
 
   if (contract.package) {
-    const packageDir = join(rootDir, "packages", contract.package);
-    rmSync(packageDir, { recursive: true, force: true });
-    mkdirSync(packageDir, { recursive: true });
-    cpSync(outputDir, packageDir, { recursive: true });
+    const packageSourceDir = join(rootDir, "packages", contract.package, "src");
+    mkdirSync(packageSourceDir, { recursive: true });
+    cpSync(generatedSource, join(packageSourceDir, "index.ts"));
   }
 }
 

@@ -10,6 +10,14 @@
           "type": "address"
         },
         {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "payer",
+          "type": "address"
+        },
+        {
           "name": "seller",
           "type": "address"
         },
@@ -47,6 +55,22 @@
       ]
     },
     {
+      "name": "quote_sale",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<udt:SaleQuote,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "set_royalty",
       "inputs": [
         {
@@ -60,6 +84,22 @@
         {
           "name": "bps",
           "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_royalty_splits",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "recipients",
+          "type": "vec<udt:RoyaltyShare>"
         }
       ],
       "outputs": [
@@ -93,9 +133,102 @@
       "outputs": [
         "result<udt:Settlement,udt:ForgeError>"
       ]
+    },
+    {
+      "name": "settle_sales",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "payer",
+          "type": "address"
+        },
+        {
+          "name": "sales",
+          "type": "vec<tuple<address,i128>>"
+        }
+      ],
+      "outputs": [
+        "result<vec<udt:Settlement>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "touch_ttl",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
     }
   ],
-  "events": [],
+  "events": [
+    {
+      "name": "RoyaltyConfigured",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        },
+        {
+          "name": "bps",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "SaleSettled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "payer",
+          "type": "address"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "royalty_recipient",
+          "type": "address"
+        },
+        {
+          "name": "gross_amount",
+          "type": "i128"
+        },
+        {
+          "name": "seller_net",
+          "type": "i128"
+        },
+        {
+          "name": "royalty_share",
+          "type": "i128"
+        }
+      ]
+    }
+  ],
   "types": [
     {
       "kind": "error-enum",
@@ -152,56 +285,14 @@
         {
           "name": "WithdrawalLimitExceeded",
           "value": 13
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "PaginatedResult",
-      "fields": [
-        {
-          "name": "cursor",
-          "type": "udt:PaginationCursor"
         },
         {
-          "name": "items",
-          "type": "vec<bytes>"
+          "name": "SubscriptionPastDue",
+          "value": 14
         },
         {
-          "name": "total",
-          "type": "u32"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "PaginationCursor",
-      "fields": [
-        {
-          "name": "limit",
-          "type": "u32"
-        },
-        {
-          "name": "offset",
-          "type": "u32"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "Party",
-      "fields": [
-        {
-          "name": "address",
-          "type": "address"
-        },
-        {
-          "name": "approved",
-          "type": "bool"
-        },
-        {
-          "name": "role",
-          "type": "string"
+          "name": "ProposerCooldown",
+          "value": 15
         }
       ]
     },
@@ -228,6 +319,20 @@
       ]
     },
     {
+      "kind": "struct",
+      "name": "RoyaltyShare",
+      "fields": [
+        {
+          "name": "bps",
+          "type": "u32"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        }
+      ]
+    },
+    {
       "kind": "union",
       "name": "RoyaltyStatus",
       "variants": [
@@ -238,6 +343,28 @@
         {
           "name": "Disabled",
           "types": []
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "SaleQuote",
+      "fields": [
+        {
+          "name": "gross",
+          "type": "i128"
+        },
+        {
+          "name": "royalty_amount",
+          "type": "i128"
+        },
+        {
+          "name": "royalty_bps",
+          "type": "u32"
+        },
+        {
+          "name": "seller_net",
+          "type": "i128"
         }
       ]
     },
@@ -270,34 +397,6 @@
         {
           "name": "sales",
           "type": "u32"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "StorageEntry",
-      "fields": [
-        {
-          "name": "updated_at",
-          "type": "u64"
-        },
-        {
-          "name": "value",
-          "type": "bytes"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "TimeBounds",
-      "fields": [
-        {
-          "name": "end",
-          "type": "u64"
-        },
-        {
-          "name": "start",
-          "type": "u64"
         }
       ]
     }
@@ -354,6 +453,14 @@
     {
       "name": "WithdrawalLimitExceeded",
       "code": 13
+    },
+    {
+      "name": "SubscriptionPastDue",
+      "code": 14
+    },
+    {
+      "name": "ProposerCooldown",
+      "code": 15
     }
   ]
 }

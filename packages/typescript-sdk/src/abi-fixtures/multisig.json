@@ -31,6 +31,22 @@
       ]
     },
     {
+      "name": "check_withdrawal",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "udt:CheckResult"
+      ]
+    },
+    {
       "name": "confirm",
       "inputs": [
         {
@@ -196,6 +212,18 @@
       ]
     },
     {
+      "name": "get_withdrawal_window",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "udt:WindowState"
+      ]
+    },
+    {
       "name": "initialize",
       "inputs": [
         {
@@ -212,11 +240,35 @@
       ]
     },
     {
+      "name": "is_live",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "bool"
+      ]
+    },
+    {
       "name": "is_owner",
       "inputs": [
         {
           "name": "address",
           "type": "address"
+        }
+      ],
+      "outputs": [
+        "bool"
+      ]
+    },
+    {
+      "name": "is_tx_live",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
         }
       ],
       "outputs": [
@@ -325,6 +377,38 @@
         {
           "name": "tx",
           "type": "bytes"
+        },
+        {
+          "name": "expiry",
+          "type": "option<u64>"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "submit_call",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": "address"
+        },
+        {
+          "name": "target",
+          "type": "address"
+        },
+        {
+          "name": "fn_name",
+          "type": "symbol"
+        },
+        {
+          "name": "args",
+          "type": "vec<val>"
+        },
+        {
+          "name": "expiry",
+          "type": "option<u64>"
         }
       ],
       "outputs": [
@@ -361,6 +445,18 @@
         {
           "name": "token",
           "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "touch_tx_ttl",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
         }
       ],
       "outputs": [
@@ -406,6 +502,20 @@
       ]
     },
     {
+      "name": "TxRejected",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        },
+        {
+          "name": "rejector",
+          "type": "address"
+        }
+      ]
+    },
+    {
       "name": "TxSubmitted",
       "dataFormat": "scSpecEventDataFormatMap",
       "params": [
@@ -422,9 +532,85 @@
           "type": "u32"
         }
       ]
+    },
+    {
+      "name": "WithdrawalLimitRemoved",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "name": "WithdrawalLimitSet",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "window_seconds",
+          "type": "u64"
+        }
+      ]
     }
   ],
   "types": [
+    {
+      "kind": "struct",
+      "name": "Call",
+      "fields": [
+        {
+          "name": "args",
+          "type": "vec<val>"
+        },
+        {
+          "name": "fn_name",
+          "type": "symbol"
+        },
+        {
+          "name": "target",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "CheckResult",
+      "variants": [
+        {
+          "name": "Allowed",
+          "types": []
+        },
+        {
+          "name": "WalletNotInitialized",
+          "types": []
+        },
+        {
+          "name": "InvalidAmount",
+          "types": []
+        },
+        {
+          "name": "LimitExceeded",
+          "types": []
+        },
+        {
+          "name": "InsufficientFunds",
+          "types": []
+        },
+        {
+          "name": "ArithmeticOverflow",
+          "types": []
+        }
+      ]
+    },
     {
       "kind": "error-enum",
       "name": "ForgeError",
@@ -480,6 +666,14 @@
         {
           "name": "WithdrawalLimitExceeded",
           "value": 13
+        },
+        {
+          "name": "SubscriptionPastDue",
+          "value": 14
+        },
+        {
+          "name": "ProposerCooldown",
+          "value": 15
         }
       ]
     },
@@ -498,84 +692,6 @@
           "types": [
             "address"
           ]
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "PaginatedResult",
-      "fields": [
-        {
-          "name": "cursor",
-          "type": "udt:PaginationCursor"
-        },
-        {
-          "name": "items",
-          "type": "vec<bytes>"
-        },
-        {
-          "name": "total",
-          "type": "u32"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "PaginationCursor",
-      "fields": [
-        {
-          "name": "limit",
-          "type": "u32"
-        },
-        {
-          "name": "offset",
-          "type": "u32"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "Party",
-      "fields": [
-        {
-          "name": "address",
-          "type": "address"
-        },
-        {
-          "name": "approved",
-          "type": "bool"
-        },
-        {
-          "name": "role",
-          "type": "string"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "StorageEntry",
-      "fields": [
-        {
-          "name": "updated_at",
-          "type": "u64"
-        },
-        {
-          "name": "value",
-          "type": "bytes"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "TimeBounds",
-      "fields": [
-        {
-          "name": "end",
-          "type": "u64"
-        },
-        {
-          "name": "start",
-          "type": "u64"
         }
       ]
     },
@@ -616,6 +732,12 @@
           "types": [
             "u32"
           ]
+        },
+        {
+          "name": "Call",
+          "types": [
+            "udt:Call"
+          ]
         }
       ]
     },
@@ -634,6 +756,10 @@
         {
           "name": "Rejected",
           "types": []
+        },
+        {
+          "name": "Expired",
+          "types": []
         }
       ]
     },
@@ -644,6 +770,10 @@
         {
           "name": "confirmations",
           "type": "vec<address>"
+        },
+        {
+          "name": "expiry",
+          "type": "option<u64>"
         },
         {
           "name": "kind",
@@ -677,15 +807,19 @@
     },
     {
       "kind": "struct",
-      "name": "WindowEntry",
+      "name": "WindowState",
       "fields": [
         {
-          "name": "amount",
+          "name": "reset_at",
+          "type": "option<u64>"
+        },
+        {
+          "name": "total",
           "type": "i128"
         },
         {
-          "name": "submitted_at",
-          "type": "u64"
+          "name": "window_start",
+          "type": "option<u64>"
         }
       ]
     },
@@ -778,6 +912,14 @@
     {
       "name": "WithdrawalLimitExceeded",
       "code": 13
+    },
+    {
+      "name": "SubscriptionPastDue",
+      "code": 14
+    },
+    {
+      "name": "ProposerCooldown",
+      "code": 15
     }
   ]
 }
