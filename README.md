@@ -223,6 +223,22 @@ cargo run -p soroban-forge-cli -- invoke --contract <CONTRACT_ID> --function bal
 cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --since <LEDGER> --network testnet
 ```
 
+### Provenance verification (offline, no secrets)
+
+Use the local rebuild check to validate a compiled `wasm32v1-none` artifact
+without credentials or network access:
+
+```bash
+cargo build --release --target wasm32v1-none -p soroban-forge-escrow
+WASM="target/wasm32v1-none/release/soroban_forge_escrow.wasm"
+EXPECT="$(sha256sum "$WASM" | awk '{print $1}')"
+cargo run -p soroban-forge-cli -- verify --wasm "$WASM" --expected "$EXPECT" --json
+```
+
+This emits a machine-readable JSON summary with per-artifact states such as
+`match`, `mismatch`, `size-drift`, and `missing`. A verification failure still
+returns a non-zero exit code while preserving the JSON output for automation.
+
 ### 5. Deploy to testnet
 
 ```bash
