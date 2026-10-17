@@ -740,3 +740,315 @@ fn blank_envelope_aborts_vote_and_preserves_tally() {
     assert_eq!(proposal.for_votes, 0);
     assert_eq!(proposal.against_votes, 0);
 }
+
+// -----------------------------------------------------------------------
+// Delegated-voting conservation, duplicate-vote rejection, and deadline
+// boundary invariants (issue #449)
+// -----------------------------------------------------------------------
+
+#[test]
+fn delegated_voting_power_is_counted_once_and_conserves_supply() {
+    let (env, token, tc, _contract_id, client, accounts, target_id) = setup!();
+    let token_admin = StellarAssetClient::new(&env, &token);
+
+    let delegator_a = Address::generate(&env);
+    let delegator_b = Address::generate(&env);
+    let delegatee = Address::generate(&env);
+    let direct_voter = Address::generate(&env);
+
+    let weight_a = 1_200_i128;
+    let weight_b = 800_i128;
+    let weight_delegatee = 500_i128;
+    let weight_direct = 1_500_i128;
+    let total_voter_supply = weight_a + weight_b + weight_delegatee + weight_direct;
+
+    token_admin.mint(&delegator_a, &weight_a);
+    token_admin.mint(&delegator_b, &weight_b);
+    token_admin.mint(&delegatee, &weight_delegatee);
+    token_admin.mint(&direct_voter, &weight_direct);
+
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
+
+    // Chained and repeated delegation before voting:
+    // delegator_a transfers voting tokens to delegator_b, and delegator_b
+    // consolidates both into delegatee. Repeated back-and-forth before voting
+    // cannot manufacture extra voting power.
+    tc.transfer(&delegator_a, &delegator_b, &weight_a);
+    tc.transfer(&delegator_b, &delegatee, &(weight_a + weight_b));
+    tc.transfer(&delegatee, &delegator_b, &300);
+    tc.transfer(&delegator_b, &delegatee, &300);
+
+    assert_eq!(tc.balance(&delegator_a), 0);
+    assert_eq!(tc.balance(&delegator_b), 0);
+    assert_eq!(
+        tc.balance(&delegatee),
+        weight_a + weight_b + weight_delegatee
+    );
+    assert_eq!(tc.balance(&direct_voter), weight_direct);
+
+    // Delegators who transferred away their full balance cannot cast a zero-weight vote.
+    assert_eq!(
+        client
+            .try_vote(&id, &delegator_a, &true)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_vote(&id, &delegator_b, &false)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert!(!client.has_voted(&id, &delegator_a));
+    assert!(!client.has_voted(&id, &delegator_b));
+
+    // Delegatee votes once with the consolidated weight; direct voter votes against.
+    client.vote(&id, &delegatee, &true);
+    client.vote(&id, &direct_voter, &false);
+
+    // Delegatee cannot vote a second time to double-count delegated weight.
+    assert_eq!(
+        client
+            .try_vote(&id, &delegatee, &true)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_vote(&id, &delegatee, &false)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    let proposal = client.get_proposal(&id);
+    assert_eq!(proposal.for_votes, weight_a + weight_b + weight_delegatee);
+    assert_eq!(proposal.against_votes, weight_direct);
+    assert_eq!(
+        proposal.for_votes + proposal.against_votes,
+        total_voter_supply
+    );
+    assert!(client.has_voted(&id, &delegatee));
+    assert!(client.has_voted(&id, &direct_voter));
+}
+
+#[test]
+fn delegation_changes_and_duplicate_submissions_preserve_exact_accepted_tally() {
+    let (env, token, tc, _contract_id, client, accounts, target_id) = setup!();
+    let token_admin = StellarAssetClient::new(&env, &token);
+
+    let holder = Address::generate(&env);
+    let rep_one = Address::generate(&env);
+    let rep_two = Address::generate(&env);
+    let independent = Address::generate(&env);
+
+    token_admin.mint(&holder, &2_000);
+    token_admin.mint(&rep_one, &400);
+    token_admin.mint(&rep_two, &600);
+    token_admin.mint(&independent, &900);
+
+    let proposal_id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
+
+    // Initial delegation to rep_one, then delegation change (re-routing 1_250
+    // to rep_two and keeping 250 with holder) before any votes are cast.
+    tc.transfer(&holder, &rep_one, &2_000);
+    tc.transfer(&rep_one, &holder, &1_500);
+    tc.transfer(&holder, &rep_two, &1_250);
+
+    assert_eq!(tc.balance(&holder), 250);
+    assert_eq!(tc.balance(&rep_one), 900);
+    assert_eq!(tc.balance(&rep_two), 1_850);
+    assert_eq!(tc.balance(&independent), 900);
+
+    let mut accepted_records: std::vec::Vec<(Address, bool, i128)> = std::vec::Vec::new();
+
+    for (voter, support) in [
+        (rep_one.clone(), true),
+        (rep_two.clone(), false),
+        (holder.clone(), true),
+        (independent.clone(), true),
+    ] {
+        let weight = tc.balance(&voter);
+        client.vote(&proposal_id, &voter, &support);
+        accepted_records.push((voter.clone(), support, weight));
+
+        // Immediate duplicate submission (both same and opposite support) must fail
+        // with InvalidInput and leave the running tally untouched.
+        let snapshot_before = client.get_proposal(&proposal_id);
+        assert_eq!(
+            client
+                .try_vote(&proposal_id, &voter, &support)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(
+            client
+                .try_vote(&proposal_id, &voter, &!support)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(client.get_proposal(&proposal_id), snapshot_before);
+    }
+
+    // Even if a voter receives additional tokens after already voting on this
+    // proposal, a repeated submission on the same proposal is still rejected.
+    tc.transfer(&accounts.user2, &rep_one, &1_000);
+    let snapshot_before = client.get_proposal(&proposal_id);
+    assert_eq!(
+        client
+            .try_vote(&proposal_id, &rep_one, &true)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(client.get_proposal(&proposal_id), snapshot_before);
+
+    let expected_for: i128 = accepted_records
+        .iter()
+        .filter(|(_, support, _)| *support)
+        .map(|(_, _, w)| *w)
+        .sum();
+    let expected_against: i128 = accepted_records
+        .iter()
+        .filter(|(_, support, _)| !*support)
+        .map(|(_, _, w)| *w)
+        .sum();
+    let expected_total: i128 = accepted_records.iter().map(|(_, _, w)| *w).sum();
+
+    let final_proposal = client.get_proposal(&proposal_id);
+    assert_eq!(final_proposal.for_votes, expected_for);
+    assert_eq!(final_proposal.against_votes, expected_against);
+    assert_eq!(
+        final_proposal.for_votes + final_proposal.against_votes,
+        expected_total
+    );
+    for (voter, _, _) in &accepted_records {
+        assert!(client.has_voted(&proposal_id, voter));
+    }
+}
+
+#[test]
+fn unauthorized_delegation_and_voting_leave_proposal_and_balances_unchanged() {
+    let (env, token, tc, contract_id, client, accounts, target_id) = setup!();
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
+
+    let proposal_before = client.get_proposal(&id);
+    let balance_user2_before = tc.balance(&accounts.user2);
+    let balance_user3_before = tc.balance(&accounts.user3);
+
+    // 1. Unauthorized token delegation (user3 signs a transfer from user2 to user3).
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user3,
+        invoke: &MockAuthInvoke {
+            contract: &token,
+            fn_name: "transfer",
+            args: transfer_args(&env, &accounts.user2, &accounts.user3, 2_500),
+            sub_invokes: &[],
+        },
+    }]);
+    let transfer_res = tc.try_transfer(&accounts.user2, &accounts.user3, &2_500);
+    assert!(transfer_res.is_err());
+
+    // 2. Unauthorized vote attempt (user3 signs a vote claiming to be user2).
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user3,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "vote",
+            args: (id, &accounts.user2, true).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let vote_res = client.try_vote(&id, &accounts.user2, &true);
+    assert_auth_abort!(vote_res);
+
+    // 3. Verify balances, proposal tallies, and vote receipt flags are completely unchanged.
+    env.mock_all_auths();
+    assert_eq!(tc.balance(&accounts.user2), balance_user2_before);
+    assert_eq!(tc.balance(&accounts.user3), balance_user3_before);
+    assert_eq!(client.get_proposal(&id), proposal_before);
+    assert!(!client.has_voted(&id, &accounts.user2));
+    assert!(!client.has_voted(&id, &accounts.user3));
+}
+
+#[test]
+fn voting_deadline_boundary_accepts_last_second_and_rejects_at_and_after_expiry() {
+    let (env, _token, _tc, _contract_id, client, accounts, target_id) = setup!();
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
+    let voting_ends = client.get_proposal(&id).voting_ends;
+    assert_eq!(voting_ends, START + DURATION);
+
+    // 1. Exactly one second before `voting_ends`: vote is accepted.
+    env.ledger().set_timestamp(voting_ends - 1);
+    client.vote(&id, &accounts.user2, &true);
+    assert!(client.has_voted(&id, &accounts.user2));
+    assert_eq!(client.get_proposal(&id).for_votes, FUNDS);
+    assert_eq!(client.get_proposal(&id).against_votes, 0);
+
+    // Duplicate vote at `voting_ends - 1` is still rejected with InvalidInput.
+    assert_eq!(
+        client
+            .try_vote(&id, &accounts.user2, &false)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // 2. Exactly at `voting_ends`: voting window is closed (`timestamp >= voting_ends`).
+    env.ledger().set_timestamp(voting_ends);
+    let snapshot_at_deadline = client.get_proposal(&id);
+    assert_eq!(
+        client
+            .try_vote(&id, &accounts.user3, &false)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::DeadlineReached
+    );
+    assert!(!client.has_voted(&id, &accounts.user3));
+    assert_eq!(client.get_proposal(&id), snapshot_at_deadline);
+
+    // 3. Past `voting_ends` (`voting_ends + 1`): vote remains rejected and state unchanged.
+    env.ledger().set_timestamp(voting_ends + 1);
+    assert_eq!(
+        client
+            .try_vote(&id, &accounts.validator, &true)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::DeadlineReached
+    );
+    assert!(!client.has_voted(&id, &accounts.validator));
+    assert_eq!(client.get_proposal(&id), snapshot_at_deadline);
+}
