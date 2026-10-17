@@ -5,6 +5,11 @@
 //! the same failure modes a live deployment would hit (missing balance,
 //! failed transfer, double payout).
 //!
+//! Partial-release coverage includes: valid partial, multiple partials,
+//! exact final partial (→ Completed), zero/negative amounts, over-remaining,
+//! non-Funded state, after-completion rejection, partial→refund,
+//! partial→dispute→resolve (both directions), storage compat, and conservation.
+//!
 //! NOTE on authorization coverage: the suite runs under `mock_all_auths`,
 //! which proves the *call graph* of authorizations (who the contract
 //! asks to sign) but not that a wrong signer is rejected. The one
@@ -14,11 +19,14 @@
 //! signature testing needs `set_auths` fixtures and is tracked in the
 //! security-invariant backlog.
 
-use crate::{Escrow, EscrowData, EscrowStatus, SorobanForgeEscrowClient};
-use soroban_forge_shared_utils::ForgeError;
+use crate::{DataKey, Escrow, EscrowData, EscrowDataV1, EscrowStatus, SorobanForgeEscrowClient};
+use soroban_forge_shared_utils::{xdr_round_trip, ForgeError};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{
+    xdr::{FromXdr, ToXdr},
+    Address, Env,
+};
 
 const START: u64 = 1_000_000;
 const TIMEOUT: u64 = 1_000;
@@ -71,6 +79,24 @@ fn parties(
     (&accounts.user1, &accounts.user2, &accounts.arbiter)
 }
 
+fn legacy_escrow_fixture(
+    env: &Env,
+    token: &Address,
+    accounts: &soroban_forge_test_utils::TestAccounts,
+) -> EscrowDataV1 {
+    EscrowDataV1 {
+        escrow_id: 7,
+        buyer: accounts.user1.clone(),
+        seller: accounts.user2.clone(),
+        arbiter: accounts.arbiter.clone(),
+        token: token.clone(),
+        amount: AMOUNT,
+        timeout: TIMEOUT,
+        status: EscrowStatus::Funded,
+        created_at: env.ledger().timestamp(),
+    }
+}
+
 /// Assert that a full (non-paged) read of a participant's index equals
 /// `expected`, exactly in creation order, with a complete list (no next
 /// cursor).
@@ -93,6 +119,52 @@ fn assert_full_index(client: &SorobanForgeEscrowClient<'_>, party: &Address, exp
 // -----------------------------------------------------------------------
 // Creation
 // -----------------------------------------------------------------------
+
+#[test]
+fn legacy_record_fixture_decodes_and_round_trips_through_current_schema() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let legacy = legacy_escrow_fixture(&env, &token, &accounts);
+    let legacy_bytes = legacy.clone().to_xdr(&env);
+    let decoded = EscrowDataV1::from_xdr(&env, &legacy_bytes).expect("legacy fixture decodes");
+    let migrated = EscrowData::from(decoded);
+
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(&DataKey::Escrow(7), &legacy);
+    });
+
+    let loaded = client.get_escrow(&7);
+    assert_eq!(loaded.escrow_id, migrated.escrow_id);
+    assert_eq!(loaded.buyer, migrated.buyer);
+    assert_eq!(loaded.seller, migrated.seller);
+    assert_eq!(loaded.arbiter, migrated.arbiter);
+    assert_eq!(loaded.token, migrated.token);
+    assert_eq!(loaded.amount, migrated.amount);
+    assert_eq!(loaded.released, 0);
+    assert_eq!(loaded.timeout, migrated.timeout);
+    assert_eq!(loaded.status, migrated.status);
+    assert_eq!(loaded.created_at, migrated.created_at);
+
+    let round_tripped = xdr_round_trip(&env, migrated).expect("current record round-trips");
+    assert_eq!(round_tripped.released, 0);
+    assert_eq!(round_tripped.remaining(), AMOUNT);
+}
+
+#[test]
+fn escrow_error_surface_keeps_validation_and_token_failures_distinct() {
+    let (env, token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+
+    let validation = client.try_release(&id).unwrap_err().unwrap();
+    assert_eq!(validation, ForgeError::InvalidInput);
+
+    let invalid_token = Address::generate(&env);
+    let invalid_token_id =
+        client.create_escrow(buyer, seller, arbiter, &invalid_token, &AMOUNT, &TIMEOUT);
+    let transfer_failure = client.try_deposit(&invalid_token_id).unwrap_err().unwrap();
+    assert_eq!(transfer_failure, ForgeError::TokenTransferFailed);
+    assert_ne!(transfer_failure, validation);
+}
 
 #[test]
 fn create_escrow_records_parties_and_stays_pending() {
@@ -383,6 +455,70 @@ fn resolve_requires_disputed_state() {
     assert_eq!(err, ForgeError::InvalidInput);
 }
 
+#[test]
+fn resolve_split_pays_seller_and_buyer_in_proportion() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.dispute(&id, buyer);
+
+    client.resolve_split(&id, &5000);
+
+    assert_eq!(tc.balance(seller), 500);
+    assert_eq!(tc.balance(buyer), 500);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+}
+
+#[test]
+fn resolve_split_zero_share_refunds_buyer() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.dispute(&id, buyer);
+
+    client.resolve_split(&id, &0);
+
+    assert_eq!(tc.balance(seller), 0);
+    assert_eq!(tc.balance(buyer), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
+}
+
+#[test]
+fn resolve_split_rejects_invalid_basis_points() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.dispute(&id, buyer);
+
+    let err = client.try_resolve_split(&id, &10_001).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(&contract_id), AMOUNT);
+    assert_eq!(client.get_status(&id), EscrowStatus::Disputed);
+}
+
+#[test]
+fn resolve_split_uses_only_the_balance_remaining_after_partial_release() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.release_partial(&id, &200);
+    client.dispute(&id, buyer);
+
+    client.resolve_split(&id, &5000);
+
+    assert_eq!(tc.balance(seller), 600);
+    assert_eq!(tc.balance(buyer), 400);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+    assert_eq!(client.get_escrow(&id).released, AMOUNT);
+}
+
 // -----------------------------------------------------------------------
 // Cancel
 // -----------------------------------------------------------------------
@@ -392,10 +528,68 @@ fn cancel_pending_escrow() {
     let (_env, token, _tc, _id, client, accounts) = setup!();
     let (buyer, seller, arbiter) = parties(&accounts);
     let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    let second = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
 
     client.cancel(&id);
 
     assert_eq!(client.get_status(&id), EscrowStatus::Cancelled);
+    for party in [buyer, seller, arbiter] {
+        assert_full_index(&client, party, &[second]);
+    }
+}
+
+#[test]
+fn cancel_removes_shared_role_index_once_and_double_cancel_is_noop() {
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, _seller, _arbiter) = parties(&accounts);
+    let shared = &accounts.user3;
+    let id = create(&client, &token, buyer, shared, shared, TIMEOUT);
+    let other = create(&client, &token, buyer, shared, shared, TIMEOUT);
+
+    client.cancel(&id);
+    assert_full_index(&client, buyer, &[other]);
+    assert_full_index(&client, shared, &[other]);
+
+    let err = client.try_cancel(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_full_index(&client, buyer, &[other]);
+    assert_full_index(&client, shared, &[other]);
+}
+
+#[test]
+fn failed_cancel_keeps_all_participant_indexes_unchanged() {
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    let err = client.try_cancel(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    for party in [buyer, seller, arbiter] {
+        assert_full_index(&client, party, &[id]);
+    }
+}
+
+#[test]
+fn other_terminal_transitions_keep_participant_index_entries() {
+    let (env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    StellarAssetClient::new(&env, &token).mint(buyer, &(AMOUNT * 2));
+
+    let released = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    let refunded = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    let resolved = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&released);
+    client.release(&released);
+    client.deposit(&refunded);
+    client.refund(&refunded);
+    client.deposit(&resolved);
+    client.dispute(&resolved, buyer);
+    client.resolve(&resolved, &false);
+
+    for party in [buyer, seller, arbiter] {
+        assert_full_index(&client, party, &[released, refunded, resolved]);
+    }
 }
 
 #[test]
@@ -559,6 +753,43 @@ fn pagination_returns_sliced_pages_with_cursors() {
     assert_eq!(page.total, 10);
     assert_eq!(page.ids.len(), 0);
     assert_eq!(page.next_cursor, None);
+
+    let page = client.escrows_for_participant(buyer, &u32::MAX, &u32::MAX);
+    assert_eq!(page.total, 10);
+    assert_eq!(page.ids.len(), 0);
+    assert_eq!(page.next_cursor, None);
+}
+
+#[test]
+fn pagination_cursor_is_live_offset_and_can_skip_after_earlier_cancel() {
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let ids = [
+        create(&client, &token, buyer, seller, arbiter, TIMEOUT),
+        create(&client, &token, buyer, seller, arbiter, TIMEOUT),
+        create(&client, &token, buyer, seller, arbiter, TIMEOUT),
+        create(&client, &token, buyer, seller, arbiter, TIMEOUT),
+        create(&client, &token, buyer, seller, arbiter, TIMEOUT),
+    ];
+
+    let first = client.escrows_for_participant(buyer, &0, &2);
+    assert_eq!(first.ids.get_unchecked(0), ids[0]);
+    assert_eq!(first.ids.get_unchecked(1), ids[1]);
+    assert_eq!(first.next_cursor, Some(2));
+
+    client.cancel(&ids[0]);
+    let continued = client.escrows_for_participant(buyer, &2, &2);
+    assert_eq!(continued.ids.get_unchecked(0), ids[3]);
+    assert_eq!(continued.ids.get_unchecked(1), ids[4]);
+
+    // The saved live offset skipped ids[2]; restarting sees every surviving
+    // id in creation order without duplicates.
+    let restarted = client.escrows_for_participant(buyer, &0, &u32::MAX);
+    assert_eq!(restarted.ids.len(), 4);
+    assert_eq!(restarted.ids.get_unchecked(0), ids[1]);
+    assert_eq!(restarted.ids.get_unchecked(1), ids[2]);
+    assert_eq!(restarted.ids.get_unchecked(2), ids[3]);
+    assert_eq!(restarted.ids.get_unchecked(3), ids[4]);
 }
 
 #[test]
@@ -655,6 +886,250 @@ fn touch_ttl_extends_and_keeps_state_intact() {
 // Conservation property: every payout path returns exactly the deposit
 // -----------------------------------------------------------------------
 
+// -----------------------------------------------------------------------
+// Partial release
+// -----------------------------------------------------------------------
+
+#[test]
+fn release_partial_pays_seller_and_updates_accounting() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    client.release_partial(&id, &300);
+
+    // 300 should have moved to seller.
+    assert_eq!(tc.balance(seller), 300);
+    // Contract still holds the remaining 700.
+    assert_eq!(tc.balance(&contract_id), 700);
+    // Escrow is still Funded.
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+    // released and remaining accounting.
+    let record: EscrowData = client.get_escrow(&id);
+    assert_eq!(record.released, 300);
+    assert_eq!(record.remaining(), 700);
+}
+
+#[test]
+fn multiple_partial_releases_accumulate_correctly() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    client.release_partial(&id, &200);
+    client.release_partial(&id, &300);
+    client.release_partial(&id, &100);
+
+    assert_eq!(tc.balance(seller), 600);
+    assert_eq!(tc.balance(&contract_id), 400);
+    let record: EscrowData = client.get_escrow(&id);
+    assert_eq!(record.released, 600);
+    assert_eq!(record.remaining(), 400);
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+}
+
+#[test]
+fn exact_final_partial_release_completes_escrow() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    client.release_partial(&id, &400);
+    // Release the exact remaining amount.
+    client.release_partial(&id, &600);
+
+    assert_eq!(tc.balance(seller), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+    let record: EscrowData = client.get_escrow(&id);
+    assert_eq!(record.released, AMOUNT);
+    assert_eq!(record.remaining(), 0);
+}
+
+#[test]
+fn release_partial_zero_amount_is_rejected() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    let err = client.try_release_partial(&id, &0).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(&contract_id), AMOUNT);
+    assert_eq!(tc.balance(seller), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+}
+
+#[test]
+fn release_partial_negative_amount_is_rejected() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    let err = client.try_release_partial(&id, &-100).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(&contract_id), AMOUNT);
+    assert_eq!(tc.balance(seller), 0);
+}
+
+#[test]
+fn release_partial_exceeding_remaining_is_rejected() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    client.release_partial(&id, &400);
+
+    // Try to release more than what's left (remaining = 600).
+    let err = client.try_release_partial(&id, &601).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    // Balances unchanged after rejected call.
+    assert_eq!(tc.balance(seller), 400);
+    assert_eq!(tc.balance(&contract_id), 600);
+}
+
+#[test]
+fn release_partial_on_pending_escrow_is_rejected() {
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+
+    let err = client.try_release_partial(&id, &100).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+}
+
+#[test]
+fn release_partial_after_completion_is_rejected() {
+    let (_env, token, tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    // Complete the escrow via full partial release.
+    client.release_partial(&id, &AMOUNT);
+
+    assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+    let err = client.try_release_partial(&id, &1).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(seller), AMOUNT);
+}
+
+#[test]
+fn partial_release_then_refund_pays_only_remaining() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    client.release_partial(&id, &400);
+    // Seller refunds the remaining 600 to buyer.
+    client.refund(&id);
+
+    assert_eq!(tc.balance(seller), 400);
+    assert_eq!(tc.balance(buyer), 600);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
+}
+
+#[test]
+fn partial_release_then_dispute_then_resolve_for_seller() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    client.release_partial(&id, &300);
+    client.dispute(&id, buyer);
+    // Arbiter resolves in favor of seller: remaining 700 goes to seller.
+    client.resolve(&id, &true);
+
+    assert_eq!(tc.balance(seller), AMOUNT); // 300 partial + 700 resolved
+    assert_eq!(tc.balance(buyer), 0);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+}
+
+#[test]
+fn partial_release_then_dispute_then_resolve_for_buyer() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    client.release_partial(&id, &300);
+    client.dispute(&id, seller);
+    // Arbiter resolves in favor of buyer: remaining 700 goes back to buyer.
+    client.resolve(&id, &false);
+
+    assert_eq!(tc.balance(seller), 300);
+    assert_eq!(tc.balance(buyer), 700);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
+}
+
+#[test]
+fn full_release_after_partial_releases_remaining_only() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    client.release_partial(&id, &250);
+    // Call the full release (should pay only the remaining 750).
+    client.release(&id);
+
+    assert_eq!(tc.balance(seller), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+}
+
+#[test]
+fn storage_compat_new_records_have_released_zero() {
+    // Verify that a freshly created record has released = 0 and
+    // remaining == amount.
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    let record: EscrowData = client.get_escrow(&id);
+    assert_eq!(record.released, 0);
+    assert_eq!(record.remaining(), AMOUNT);
+    assert_eq!(record.amount, AMOUNT);
+}
+
+#[test]
+fn release_partial_conservation_holds() {
+    // After multiple partial releases the sum buyer+seller+contract must
+    // always equal AMOUNT (the mint).
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    let amounts = [100i128, 200, 300, 400];
+    let mut total_paid = 0i128;
+    for &amt in &amounts {
+        // Only release if it doesn't exceed remaining.
+        let record: EscrowData = client.get_escrow(&id);
+        if amt <= record.remaining() {
+            client.release_partial(&id, &amt);
+            total_paid += amt;
+            assert_eq!(
+                tc.balance(buyer) + tc.balance(seller) + tc.balance(&contract_id),
+                AMOUNT,
+                "conservation must hold after each partial release"
+            );
+        }
+    }
+    let record: EscrowData = client.get_escrow(&id);
+    assert_eq!(record.released, total_paid);
+}
+
 /// For every reachable terminal path × timeout combination, the contract
 /// ends holding exactly zero and the parties' combined balance equals the
 /// original mint: `buyer_start == buyer_end + seller_end`. One escrow, one
@@ -694,6 +1169,33 @@ fn conservation_holds_on_every_terminal_path() {
         &|_env, client, id, _buyer, seller, _arbiter| {
             client.dispute(&id, seller);
             client.resolve(&id, &false);
+        },
+        // Partial release (half) then full release of remainder.
+        &|_env, client, id, _buyer, _seller, _arbiter| {
+            client.release_partial(&id, &(AMOUNT / 2));
+            client.release(&id);
+        },
+        // Partial release (partial) then refund of remaining.
+        &|_env, client, id, _buyer, _seller, _arbiter| {
+            client.release_partial(&id, &(AMOUNT / 3));
+            client.refund(&id);
+        },
+        // Partial release then dispute then resolve for seller.
+        &|_env, client, id, buyer, _seller, _arbiter| {
+            client.release_partial(&id, &(AMOUNT / 4));
+            client.dispute(&id, buyer);
+            client.resolve(&id, &true);
+        },
+        // Partial release then dispute then resolve for buyer.
+        &|_env, client, id, _buyer, seller, _arbiter| {
+            client.release_partial(&id, &(AMOUNT / 4));
+            client.dispute(&id, seller);
+            client.resolve(&id, &false);
+        },
+        // Exact final partial release → Completed.
+        &|_env, client, id, _buyer, _seller, _arbiter| {
+            client.release_partial(&id, &(AMOUNT / 2));
+            client.release_partial(&id, &(AMOUNT - AMOUNT / 2));
         },
     ];
 

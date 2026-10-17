@@ -338,6 +338,33 @@ fn generate() -> serde_json::Value {
         });
     }
 
+    // Scenario G — create -> deposit -> release_partial (×2) -> release.
+    {
+        let (env, escrow, token) = rig();
+        let client = SorobanForgeEscrowClient::new(&env, &escrow);
+        b.register_contract(&escrow);
+        b.register_contract(&token);
+        let (buyer, seller, arbiter) = parties(&env);
+        b.step(&env, &escrow, 7000, "0000000000007000", || {
+            StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
+        });
+        let id = b.step(&env, &escrow, 7001, "0000000000007001", || {
+            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT)
+        });
+        b.step(&env, &escrow, 7002, "0000000000007002", || {
+            client.deposit(&id);
+        });
+        b.step(&env, &escrow, 7003, "0000000000007003", || {
+            client.release_partial(&id, &300);
+        });
+        b.step(&env, &escrow, 7004, "0000000000007004", || {
+            client.release_partial(&id, &200);
+        });
+        b.step(&env, &escrow, 7005, "0000000000007005", || {
+            client.release(&id);
+        });
+    }
+
     serde_json::json!({
         "schema": 1,
         "description":
@@ -360,9 +387,10 @@ fn indexer_fixtures_regenerate_and_are_stable() {
     let fixture = build_fixture();
 
     let expected = [
-        ("escrow_created", 6u64),
-        ("deposited", 5),
-        ("released", 1),
+        ("escrow_created", 7u64),
+        ("deposited", 6),
+        ("released", 2),
+        ("partially_released", 2),
         ("refunded", 2),
         ("disputed", 2),
         ("resolved", 2),
@@ -387,6 +415,7 @@ fn indexer_fixtures_regenerate_and_are_stable() {
             "escrow_created",
             "deposited",
             "released",
+            "partially_released",
             "refunded",
             "disputed",
             "resolved",

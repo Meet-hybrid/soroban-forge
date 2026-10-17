@@ -37,6 +37,8 @@ coverage/
 /contract-resource-report.json
 /contract-resource-comparison.json
 /contract-resource-baseline.json
+# Smoke receipts are machine-readable run outputs, not source evidence.
+/artifacts/
 *.profraw
 *.profdata
 cobertura.xml
