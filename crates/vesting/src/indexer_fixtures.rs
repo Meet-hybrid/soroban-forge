@@ -13,7 +13,7 @@ use soroban_forge_test_utils::TestAccounts;
 use soroban_sdk::address_payload::AddressPayload;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::StellarAssetClient;
-use soroban_sdk::xdr::{self, ReadXdr, WriteXdr};
+use soroban_sdk::xdr::{self, WriteXdr};
 use soroban_sdk::{Address, Env};
 use std::collections::HashMap;
 use std::format;
