@@ -294,6 +294,20 @@ pub trait SorobanForgeDaoGovernance {
         voter: Address,
     ) -> Result<bool, soroban_forge_shared_utils::ForgeError>;
 
+    /// Read an account's recorded vote receipt for a proposal (read-only view).
+    ///
+    /// Distinguishes no vote (`Ok(None)`) from unknown proposal
+    /// (`Err(ForgeError::NotFound)`). Does not mutate storage or TTL state.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — proposal does not exist.
+    fn get_vote_receipt(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<Option<VoteReceipt>, soroban_forge_shared_utils::ForgeError>;
+
     /// Permissionless keeper entrypoint: extend the persistent storage TTL of a proposal.
     ///
     /// # Errors
@@ -398,6 +412,20 @@ pub struct DependencyView {
     pub requires: soroban_sdk::Vec<u64>,
     /// Proposal whose execution blocks this proposal.
     pub conflicts_with: Option<u64>,
+}
+
+/// Recorded vote receipt for an account on a proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoteReceipt {
+    /// Proposal voted on.
+    pub proposal_id: u64,
+    /// Account that cast the vote.
+    pub voter: Address,
+    /// Vote direction: true for 'for', false for 'against'.
+    pub support: bool,
+    /// Recorded voting power at the time of vote.
+    pub weight: i128,
 }
 
 /// Bump a persistent entry's TTL to the workspace policy's 30-day horizon
@@ -673,7 +701,13 @@ impl DaoGovernance {
                 .ok_or(ForgeError::ArithmeticOverflow)?;
         }
         let key = DataKey::Proposal(proposal_id);
-        env.storage().instance().set(&vote_key, &true);
+        let receipt = VoteReceipt {
+            proposal_id,
+            voter: voter.clone(),
+            support,
+            weight,
+        };
+        env.storage().instance().set(&vote_key, &receipt);
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
         events::vote_cast(&env, proposal_id, &voter, support, weight);
@@ -944,6 +978,22 @@ impl DaoGovernance {
 
         let vote_key = DataKey::Vote(proposal_id, voter);
         Ok(env.storage().instance().has(&vote_key))
+    }
+
+    /// Read an account's recorded vote receipt for a proposal (read-only view).
+    ///
+    /// Distinguishes no vote (`Ok(None)`) from unknown proposal
+    /// (`Err(ForgeError::NotFound)`). Does not mutate storage or TTL state.
+    pub fn get_vote_receipt(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<Option<VoteReceipt>, ForgeError> {
+        // Verify proposal existence
+        Self::get_proposal_impl(&env, proposal_id)?;
+
+        let vote_key = DataKey::Vote(proposal_id, voter);
+        Ok(env.storage().instance().get(&vote_key))
     }
 
     /// Load the bond configuration, or `NotInitialized` if the contract was
@@ -2493,6 +2543,103 @@ mod tests {
                 .unwrap(),
             ForgeError::NotFound
         );
+
+        // 5. Test get_vote_receipt
+        // Non-existent proposal returns NotFound
+        assert_eq!(
+            client
+                .try_get_vote_receipt(&999, &accounts.user2)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+
+        // User who has not voted returns None
+        assert_eq!(client.get_vote_receipt(&1, &accounts.user1), None);
+
+        // User who voted returns Some(receipt) with correct support and recorded weight
+        let receipt = client
+            .get_vote_receipt(&1, &accounts.user2)
+            .expect("vote receipt should exist");
+        assert_eq!(
+            receipt,
+            VoteReceipt {
+                proposal_id: 1,
+                voter: accounts.user2.clone(),
+                support: true,
+                weight: FUNDS,
+            }
+        );
+    }
+
+    #[test]
+    fn test_get_vote_receipt_coverage_and_immutability() {
+        let (env, token, _tc, _contract_id, client, accounts) = bonded_env!();
+        let target_id = env.register(MockTarget, ());
+
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+
+        // Unknown proposal returns NotFound
+        assert_eq!(
+            client
+                .try_get_vote_receipt(&404, &accounts.user2)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+
+        // Account has not voted: returns None
+        assert_eq!(client.get_vote_receipt(&proposal_id, &accounts.user2), None);
+        assert_eq!(client.get_vote_receipt(&proposal_id, &accounts.user3), None);
+
+        // User2 votes YES (support = true)
+        client.vote(&proposal_id, &accounts.user2, &true);
+        // User3 votes NO (support = false)
+        client.vote(&proposal_id, &accounts.user3, &false);
+
+        let receipt_yes = client
+            .get_vote_receipt(&proposal_id, &accounts.user2)
+            .expect("receipt yes");
+        assert_eq!(receipt_yes.proposal_id, proposal_id);
+        assert_eq!(receipt_yes.voter, accounts.user2);
+        assert!(receipt_yes.support);
+        assert_eq!(receipt_yes.weight, FUNDS);
+
+        let receipt_no = client
+            .get_vote_receipt(&proposal_id, &accounts.user3)
+            .expect("receipt no");
+        assert_eq!(receipt_no.proposal_id, proposal_id);
+        assert_eq!(receipt_no.voter, accounts.user3);
+        assert!(!receipt_no.support);
+        assert_eq!(receipt_no.weight, FUNDS);
+
+        // Still returns None for account that has not voted
+        assert_eq!(
+            client.get_vote_receipt(&proposal_id, &accounts.validator),
+            None
+        );
+
+        // Read query does not mutate proposal or totals
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.for_votes, FUNDS);
+        assert_eq!(proposal.against_votes, FUNDS);
+        assert_eq!(proposal.state, ProposalState::Active);
+
+        // Transferring tokens away after voting does not change historical receipt weight
+        let tc = TokenClient::new(&env, &token);
+        tc.transfer(&accounts.user2, &accounts.deployer, &(FUNDS / 2));
+        assert_eq!(tc.balance(&accounts.user2), FUNDS / 2);
+        let receipt_after_transfer = client
+            .get_vote_receipt(&proposal_id, &accounts.user2)
+            .expect("receipt after transfer");
+        assert_eq!(receipt_after_transfer.weight, FUNDS);
     }
 
     // -------------------------------------------------------------------

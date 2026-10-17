@@ -121,6 +121,28 @@ treasury: string;
  */
 export type ProposalState = {tag: "Active", values: void} | {tag: "Succeeded", values: void} | {tag: "Defeated", values: void} | {tag: "Executed", values: void} | {tag: "Queued", values: void} | {tag: "Cancelled", values: void};
 
+/**
+ * Recorded vote receipt for an account on a proposal.
+ */
+export interface VoteReceipt {
+  /**
+   * Proposal voted on.
+   */
+  proposal_id: u64;
+  /**
+   * Account that cast the vote.
+   */
+  voter: string;
+  /**
+   * Vote direction: true for 'for', false for 'against'.
+   */
+  support: boolean;
+  /**
+   * Recorded voting power at the time of vote.
+   */
+  weight: i128;
+}
+
 
 
 
@@ -354,6 +376,14 @@ export interface Client {
    * Returns `ForgeError::NotFound` if `proposal_id` does not exist.
    */
   has_voted: ({proposal_id, voter}: {proposal_id: u64, voter: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<boolean>>>
+
+  /**
+   * Construct and simulate a get_vote_receipt transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Read an account's recorded vote receipt for a proposal (read-only view).
+   *
+   * Distinguishes no vote (`Ok(None)`) from unknown proposal (`Err(ForgeError::NotFound)`).
+   */
+  get_vote_receipt: ({proposal_id, voter}: {proposal_id: u64, voter: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Option<VoteReceipt>>>>
 
   /**
    * Construct and simulate a get_proposal transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
