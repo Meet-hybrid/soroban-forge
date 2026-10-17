@@ -582,6 +582,37 @@ pub trait SorobanForgeMultiSigWallet {
         tx_id: u64,
     ) -> Result<Vec<Address>, soroban_forge_shared_utils::ForgeError>;
 
+    /// Read a combined preview of `tx_id` reporting its status, the wallet's
+    /// configured approval threshold, current approvals, and remaining
+    /// confirmations required before execution (read-only view).
+    ///
+    /// Does not mutate wallet or transaction storage.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction with id `tx_id`.
+    /// * [`ForgeError::NotInitialized`] — the wallet has no approval threshold.
+    fn preview_transaction(
+        env: Env,
+        tx_id: u64,
+    ) -> Result<TransactionPreview, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the number of additional confirmations still required for `tx_id`
+    /// to reach the configured approval threshold (read-only view).
+    ///
+    /// Returns `threshold.saturating_sub(confirmations.len())` while `tx_id` is
+    /// `Pending`, and `0` once `tx_id` is in a terminal state (`Executed`,
+    /// `Rejected`, or `Expired`).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction with id `tx_id`.
+    /// * [`ForgeError::NotInitialized`] — the wallet has no approval threshold.
+    fn get_required_confirmations(
+        env: Env,
+        tx_id: u64,
+    ) -> Result<u32, soroban_forge_shared_utils::ForgeError>;
+
     /// Read the number of transactions submitted so far (read-only view).
     fn get_tx_count(env: Env) -> u64;
 
@@ -806,6 +837,23 @@ pub struct WindowEntry {
     pub submitted_at: u64,
     /// Amount the withdrawal carries.
     pub amount: i128,
+}
+
+/// Read-only preview of a multisig transaction's status and confirmation progress.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionPreview {
+    /// Transaction identifier.
+    pub tx_id: u64,
+    /// Current lifecycle status (`Pending`, `Executed`, `Rejected`, or `Expired`).
+    pub status: TxStatus,
+    /// Current configured wallet approval threshold.
+    pub threshold: u32,
+    /// Number of owner confirmations currently recorded on the transaction.
+    pub approvals: u32,
+    /// Number of additional confirmations still required (`threshold.saturating_sub(approvals)`
+    /// while `Pending`, or `0` for terminal states `Executed`, `Rejected`, and `Expired`).
+    pub remaining_approvals: u32,
 }
 
 /// A transaction awaiting multi-signature approval.
@@ -1549,6 +1597,57 @@ impl MultiSigWallet {
     pub fn get_rejections(env: Env, tx_id: u64) -> Result<Vec<Address>, ForgeError> {
         let wallet_tx = Self::get_tx_impl(&env, tx_id)?;
         Ok(wallet_tx.rejections)
+    }
+
+    /// Read a combined preview of `tx_id` reporting its status, the wallet's
+    /// configured approval threshold, current approvals, and remaining
+    /// confirmations required before execution (read-only view).
+    ///
+    /// Reuses [`Self::get_tx_impl`] so lazy expiry evaluation and confirmation
+    /// counts match `get_tx`, `get_confirmations`, and `execute`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction with id `tx_id`.
+    /// * [`ForgeError::NotInitialized`] — the wallet has no approval threshold.
+    pub fn preview_transaction(env: Env, tx_id: u64) -> Result<TransactionPreview, ForgeError> {
+        Self::preview_transaction_impl(&env, tx_id)
+    }
+
+    /// Read the number of additional confirmations still required for `tx_id`
+    /// to reach the configured approval threshold (read-only view).
+    ///
+    /// Returns `threshold.saturating_sub(confirmations.len())` while `tx_id` is
+    /// `Pending`, and `0` once `tx_id` is in a terminal state (`Executed`,
+    /// `Rejected`, or `Expired`).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction with id `tx_id`.
+    /// * [`ForgeError::NotInitialized`] — the wallet has no approval threshold.
+    pub fn get_required_confirmations(env: Env, tx_id: u64) -> Result<u32, ForgeError> {
+        Ok(Self::preview_transaction_impl(&env, tx_id)?.remaining_approvals)
+    }
+
+    fn preview_transaction_impl(env: &Env, tx_id: u64) -> Result<TransactionPreview, ForgeError> {
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(ForgeError::NotInitialized)?;
+        let wallet_tx = Self::get_tx_impl(env, tx_id)?;
+        let approvals = wallet_tx.confirmations.len();
+        let remaining_approvals = match wallet_tx.status {
+            TxStatus::Pending => threshold.saturating_sub(approvals),
+            TxStatus::Executed | TxStatus::Rejected | TxStatus::Expired => 0,
+        };
+        Ok(TransactionPreview {
+            tx_id,
+            status: wallet_tx.status,
+            threshold,
+            approvals,
+            remaining_approvals,
+        })
     }
 
     /// Read the number of transactions submitted so far (read-only view).
@@ -4784,6 +4883,181 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending.get_unchecked(0).tx_id, id2);
         assert_eq!(pending.get_unchecked(1).tx_id, id3);
+    }
+
+    #[test]
+    fn preview_transaction_and_required_confirmations_cover_thresholds_and_terminal_states() {
+        let (env, client, accounts) = setup!();
+        let executable = env.register(MockTarget, ());
+        env.ledger().set_timestamp(1_000);
+
+        // 1. Threshold > 1 (2-of-3 from setup!()): Pending -> 1 approval -> 2 approvals -> Executed
+        let tx_exec = client.submit(&accounts.user1, &executable, &payload(&env), &None);
+        assert_eq!(
+            client.preview_transaction(&tx_exec),
+            TransactionPreview {
+                tx_id: tx_exec,
+                status: TxStatus::Pending,
+                threshold: 2,
+                approvals: 0,
+                remaining_approvals: 2,
+            }
+        );
+        assert_eq!(client.get_required_confirmations(&tx_exec), 2);
+
+        client.confirm(&tx_exec, &accounts.user1);
+        assert_eq!(
+            client.preview_transaction(&tx_exec),
+            TransactionPreview {
+                tx_id: tx_exec,
+                status: TxStatus::Pending,
+                threshold: 2,
+                approvals: 1,
+                remaining_approvals: 1,
+            }
+        );
+        assert_eq!(client.get_required_confirmations(&tx_exec), 1);
+
+        client.confirm(&tx_exec, &accounts.user2);
+        assert_eq!(
+            client.preview_transaction(&tx_exec),
+            TransactionPreview {
+                tx_id: tx_exec,
+                status: TxStatus::Pending,
+                threshold: 2,
+                approvals: 2,
+                remaining_approvals: 0,
+            }
+        );
+        assert_eq!(client.get_required_confirmations(&tx_exec), 0);
+
+        client.execute(&tx_exec);
+        assert_eq!(
+            client.preview_transaction(&tx_exec),
+            TransactionPreview {
+                tx_id: tx_exec,
+                status: TxStatus::Executed,
+                threshold: 2,
+                approvals: 2,
+                remaining_approvals: 0,
+            }
+        );
+        assert_eq!(client.get_required_confirmations(&tx_exec), 0);
+
+        // 2. Rejected terminal state retains existing approvals and reports 0 remaining
+        let tx_rej = client.submit(&accounts.user1, &executable, &payload(&env), &None);
+        client.confirm(&tx_rej, &accounts.user1);
+        client.reject(&tx_rej, &accounts.user2);
+        assert_eq!(
+            client.preview_transaction(&tx_rej),
+            TransactionPreview {
+                tx_id: tx_rej,
+                status: TxStatus::Rejected,
+                threshold: 2,
+                approvals: 1,
+                remaining_approvals: 0,
+            }
+        );
+        assert_eq!(client.get_required_confirmations(&tx_rej), 0);
+
+        // 3. Expired terminal state (lazy expiry) retains partial approvals and reports 0 remaining
+        let tx_exp = client.submit(&accounts.user1, &executable, &payload(&env), &Some(2_000));
+        client.confirm(&tx_exp, &accounts.user1);
+        env.ledger().set_timestamp(2_000);
+        assert_eq!(
+            client.preview_transaction(&tx_exp),
+            TransactionPreview {
+                tx_id: tx_exp,
+                status: TxStatus::Expired,
+                threshold: 2,
+                approvals: 1,
+                remaining_approvals: 0,
+            }
+        );
+        assert_eq!(client.get_required_confirmations(&tx_exp), 0);
+
+        // 4. Unknown transaction IDs return NotFound
+        assert_eq!(
+            client.try_preview_transaction(&999).unwrap_err().unwrap(),
+            ForgeError::NotFound
+        );
+        assert_eq!(
+            client
+                .try_get_required_confirmations(&999)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+    }
+
+    #[test]
+    fn preview_transaction_threshold_one_and_read_only_invariants() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let accounts = TestAccounts::generate(&env);
+        let contract_id = env.register(MultiSigWallet, ());
+        let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+        let executable = env.register(MockTarget, ());
+
+        // Uninitialized wallet returns NotInitialized
+        assert_eq!(
+            client.try_preview_transaction(&1).unwrap_err().unwrap(),
+            ForgeError::NotInitialized
+        );
+        assert_eq!(
+            client
+                .try_get_required_confirmations(&1)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotInitialized
+        );
+
+        // Initialize 1-of-2 wallet (threshold == 1)
+        let owners = soroban_sdk::vec![&env, accounts.user1.clone(), accounts.user2.clone()];
+        client.initialize(&owners, &1);
+
+        let tx_id = client.submit(&accounts.user1, &executable, &payload(&env), &None);
+        assert_eq!(
+            client.preview_transaction(&tx_id),
+            TransactionPreview {
+                tx_id,
+                status: TxStatus::Pending,
+                threshold: 1,
+                approvals: 0,
+                remaining_approvals: 1,
+            }
+        );
+        assert_eq!(client.get_required_confirmations(&tx_id), 1);
+
+        client.confirm(&tx_id, &accounts.user1);
+
+        // Enforce-mode empty auths: queries require no signature and mutate no state
+        env.mock_auths(&[]);
+        assert_eq!(
+            client.preview_transaction(&tx_id),
+            TransactionPreview {
+                tx_id,
+                status: TxStatus::Pending,
+                threshold: 1,
+                approvals: 1,
+                remaining_approvals: 0,
+            }
+        );
+        assert_eq!(client.get_required_confirmations(&tx_id), 0);
+        assert!(env.auths().is_empty());
+
+        env.mock_all_auths();
+        client.execute(&tx_id);
+        assert_eq!(
+            client.preview_transaction(&tx_id),
+            TransactionPreview {
+                tx_id,
+                status: TxStatus::Executed,
+                threshold: 1,
+                approvals: 1,
+                remaining_approvals: 0,
+            }
+        );
     }
 }
 

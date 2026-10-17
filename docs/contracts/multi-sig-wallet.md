@@ -16,6 +16,8 @@ fn confirm(tx_id: u64, signer: Address) -> Result<(), ForgeError>
 fn reject(tx_id: u64, signer: Address) -> Result<(), ForgeError>
 fn execute(tx_id: u64) -> Result<(), ForgeError>
 fn get_tx(tx_id: u64) -> Result<WalletTx, ForgeError>
+fn preview_transaction(tx_id: u64) -> Result<TransactionPreview, ForgeError>
+fn get_required_confirmations(tx_id: u64) -> Result<u32, ForgeError>
 fn is_live(tx_id: u64) -> bool
 fn is_tx_live(tx_id: u64) -> bool
 fn add_owner(proposer: Address, new_owner: Address) -> Result<u64, ForgeError>
@@ -67,6 +69,8 @@ fn get_transactions_by_status(
     offset: u32,
     limit: u32,
 ) -> Result<Vec<WalletTx>, ForgeError>
+fn preview_transaction(tx_id: u64) -> Result<TransactionPreview, ForgeError>
+fn get_required_confirmations(tx_id: u64) -> Result<u32, ForgeError>
 ```
 
 Both return transactions in ascending `tx_id` order. For
@@ -78,6 +82,8 @@ past the end return an empty vector or the remaining records. A `limit` of
 zero returns `ForgeError::InvalidInput`. An uninitialized or empty wallet
 returns an empty vector for a positive limit. These views do not require
 authorization and do not modify contract state.
+
+`preview_transaction(tx_id)` returns a read-only `TransactionPreview { tx_id, status, threshold, approvals, remaining_approvals }` combining the transaction's lazy-evaluated `TxStatus`, the wallet's configured `threshold`, the current `approvals` count, and `remaining_approvals` (`threshold.saturating_sub(approvals)` while `Pending`, or `0` once `Executed`, `Rejected`, or `Expired`). `get_required_confirmations(tx_id)` returns `remaining_approvals` directly. Unknown transaction IDs return `ForgeError::NotFound`, and an uninitialized wallet returns `ForgeError::NotInitialized`.
 
 Additional views: `get_threshold`, `get_owners`, `is_owner`,
 `get_confirmations`, `get_rejections`, `get_tx_count`, `get_tx`, and the
