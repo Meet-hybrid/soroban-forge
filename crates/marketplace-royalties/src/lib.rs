@@ -47,7 +47,8 @@
 //! - `settle_sales` has the same trust model as `settle_sale`: one
 //!   collection authorization and one payer authorization cover every
 //!   nested token transfer in the batch — no per-sale re-authorization.
-//! - `get_royalty` and `get_settlement_summary` are read-only views.
+//! - `get_royalty`, `get_settlement_summary`, `quote_sale`,
+//!   `preview_settlement`, and `preview_settlement_splits` are read-only views.
 //!
 //! Settlement follows escrow's transfer-before-state ordering: all token
 //! transfers run before any settlement state is committed, `settle_sale`
@@ -99,6 +100,55 @@ pub const MAX_ROYALTY_RECIPIENTS: u32 = 5;
 pub struct RoyaltyShare {
     pub recipient: Address,
     pub bps: u32,
+}
+
+/// Per-recipient royalty breakdown returned inside a [`SettlementPreview`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientRoyaltyPreview {
+    /// Recipient address in configured split order.
+    pub recipient: Address,
+    /// Effective basis-point rate applied to this recipient (`0` when the
+    /// collection configuration is `Disabled`).
+    pub bps: u32,
+    /// Floored royalty token amount (`gross * bps / 10_000`) payable to this
+    /// recipient at settlement time.
+    pub amount: i128,
+    /// Sub-unit basis-point numerator remainder (`(gross * bps) % 10_000`, in
+    /// `0..10_000`) dropped by integer floor division for this recipient and
+    /// retained in `seller_proceeds`.
+    pub sub_unit_residue_bps: u32,
+}
+
+/// Read-only settlement breakdown with per-recipient royalty payouts and
+/// value-conservation details, returned by
+/// [`MarketplaceRoyalties::preview_settlement`] and
+/// [`MarketplaceRoyalties::preview_settlement_splits`].
+///
+/// Conservation invariants:
+/// - `recipients.iter().map(|r| r.amount).sum() == total_royalties`
+/// - `total_royalties + seller_proceeds == gross`
+/// - `rounding_residue == (gross * royalty_bps / 10_000) - total_royalties`
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementPreview {
+    /// Gross sale amount being previewed.
+    pub gross: i128,
+    /// Effective aggregate royalty rate in basis points (`0` when `Disabled`).
+    pub royalty_bps: u32,
+    /// Ordered per-recipient royalty breakdown matching the settlement
+    /// transfer sequence.
+    pub recipients: soroban_sdk::Vec<RecipientRoyaltyPreview>,
+    /// Sum of all floored recipient royalty amounts (identical to
+    /// [`Settlement::royalty_share`] and [`SaleQuote::royalty_amount`]).
+    pub total_royalties: i128,
+    /// Net proceeds retained by the seller (`gross - total_royalties`,
+    /// identical to [`Settlement::seller_net`] and [`SaleQuote::seller_net`]).
+    pub seller_proceeds: i128,
+    /// Whole-token rounding residue retained inside `seller_proceeds` when
+    /// independent per-recipient floor rounding sums to less than the
+    /// aggregate rate floor (`(gross * royalty_bps / 10_000) - total_royalties`).
+    pub rounding_residue: i128,
 }
 
 /// Public interface for the Soroban Forge marketplace royalties contract.
@@ -215,6 +265,49 @@ pub trait SorobanForgeMarketplaceRoyalties {
         collection: Address,
         amount: i128,
     ) -> Result<SaleQuote, soroban_forge_shared_utils::ForgeError>;
+
+    /// Preview the full settlement breakdown and royalty conservation details
+    /// for a sale of `amount` on `collection` (read-only view).
+    ///
+    /// Returns each configured recipient's floored royalty amount and sub-unit
+    /// remainder, total royalties, seller proceeds, and whole-token rounding
+    /// residue retained by the seller without transferring tokens, requiring
+    /// authorization, or mutating state.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no royalty configuration for `collection`.
+    /// * [`ForgeError::InvalidInput`] — `amount <= 0` or the stored royalty
+    ///   configuration is invalid.
+    /// * [`ForgeError::ArithmeticOverflow`] — arithmetic overflow during split
+    ///   computation.
+    fn preview_settlement(
+        env: Env,
+        collection: Address,
+        amount: i128,
+    ) -> Result<SettlementPreview, soroban_forge_shared_utils::ForgeError>;
+
+    /// Preview the full settlement breakdown and royalty conservation details
+    /// for a sale of `amount` against an arbitrary candidate recipient split
+    /// (read-only view).
+    ///
+    /// Validates `amount > 0` and the same split constraints enforced by
+    /// `set_royalty_splits` (`1..=MAX_ROYALTY_RECIPIENTS` recipients and total
+    /// `bps <= 10_000`) without requiring a registered collection or mutating
+    /// storage.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — `amount <= 0`, `recipients` is empty or
+    ///   exceeds [`MAX_ROYALTY_RECIPIENTS`], or total basis points exceed
+    ///   `10_000`.
+    /// * [`ForgeError::ArithmeticOverflow`] — arithmetic overflow during split
+    ///   computation.
+    fn preview_settlement_splits(
+        env: Env,
+        amount: i128,
+        recipients: soroban_sdk::Vec<RoyaltyShare>,
+    ) -> Result<SettlementPreview, soroban_forge_shared_utils::ForgeError>;
 
     /// Permissionless keeper entrypoint: extend the persistent storage TTL of a collection's royalty configuration and settlement summary.
     ///
@@ -763,6 +856,65 @@ impl MarketplaceRoyalties {
         })
     }
 
+    /// Preview the full settlement breakdown and royalty conservation details
+    /// for a sale of `amount` on `collection` (read-only view).
+    ///
+    /// Runs the exact same configuration load, validation, and per-recipient
+    /// floor split as `settle_sale`, returning each recipient's floored royalty
+    /// payout in configured transfer order, sub-unit remainder, total
+    /// royalties, seller proceeds, and any whole-token rounding residue
+    /// retained by the seller when per-recipient floor rounding sums to less
+    /// than the aggregate rate floor.
+    ///
+    /// No storage mutation, no authorization, no events.
+    pub fn preview_settlement(
+        env: Env,
+        collection: Address,
+        amount: i128,
+    ) -> Result<SettlementPreview, ForgeError> {
+        let royalty: Royalty = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Royalty(collection))
+            .ok_or(ForgeError::NotFound)?;
+        if amount <= 0 || royalty.bps > 10_000 {
+            return Err(ForgeError::InvalidInput);
+        }
+        let recipients = royalty_splits(&env, &royalty)?;
+        let configured_bps = validate_royalty_splits(&recipients)?;
+        if configured_bps != royalty.bps {
+            return Err(ForgeError::InvalidInput);
+        }
+        build_settlement_preview(&env, amount, &royalty, &recipients)
+    }
+
+    /// Preview the full settlement breakdown and royalty conservation details
+    /// for a sale of `amount` against an arbitrary candidate `recipients` split
+    /// (read-only view).
+    ///
+    /// Validates `amount > 0` and the same split invariants enforced by
+    /// `set_royalty_splits` (`1..=MAX_ROYALTY_RECIPIENTS` entries and total
+    /// basis points `<= 10_000`) without requiring a registered collection or
+    /// mutating storage.
+    pub fn preview_settlement_splits(
+        env: Env,
+        amount: i128,
+        recipients: soroban_sdk::Vec<RoyaltyShare>,
+    ) -> Result<SettlementPreview, ForgeError> {
+        if amount <= 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        let total_bps = validate_royalty_splits(&recipients)?;
+        let first = recipients.get(0).ok_or(ForgeError::InvalidInput)?;
+        let synthetic_royalty = Royalty {
+            collection: first.recipient.clone(),
+            recipient: first.recipient,
+            bps: total_bps,
+            status: RoyaltyStatus::Active,
+        };
+        build_settlement_preview(&env, amount, &synthetic_royalty, &recipients)
+    }
+
     /// Permissionless keeper: bump the royalty and summary entries' TTL without changing
     /// any state.
     ///
@@ -783,6 +935,67 @@ impl MarketplaceRoyalties {
         }
         Ok(())
     }
+}
+
+/// Validate recipient split bounds (`1..=MAX_ROYALTY_RECIPIENTS` and sum of
+/// `bps <= 10_000`), returning the total configured basis points.
+fn validate_royalty_splits(recipients: &soroban_sdk::Vec<RoyaltyShare>) -> Result<u32, ForgeError> {
+    let count = recipients.len();
+    if count == 0 || count > MAX_ROYALTY_RECIPIENTS {
+        return Err(ForgeError::InvalidInput);
+    }
+    let mut total = 0_u32;
+    for entry in recipients.iter() {
+        total = total
+            .checked_add(entry.bps)
+            .ok_or(ForgeError::InvalidInput)?;
+    }
+    if total > 10_000 {
+        return Err(ForgeError::InvalidInput);
+    }
+    Ok(total)
+}
+
+/// Build a [`SettlementPreview`] using the exact same `split_recipients` and
+/// `split` resolution as `settle_sale`.
+fn build_settlement_preview(
+    env: &Env,
+    amount: i128,
+    royalty: &Royalty,
+    recipients: &soroban_sdk::Vec<RoyaltyShare>,
+) -> Result<SettlementPreview, ForgeError> {
+    let royalty_bps = effective_bps(royalty);
+    let (shares, total_royalties, seller_proceeds) =
+        split_recipients(env, amount, royalty, recipients)?;
+    let (aggregate_royalty, _) = split(amount, royalty_bps)?;
+    let rounding_residue = aggregate_royalty
+        .checked_sub(total_royalties)
+        .ok_or(ForgeError::ArithmeticOverflow)?;
+
+    let mut preview_recipients = soroban_sdk::Vec::new(env);
+    for (index, entry) in recipients.iter().enumerate() {
+        let share = shares.get(index as u32).ok_or(ForgeError::InvalidInput)?;
+        let recipient_bps = match royalty.status {
+            RoyaltyStatus::Active => entry.bps,
+            RoyaltyStatus::Disabled => 0,
+        };
+        let sub_unit_residue_bps = (((amount % 10_000) * (recipient_bps as i128)) % 10_000) as u32;
+        preview_recipients.push_back(RecipientRoyaltyPreview {
+            recipient: entry.recipient,
+            bps: recipient_bps,
+            amount: share,
+            sub_unit_residue_bps,
+        });
+    }
+
+    Ok(SettlementPreview {
+        gross: amount,
+        royalty_bps,
+        recipients: preview_recipients,
+        total_royalties,
+        seller_proceeds,
+        rounding_residue,
+    })
 }
 
 /// The rate actually applied to sales under `royalty`: zero once the
@@ -2380,5 +2593,328 @@ mod tests {
         assert_eq!(tc.balance(seller), balances_before.1);
         assert_eq!(tc.balance(recipient), balances_before.2);
         assert!(env.events().all().events().is_empty());
+    }
+
+    #[test]
+    fn preview_settlement_multi_recipient_reports_rounding_dust_and_conserves_value() {
+        let (env, token, _tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let mut splits = soroban_sdk::Vec::new(&env);
+        splits.push_back(RoyaltyShare {
+            recipient: accounts.user2.clone(),
+            bps: 3_333,
+        });
+        splits.push_back(RoyaltyShare {
+            recipient: accounts.user3.clone(),
+            bps: 3_333,
+        });
+        splits.push_back(RoyaltyShare {
+            recipient: accounts.arbiter.clone(),
+            bps: 3_334,
+        });
+        splits.push_back(RoyaltyShare {
+            recipient: accounts.user1.clone(),
+            bps: 0,
+        });
+        client.set_royalty_splits(collection, &splits);
+
+        let preview = client.preview_settlement(collection, &1_000_i128);
+        assert_eq!(preview.gross, 1_000);
+        assert_eq!(preview.royalty_bps, 10_000);
+        assert_eq!(preview.total_royalties, 999);
+        assert_eq!(preview.seller_proceeds, 1);
+        assert_eq!(preview.rounding_residue, 1);
+        assert_eq!(
+            preview.total_royalties + preview.seller_proceeds,
+            preview.gross
+        );
+        assert_eq!(preview.recipients.len(), 4);
+
+        let r0 = preview.recipients.get(0).unwrap();
+        assert_eq!(
+            r0,
+            RecipientRoyaltyPreview {
+                recipient: accounts.user2.clone(),
+                bps: 3_333,
+                amount: 333,
+                sub_unit_residue_bps: 3_000,
+            }
+        );
+        let r1 = preview.recipients.get(1).unwrap();
+        assert_eq!(
+            r1,
+            RecipientRoyaltyPreview {
+                recipient: accounts.user3.clone(),
+                bps: 3_333,
+                amount: 333,
+                sub_unit_residue_bps: 3_000,
+            }
+        );
+        let r2 = preview.recipients.get(2).unwrap();
+        assert_eq!(
+            r2,
+            RecipientRoyaltyPreview {
+                recipient: accounts.arbiter.clone(),
+                bps: 3_334,
+                amount: 333,
+                sub_unit_residue_bps: 4_000,
+            }
+        );
+        let r3 = preview.recipients.get(3).unwrap();
+        assert_eq!(
+            r3,
+            RecipientRoyaltyPreview {
+                recipient: accounts.user1.clone(),
+                bps: 0,
+                amount: 0,
+                sub_unit_residue_bps: 0,
+            }
+        );
+
+        let sum_recipient_amounts: i128 = preview.recipients.iter().map(|r| r.amount).sum();
+        let sum_sub_unit_bps: u32 = preview
+            .recipients
+            .iter()
+            .map(|r| r.sub_unit_residue_bps)
+            .sum();
+        assert_eq!(sum_recipient_amounts, preview.total_royalties);
+        assert_eq!(
+            (sum_sub_unit_bps / 10_000) as i128,
+            preview.rounding_residue
+        );
+
+        // Candidate split preview matches the registered collection preview exactly.
+        let candidate_preview = client.preview_settlement_splits(&1_000_i128, &splits);
+        assert_eq!(candidate_preview, preview);
+
+        // Actual settlement matches the preview's totals.
+        let settlement = client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+        );
+        assert_eq!(settlement.royalty_share, preview.total_royalties);
+        assert_eq!(settlement.seller_net, preview.seller_proceeds);
+    }
+
+    #[test]
+    fn preview_settlement_zero_royalties_and_disabled_config() {
+        let (env, _token, _tc, contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+
+        // 0 bps single recipient
+        client.set_royalty(collection, &accounts.user2, &0_u32);
+        let zero_preview = client.preview_settlement(collection, &1_000_i128);
+        assert_eq!(zero_preview.royalty_bps, 0);
+        assert_eq!(zero_preview.total_royalties, 0);
+        assert_eq!(zero_preview.seller_proceeds, 1_000);
+        assert_eq!(zero_preview.rounding_residue, 0);
+        assert_eq!(zero_preview.recipients.len(), 1);
+        let entry = zero_preview.recipients.get(0).unwrap();
+        assert_eq!(entry.bps, 0);
+        assert_eq!(entry.amount, 0);
+        assert_eq!(entry.sub_unit_residue_bps, 0);
+
+        // Disabled multi-recipient configuration zeroes all effective rates and payouts.
+        let mut splits = soroban_sdk::Vec::new(&env);
+        splits.push_back(RoyaltyShare {
+            recipient: accounts.user2.clone(),
+            bps: 2_500,
+        });
+        splits.push_back(RoyaltyShare {
+            recipient: accounts.user3.clone(),
+            bps: 2_500,
+        });
+        client.set_royalty_splits(collection, &splits);
+        let disabled = Royalty {
+            collection: collection.clone(),
+            recipient: accounts.user2.clone(),
+            bps: 5_000,
+            status: RoyaltyStatus::Disabled,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Royalty(collection.clone()), &disabled);
+        });
+
+        let disabled_preview = client.preview_settlement(collection, &1_000_i128);
+        assert_eq!(disabled_preview.royalty_bps, 0);
+        assert_eq!(disabled_preview.total_royalties, 0);
+        assert_eq!(disabled_preview.seller_proceeds, 1_000);
+        assert_eq!(disabled_preview.rounding_residue, 0);
+        assert_eq!(disabled_preview.recipients.len(), 2);
+        for r in disabled_preview.recipients.iter() {
+            assert_eq!(r.bps, 0);
+            assert_eq!(r.amount, 0);
+            assert_eq!(r.sub_unit_residue_bps, 0);
+        }
+    }
+
+    #[test]
+    fn preview_settlement_boundary_amounts_and_rates() {
+        let (env, client, accounts) = setup!();
+        let collection = &accounts.arbiter;
+
+        // Minimum sale amount (1 stroop) at 9,999 bps floors to 0 with 9,999 sub-unit residue bps.
+        client.set_royalty(collection, &accounts.user2, &9_999_u32);
+        let min_preview = client.preview_settlement(collection, &1_i128);
+        assert_eq!(min_preview.gross, 1);
+        assert_eq!(min_preview.total_royalties, 0);
+        assert_eq!(min_preview.seller_proceeds, 1);
+        assert_eq!(min_preview.rounding_residue, 0);
+        assert_eq!(
+            min_preview.recipients.get(0).unwrap().sub_unit_residue_bps,
+            9_999
+        );
+
+        // Exact 10,000 unit boundary at 5 max recipients of 2,000 bps each (= 10,000 bps).
+        let mut max_splits = soroban_sdk::Vec::new(&env);
+        for _ in 0..MAX_ROYALTY_RECIPIENTS {
+            max_splits.push_back(RoyaltyShare {
+                recipient: accounts.user2.clone(),
+                bps: 2_000,
+            });
+        }
+        client.set_royalty_splits(collection, &max_splits);
+        let exact_preview = client.preview_settlement(collection, &10_000_i128);
+        assert_eq!(exact_preview.total_royalties, 10_000);
+        assert_eq!(exact_preview.seller_proceeds, 0);
+        assert_eq!(exact_preview.rounding_residue, 0);
+        for r in exact_preview.recipients.iter() {
+            assert_eq!(r.amount, 2_000);
+            assert_eq!(r.sub_unit_residue_bps, 0);
+        }
+
+        // i128::MAX boundary amount without intermediate overflow.
+        let max_amount_preview = client.preview_settlement(collection, &i128::MAX);
+        assert_eq!(
+            max_amount_preview.total_royalties + max_amount_preview.seller_proceeds,
+            i128::MAX
+        );
+        let sum_shares: i128 = max_amount_preview.recipients.iter().map(|r| r.amount).sum();
+        assert_eq!(sum_shares, max_amount_preview.total_royalties);
+    }
+
+    #[test]
+    fn preview_settlement_rejects_invalid_inputs_and_configurations() {
+        let (env, _token, _tc, contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let unknown = Address::generate(&env);
+
+        // Unregistered collection -> NotFound
+        assert_eq!(
+            client
+                .try_preview_settlement(&unknown, &1_000_i128)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+
+        // Non-positive sale amounts -> InvalidInput
+        for invalid_amount in [0_i128, -1, -1_000, i128::MIN] {
+            assert_eq!(
+                client
+                    .try_preview_settlement(collection, &invalid_amount)
+                    .unwrap_err()
+                    .unwrap(),
+                ForgeError::InvalidInput
+            );
+        }
+
+        // Candidate split validation errors -> InvalidInput
+        let empty_splits: soroban_sdk::Vec<RoyaltyShare> = soroban_sdk::Vec::new(&env);
+        assert_eq!(
+            client
+                .try_preview_settlement_splits(&1_000_i128, &empty_splits)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        let mut over_max_recipients = soroban_sdk::Vec::new(&env);
+        for _ in 0..=MAX_ROYALTY_RECIPIENTS {
+            over_max_recipients.push_back(RoyaltyShare {
+                recipient: accounts.user2.clone(),
+                bps: 100,
+            });
+        }
+        assert_eq!(
+            client
+                .try_preview_settlement_splits(&1_000_i128, &over_max_recipients)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        let mut over_100_pct = soroban_sdk::Vec::new(&env);
+        over_100_pct.push_back(RoyaltyShare {
+            recipient: accounts.user2.clone(),
+            bps: 6_000,
+        });
+        over_100_pct.push_back(RoyaltyShare {
+            recipient: accounts.user3.clone(),
+            bps: 4_001,
+        });
+        assert_eq!(
+            client
+                .try_preview_settlement_splits(&1_000_i128, &over_100_pct)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // Corrupted stored configuration (bps > 10_000 or mismatched split sum) -> InvalidInput
+        let bad_royalty = Royalty {
+            collection: collection.clone(),
+            recipient: accounts.user2.clone(),
+            bps: 10_001,
+            status: RoyaltyStatus::Active,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Royalty(collection.clone()), &bad_royalty);
+        });
+        assert_eq!(
+            client
+                .try_preview_settlement(collection, &1_000_i128)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+    }
+
+    #[test]
+    fn preview_settlement_requires_no_auth_and_mutates_no_state() {
+        let (env, _token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let payer = &accounts.user1;
+        let recipient = &accounts.user2;
+        let seller = &accounts.user3;
+
+        let balances_before = (tc.balance(payer), tc.balance(seller), tc.balance(recipient));
+        env.set_auths(&[]);
+
+        let preview = client.preview_settlement(collection, &1_030_i128);
+        let quote = client.quote_sale(collection, &1_030_i128);
+        assert_eq!(preview.total_royalties, quote.royalty_amount);
+        assert_eq!(preview.seller_proceeds, quote.seller_net);
+        assert_eq!(preview.royalty_bps, quote.royalty_bps);
+        assert_eq!(preview.rounding_residue, 0);
+
+        assert_eq!(tc.balance(payer), balances_before.0);
+        assert_eq!(tc.balance(seller), balances_before.1);
+        assert_eq!(tc.balance(recipient), balances_before.2);
+        assert!(env.events().all().events().is_empty());
+        assert_eq!(
+            client
+                .try_get_settlement_summary(collection)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
     }
 }

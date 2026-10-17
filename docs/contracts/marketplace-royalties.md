@@ -18,6 +18,8 @@ fn settle_sales(collection, token, payer, sales: Vec<(seller, amount)>) -> Resul
 fn get_royalty(collection) -> Result<Royalty, ForgeError>
 fn get_settlement_summary(collection) -> Result<SettlementSummary, ForgeError>
 fn quote_sale(collection, amount) -> Result<SaleQuote, ForgeError>
+fn preview_settlement(collection, amount) -> Result<SettlementPreview, ForgeError>
+fn preview_settlement_splits(amount, recipients: Vec<RoyaltyShare>) -> Result<SettlementPreview, ForgeError>
 fn touch_ttl(collection) -> Result<(), ForgeError>
 ```
 
@@ -64,7 +66,7 @@ configuration transfers nothing and returns the full `amount`. It requires
 the collection's and the payer's authorization, and emits the same
 `SaleSettled` event as the settlement entrypoints.
 
-### Sale quotes
+### Sale quotes & settlement previews
 
 `quote_sale(collection, amount)` is a read-only view returning the exact
 split a settlement of `amount` would apply, as a `SaleQuote { gross,
@@ -81,6 +83,15 @@ It is the per-sale counterpart of `get_settlement_summary` and exists so a
 marketplace UI can display "you will pay X, royalty is Y, seller receives
 Z" from the contract's own math instead of a parallel off-chain
 implementation.
+
+`preview_settlement(collection, amount)` and `preview_settlement_splits(amount, recipients)` extend `quote_sale` with a full per-recipient royalty breakdown and value-conservation audit in a `SettlementPreview`:
+
+- `gross`: the sale amount being previewed.
+- `royalty_bps`: effective aggregate basis-point rate (`0` when `Disabled`).
+- `recipients`: ordered `Vec<RecipientRoyaltyPreview>`, where each item reports `recipient`, effective `bps`, floored `amount` (`gross * bps / 10_000`), and `sub_unit_residue_bps` (`(gross * bps) % 10_000`) dropped by integer floor division.
+- `total_royalties`: sum of every recipient's floored `amount` (identical to `Settlement::royalty_share` and `SaleQuote::royalty_amount`).
+- `seller_proceeds`: `gross - total_royalties` (identical to `Settlement::seller_net` and `SaleQuote::seller_net`), guaranteeing `total_royalties + seller_proceeds == gross`.
+- `rounding_residue`: whole-token rounding dust retained inside `seller_proceeds` when independent per-recipient floor rounding sums to less than the aggregate rate floor (`(gross * royalty_bps / 10_000) - total_royalties`).
 
 ### Batch settlement
 
