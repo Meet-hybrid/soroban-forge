@@ -9,6 +9,15 @@ import {
   networks,
   type EscrowData,
 } from "@soroban-forge/escrow-client";
+import {
+  checkReceiptContextMatch,
+  dismissPendingReceipt,
+  loadPendingReceipt,
+  PENDING_RECEIPT_STORAGE_KEY,
+  pollReceiptOutcome,
+  savePendingReceipt,
+  type PersistedReceiptRecord,
+} from "../lib/receipt-recovery";
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE = networks.testnet.networkPassphrase;
@@ -38,6 +47,18 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [friendbotBusy, setFriendbotBusy] = useState(false);
+
+  // Transaction receipt recovery state
+  const [pendingReceipt, setPendingReceipt] =
+    useState<PersistedReceiptRecord | null>(null);
+  const [receiptPolling, setReceiptPolling] = useState(false);
+  const [receiptPollAttempt, setReceiptPollAttempt] = useState<{
+    current: number;
+    max: number;
+  } | null>(null);
+  const [receiptStorageError, setReceiptStorageError] = useState<string | null>(
+    null
+  );
 
   // Create-escrow form
   const [buyer, setBuyer] = useState("");
@@ -73,13 +94,78 @@ export default function Home() {
     []
   );
 
+  const resumeReceiptRecovery = useCallback(
+    async (
+      recordToPoll: PersistedReceiptRecord,
+      activeAccount?: string | null
+    ) => {
+      setReceiptPolling(true);
+      setReceiptStorageError(null);
+      try {
+        const storage =
+          typeof window !== "undefined" ? window.localStorage : null;
+        const result = await pollReceiptOutcome({
+          record: recordToPoll,
+          rpcUrl: RPC_URL,
+          expectedNetworkPassphrase: NETWORK_PASSPHRASE,
+          expectedContractId: CONTRACT_ID,
+          connectedAccount:
+            activeAccount !== undefined ? activeAccount : account,
+          storage,
+          onAttempt: (current, max) => setReceiptPollAttempt({ current, max }),
+        });
+        setPendingReceipt(result.record);
+        pushLog(
+          result.explanation,
+          result.outcome === "confirmed"
+            ? "ok"
+            : result.outcome === "pending"
+              ? "info"
+              : "err"
+        );
+      } catch (e) {
+        pushLog(`Receipt recovery failed: ${(e as Error).message}`, "err");
+      } finally {
+        setReceiptPolling(false);
+        setReceiptPollAttempt(null);
+      }
+    },
+    [account, pushLog]
+  );
+
+  const handleDismissReceipt = useCallback(() => {
+    const storage = typeof window !== "undefined" ? window.localStorage : null;
+    dismissPendingReceipt(storage);
+    setPendingReceipt(null);
+    setReceiptStorageError(null);
+    setReceiptPollAttempt(null);
+    pushLog("Dismissed persisted transaction receipt.", "info");
+  }, [pushLog]);
+
   useEffect(() => {
-    // Wallet modules require browser APIs, so initialize them after hydration.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // Wallet modules and localStorage require browser APIs, so initialize them after hydration.
+    const storage = typeof window !== "undefined" ? window.localStorage : null;
+    const loaded = loadPendingReceipt(storage);
+    if (loaded.error) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setReceiptStorageError(loaded.error.message);
+    } else if (loaded.record) {
+      setPendingReceipt(loaded.record);
+      if (loaded.record.escrowId) {
+        setActionEscrowId((prev) => prev || loaded.record!.escrowId!);
+        setReadEscrowId((prev) => prev || loaded.record!.escrowId!);
+      }
+      if (
+        loaded.record.lastOutcome === "pending" ||
+        loaded.record.lastOutcome === "unknown"
+      ) {
+        void resumeReceiptRecovery(loaded.record, null);
+      }
+    }
     setMounted(true);
     StellarWalletsKit.init({ modules: defaultModules() });
     StellarWalletsKit.setNetwork(Networks.TESTNET);
-  }, []);
+  }, [resumeReceiptRecovery]);
 
   const listMine = useCallback(
     async (c: Client, addr: string) => {
@@ -140,13 +226,33 @@ export default function Home() {
         `Connected to ${pubkey.slice(0, 6)}…${pubkey.slice(-4)} (testnet)`,
         "ok"
       );
+      if (pendingReceipt) {
+        const match = checkReceiptContextMatch({
+          record: pendingReceipt,
+          expectedNetworkPassphrase: NETWORK_PASSPHRASE,
+          expectedContractId: CONTRACT_ID,
+          connectedAccount: pubkey,
+        });
+        if (!match.matches && match.explanation) {
+          const updated = savePendingReceipt(
+            {
+              ...pendingReceipt,
+              lastOutcome: "mismatch",
+              lastDetail: match.explanation,
+            },
+            typeof window !== "undefined" ? window.localStorage : null
+          );
+          setPendingReceipt(updated);
+          pushLog(match.explanation, "err");
+        }
+      }
       void listMine(c, pubkey);
     } catch (e) {
       pushLog(`Wallet connect failed: ${(e as Error).message}`, "err");
     } finally {
       setBusy(false);
     }
-  }, [listMine, mounted, pushLog]);
+  }, [listMine, mounted, pendingReceipt, pushLog]);
 
   const disconnect = useCallback(() => {
     void StellarWalletsKit.disconnect();
@@ -218,17 +324,45 @@ export default function Home() {
       );
       pushLog("create_escrow simulated — requesting signature…", "info");
       const sent = await tx.signAndSend();
-      if (sent.sendTransactionResponse) {
-        pushLog(
-          `Submitted — tx hash ${sent.sendTransactionResponse.hash}`,
-          "ok"
+      const txHash = sent.sendTransactionResponse?.hash;
+      const storage =
+        typeof window !== "undefined" ? window.localStorage : null;
+      if (txHash) {
+        const pending = savePendingReceipt(
+          {
+            txHash,
+            networkPassphrase: NETWORK_PASSPHRASE,
+            contractId: CONTRACT_ID,
+            account: buyerAddress,
+            action: "create_escrow",
+          },
+          storage
         );
+        setPendingReceipt(pending);
+        pushLog(`Submitted — tx hash ${txHash}`, "ok");
       }
       const escrowId = sent.result.unwrap();
-      setCreatedId(escrowId.toString());
-      setActionEscrowId(escrowId.toString());
-      setReadEscrowId(escrowId.toString());
-      pushLog(`Escrow created — id ${escrowId.toString()} (Pending)`, "ok");
+      const escrowIdStr = escrowId.toString();
+      setCreatedId(escrowIdStr);
+      setActionEscrowId(escrowIdStr);
+      setReadEscrowId(escrowIdStr);
+      if (txHash) {
+        const confirmed = savePendingReceipt(
+          {
+            txHash,
+            networkPassphrase: NETWORK_PASSPHRASE,
+            contractId: CONTRACT_ID,
+            account: buyerAddress,
+            action: "create_escrow",
+            escrowId: escrowIdStr,
+            lastOutcome: "confirmed",
+            lastDetail: `create_escrow confirmed — escrow id ${escrowIdStr} (Pending).`,
+          },
+          storage
+        );
+        setPendingReceipt(confirmed);
+      }
+      pushLog(`Escrow created — id ${escrowIdStr} (Pending)`, "ok");
     } catch (e) {
       pushLog(`Create escrow failed: ${(e as Error).message}`, "err");
     } finally {
@@ -278,15 +412,31 @@ export default function Home() {
         const tx = await build(client, id);
         pushLog(`${name} — requesting signature…`, "info");
         const sent = await tx.signAndSend();
-        pushLog(
-          sent.sendTransactionResponse?.hash
-            ? `${name} submitted — tx hash ${sent.sendTransactionResponse.hash}`
-            : `${name} succeeded.`,
-          "ok"
-        );
+        const txHash = sent.sendTransactionResponse?.hash;
+        if (txHash) {
+          const storage =
+            typeof window !== "undefined" ? window.localStorage : null;
+          const saved = savePendingReceipt(
+            {
+              txHash,
+              networkPassphrase: NETWORK_PASSPHRASE,
+              contractId: CONTRACT_ID,
+              account,
+              action: name,
+              escrowId: id.toString(),
+              lastOutcome: "pending",
+            },
+            storage
+          );
+          setPendingReceipt(saved);
+          pushLog(`${name} submitted — tx hash ${txHash}`, "ok");
+          void resumeReceiptRecovery(saved, account);
+        } else {
+          pushLog(`${name} succeeded.`, "ok");
+        }
       });
     },
-    [client, actionEscrowId, pushLog, sendAction]
+    [account, client, actionEscrowId, pushLog, resumeReceiptRecovery, sendAction]
   );
 
   const fetchEscrow = useCallback(
@@ -664,6 +814,126 @@ export default function Home() {
           )}
         </section>
       </div>
+
+      {/* Transaction Receipt Recovery */}
+      <section className="mt-6 rounded-xl border border-gray-300 bg-gray-50/60 p-4">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">
+              6 · Transaction Receipt Recovery
+            </h2>
+            <span className="rounded bg-gray-200 px-2 py-0.5 font-mono text-xs text-gray-700">
+              {PENDING_RECEIPT_STORAGE_KEY}
+            </span>
+          </div>
+          {pendingReceipt && (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void resumeReceiptRecovery(pendingReceipt, account)}
+                disabled={receiptPolling}
+                className="rounded border border-blue-600 bg-white px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+              >
+                {receiptPolling
+                  ? receiptPollAttempt
+                    ? `Polling (${receiptPollAttempt.current}/${receiptPollAttempt.max})…`
+                    : "Polling…"
+                  : "Retry receipt check"}
+              </button>
+              <button
+                type="button"
+                onClick={handleDismissReceipt}
+                disabled={receiptPolling}
+                className="rounded border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+              >
+                Dismiss receipt
+              </button>
+            </div>
+          )}
+        </div>
+
+        {receiptStorageError && (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800">
+            <span>
+              Invalid persisted receipt ignored: {receiptStorageError}
+            </span>
+            <button
+              type="button"
+              onClick={handleDismissReceipt}
+              className="rounded border border-red-300 bg-white px-2 py-0.5 text-xs text-red-700 hover:bg-red-100"
+            >
+              Clear invalid record
+            </button>
+          </div>
+        )}
+
+        {!pendingReceipt ? (
+          <p className="text-xs text-gray-500">
+            No persisted transaction receipt. When you submit an escrow
+            transaction, its hash, network, action, and timestamp are saved
+            locally so a page reload automatically resumes bounded status
+            polling.
+          </p>
+        ) : (
+          <div className="space-y-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={
+                  "rounded-full px-2.5 py-0.5 font-medium " +
+                  (pendingReceipt.lastOutcome === "confirmed"
+                    ? "bg-green-100 text-green-800"
+                    : pendingReceipt.lastOutcome === "pending"
+                      ? "bg-blue-100 text-blue-800"
+                      : pendingReceipt.lastOutcome === "expired" ||
+                          pendingReceipt.lastOutcome === "unknown"
+                        ? "bg-amber-100 text-amber-800"
+                        : "bg-red-100 text-red-800")
+                }
+              >
+                {receiptPolling ? "polling" : pendingReceipt.lastOutcome}
+              </span>
+              <span className="text-gray-700">{pendingReceipt.lastDetail}</span>
+            </div>
+
+            <dl className="grid grid-cols-1 gap-2 rounded border border-gray-200 bg-white p-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <dt className="font-medium text-gray-500">Tx Hash</dt>
+                <dd className="mt-0.5 font-mono break-all text-gray-900">
+                  {pendingReceipt.txHash.slice(0, 12)}…
+                  {pendingReceipt.txHash.slice(-8)}
+                </dd>
+              </div>
+              <div>
+                <dt className="font-medium text-gray-500">Action &amp; Escrow</dt>
+                <dd className="mt-0.5 font-mono text-gray-900">
+                  {pendingReceipt.action}
+                  {pendingReceipt.escrowId
+                    ? ` (escrow #${pendingReceipt.escrowId})`
+                    : ""}
+                </dd>
+              </div>
+              <div>
+                <dt className="font-medium text-gray-500">Submitted</dt>
+                <dd className="mt-0.5 font-mono text-gray-900">
+                  {new Date(pendingReceipt.submittedAtMs).toLocaleTimeString()}
+                  {pendingReceipt.ledger
+                    ? ` · Ledger #${pendingReceipt.ledger}`
+                    : ""}
+                </dd>
+              </div>
+              <div>
+                <dt className="font-medium text-gray-500">Account &amp; Network</dt>
+                <dd className="mt-0.5 font-mono break-all text-gray-900">
+                  {pendingReceipt.account
+                    ? `${pendingReceipt.account.slice(0, 6)}…${pendingReceipt.account.slice(-4)}`
+                    : "unassigned"}{" "}
+                  · {pendingReceipt.networkPassphrase}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        )}
+      </section>
 
       {/* Log feed */}
       <section className="mt-6">
