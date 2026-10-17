@@ -198,6 +198,32 @@ All comparisons are exact; any mismatch (or a rebuild that fails) exits
 non-zero. `--package` selects a single package; without it, artifacts are
 matched by name inference.
 
+### Decode Failed Invocations
+
+The `decode-failure` helper explains raw Stellar CLI/RPC errors or decodes a
+base64 `TransactionResult` receipt. Include the receipt's optional
+`DiagnosticEvents` XDR to reveal Soroban contract or host error details:
+
+```bash
+# Explain the error text printed by stellar contract invoke
+cargo run -p soroban-forge-cli -- decode-failure \
+  --error 'HostError: Error(Contract, #3)'
+# Soroban contract error #3: ForgeError::InvalidInput. Check the contract's preconditions and authorization requirements.
+
+# Decode a failed transaction result and its diagnostic events
+cargo run -p soroban-forge-cli -- decode-failure \
+  --result-xdr '<base64-transaction-result-xdr>' \
+  --diagnostic-events-xdr '<base64-diagnostic-events-xdr>'
+```
+
+Contract codes 1–15 are named using the shared `ForgeError` registry; unknown
+contract codes are reported without guessing their meaning. Host traps without
+diagnostic events are identified as host aborts, but cannot be attributed to a
+specific contract error. Recognizable connection and RPC failures are reported
+as transport issues. Unrecognized error text and malformed XDR produce a clear
+diagnostic rather than being treated as a successful decode. The helper does
+not retry the invocation or change the behavior of `invoke`.
+
 ## Test Commands
 
 ### Full Test Suite
