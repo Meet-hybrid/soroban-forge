@@ -50,6 +50,13 @@ pub struct NewArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct ScaffoldValidateArgs {
+    /// Path to a scaffolded contract directory; defaults to the current directory.
+    #[arg(value_name = "PATH", default_value = ".")]
+    pub path: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct VerifyArgs {
     /// Path to a local WASM artifact to verify against a deterministic rebuild.
     #[arg(long)]
