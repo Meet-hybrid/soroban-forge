@@ -34,11 +34,14 @@ import {
   dao,
   subscription,
   marketplace,
+  pollTransactionStatus,
+  PollTimeoutError,
+  PollTerminalError,
 } from "../../dist/index.js";
 
 // Type-only imports: validated by the TypeScript compiler; they do not
 // produce any runtime value and are intentionally not tested with assert.ok().
-import type { EscrowStatus, EscrowData } from "../../dist/index.js";
+import type { EscrowStatus, EscrowData, TransactionStatusResponse } from "../../dist/index.js";
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -511,3 +514,116 @@ test("EscrowStatus type has all 6 documented tags (compile-time verified)", () =
 test("EscrowData type has the documented field shape (compile-time verified)", () => {
   assert.ok(true, "compile-time type assertions for EscrowData passed");
 });
+
+// ---------------------------------------------------------------------------
+// 8. pollTransactionStatus tests
+// ---------------------------------------------------------------------------
+
+test("pollTransactionStatus returns SUCCESS when provider resolves successfully", async () => {
+  let callCount = 0;
+  const dummyDelays: number[] = [];
+
+  const provider = async (txHash: string): Promise<TransactionStatusResponse<{ ledger: number }>> => {
+    callCount++;
+    if (callCount < 3) {
+      return { status: "PENDING" };
+    }
+    return { status: "SUCCESS", result: { ledger: 100 } };
+  };
+
+  const res = await pollTransactionStatus("hash1", provider, {
+    timeoutMs: 10_000,
+    initialIntervalMs: 100,
+    backoffFactor: 2,
+    delayFn: async (ms) => {
+      dummyDelays.push(ms);
+    },
+  });
+
+  assert.equal(res.status, "SUCCESS");
+  if (res.status === "SUCCESS") {
+    assert.deepEqual(res.result, { ledger: 100 });
+  }
+  assert.equal(callCount, 3);
+  assert.deepEqual(dummyDelays, [100, 200]);
+});
+
+test("pollTransactionStatus returns terminal FAILED without retrying", async () => {
+  let callCount = 0;
+  const provider = async (_txHash: string): Promise<TransactionStatusResponse> => {
+    callCount++;
+    return { status: "FAILED", error: "tx failed: InsufficientFunds" };
+  };
+
+  const res = await pollTransactionStatus("hash2", provider, {
+    timeoutMs: 5_000,
+    initialIntervalMs: 50,
+    delayFn: async () => {},
+  });
+
+  assert.equal(res.status, "FAILED");
+  if (res.status === "FAILED") {
+    assert.equal(res.error, "tx failed: InsufficientFunds");
+  }
+  assert.equal(callCount, 1);
+});
+
+test("pollTransactionStatus throws PollTimeoutError when status does not arrive in time", async () => {
+  const provider = async (_txHash: string): Promise<TransactionStatusResponse> => {
+    return { status: "PENDING" };
+  };
+
+  await assert.rejects(
+    async () => {
+      await pollTransactionStatus("hash3", provider, {
+        timeoutMs: 300,
+        initialIntervalMs: 100,
+        backoffFactor: 1,
+        delayFn: async () => {},
+      });
+    },
+    (err: any) => {
+      assert.ok(err instanceof PollTimeoutError);
+      assert.equal(err.txHash, "hash3");
+      return true;
+    }
+  );
+});
+
+test("pollTransactionStatus does not retry malformed requests or known terminal failures", async () => {
+  // Empty or invalid hash
+  await assert.rejects(
+    async () => {
+      await pollTransactionStatus("", async () => ({ status: "PENDING" }));
+    },
+    (err: any) => {
+      assert.ok(err instanceof PollTerminalError);
+      return true;
+    }
+  );
+
+  // Terminal provider error
+  let calls = 0;
+  const terminalProvider = async () => {
+    calls++;
+    const err = new Error("Malformed RPC request");
+    (err as any).isTerminal = true;
+    throw err;
+  };
+
+  await assert.rejects(
+    async () => {
+      await pollTransactionStatus("hash4", terminalProvider, {
+        timeoutMs: 1_000,
+        initialIntervalMs: 50,
+        delayFn: async () => {},
+      });
+    },
+    (err: any) => {
+      assert.ok(err instanceof PollTerminalError);
+      return true;
+    }
+  );
+  assert.equal(calls, 1);
+});
+
