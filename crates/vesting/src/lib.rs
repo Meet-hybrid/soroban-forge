@@ -1153,7 +1153,13 @@ mod indexer_fixtures;
 mod tests;
 
 #[cfg(test)]
+mod resource_report;
+
+#[cfg(test)]
 mod authz;
 
 #[cfg(test)]
 mod props;
+
+#[cfg(test)]
+mod indexer_fixtures;

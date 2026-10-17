@@ -1,0 +1,584 @@
+{
+  "schema": "soroban-forge/contract-abi@1",
+  "contract": "soroban-forge-dao-governance",
+  "functions": [
+    {
+      "name": "cancel_proposal",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "proposer",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "configure_bond",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "treasury",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "execute",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_active_proposal_count",
+      "inputs": [
+        {
+          "name": "proposer",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "u32"
+      ]
+    },
+    {
+      "name": "get_bond_config",
+      "inputs": [],
+      "outputs": [
+        "result<udt:BondConfig,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_dependencies",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:DependencyView,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_proposal",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:Proposal,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_proposal_count",
+      "inputs": [],
+      "outputs": [
+        "u64"
+      ]
+    },
+    {
+      "name": "get_proposals",
+      "inputs": [
+        {
+          "name": "offset",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<vec<udt:Proposal>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "has_voted",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<bool,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "initialize",
+      "inputs": [
+        {
+          "name": "governance_token",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "propose",
+      "inputs": [
+        {
+          "name": "proposer",
+          "type": "address"
+        },
+        {
+          "name": "target",
+          "type": "address"
+        },
+        {
+          "name": "action",
+          "type": "bytes"
+        },
+        {
+          "name": "duration",
+          "type": "u64"
+        },
+        {
+          "name": "requires",
+          "type": "vec<u64>"
+        },
+        {
+          "name": "conflicts_with",
+          "type": "option<u64>"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "touch_ttl",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "vote",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        },
+        {
+          "name": "support",
+          "type": "bool"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "BondPosted",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "name": "BondReleased",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "to",
+          "type": "address"
+        },
+        {
+          "name": "forfeited",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "Finalised",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "state",
+          "type": "udt:ProposalState"
+        },
+        {
+          "name": "for_votes",
+          "type": "i128"
+        },
+        {
+          "name": "against_votes",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "name": "Proposed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:Proposal"
+        }
+      ]
+    },
+    {
+      "name": "VoteCast",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        },
+        {
+          "name": "support",
+          "type": "bool"
+        },
+        {
+          "name": "weight",
+          "type": "i128"
+        }
+      ]
+    }
+  ],
+  "types": [
+    {
+      "kind": "struct",
+      "name": "BondConfig",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "treasury",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "BondState",
+      "variants": [
+        {
+          "name": "Posted",
+          "types": []
+        },
+        {
+          "name": "Refunded",
+          "types": []
+        },
+        {
+          "name": "Forfeited",
+          "types": []
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "DependencyView",
+      "fields": [
+        {
+          "name": "conflicts_with",
+          "type": "option<u64>"
+        },
+        {
+          "name": "requires",
+          "type": "vec<u64>"
+        }
+      ]
+    },
+    {
+      "kind": "error-enum",
+      "name": "ForgeError",
+      "variants": [
+        {
+          "name": "Unauthorized",
+          "value": 1
+        },
+        {
+          "name": "NotFound",
+          "value": 2
+        },
+        {
+          "name": "InvalidInput",
+          "value": 3
+        },
+        {
+          "name": "InsufficientFunds",
+          "value": 4
+        },
+        {
+          "name": "AlreadyInitialized",
+          "value": 5
+        },
+        {
+          "name": "NotInitialized",
+          "value": 6
+        },
+        {
+          "name": "DeadlineReached",
+          "value": 7
+        },
+        {
+          "name": "InsufficientAllowance",
+          "value": 8
+        },
+        {
+          "name": "ArithmeticOverflow",
+          "value": 9
+        },
+        {
+          "name": "Custom",
+          "value": 10
+        },
+        {
+          "name": "TokenTransferFailed",
+          "value": 11
+        },
+        {
+          "name": "ContractInvocationFailed",
+          "value": 12
+        },
+        {
+          "name": "WithdrawalLimitExceeded",
+          "value": 13
+        },
+        {
+          "name": "SubscriptionPastDue",
+          "value": 14
+        },
+        {
+          "name": "ProposerCooldown",
+          "value": 15
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Proposal",
+      "fields": [
+        {
+          "name": "action",
+          "type": "bytes"
+        },
+        {
+          "name": "against_votes",
+          "type": "i128"
+        },
+        {
+          "name": "bond_amount",
+          "type": "i128"
+        },
+        {
+          "name": "bond_state",
+          "type": "udt:BondState"
+        },
+        {
+          "name": "bond_token",
+          "type": "address"
+        },
+        {
+          "name": "conflicts_with",
+          "type": "option<u64>"
+        },
+        {
+          "name": "for_votes",
+          "type": "i128"
+        },
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "proposer",
+          "type": "address"
+        },
+        {
+          "name": "requires",
+          "type": "vec<u64>"
+        },
+        {
+          "name": "state",
+          "type": "udt:ProposalState"
+        },
+        {
+          "name": "target",
+          "type": "address"
+        },
+        {
+          "name": "voting_ends",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "ProposalState",
+      "variants": [
+        {
+          "name": "Active",
+          "types": []
+        },
+        {
+          "name": "Succeeded",
+          "types": []
+        },
+        {
+          "name": "Defeated",
+          "types": []
+        },
+        {
+          "name": "Executed",
+          "types": []
+        },
+        {
+          "name": "Queued",
+          "types": []
+        },
+        {
+          "name": "Cancelled",
+          "types": []
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "name": "Unauthorized",
+      "code": 1
+    },
+    {
+      "name": "NotFound",
+      "code": 2
+    },
+    {
+      "name": "InvalidInput",
+      "code": 3
+    },
+    {
+      "name": "InsufficientFunds",
+      "code": 4
+    },
+    {
+      "name": "AlreadyInitialized",
+      "code": 5
+    },
+    {
+      "name": "NotInitialized",
+      "code": 6
+    },
+    {
+      "name": "DeadlineReached",
+      "code": 7
+    },
+    {
+      "name": "InsufficientAllowance",
+      "code": 8
+    },
+    {
+      "name": "ArithmeticOverflow",
+      "code": 9
+    },
+    {
+      "name": "Custom",
+      "code": 10
+    },
+    {
+      "name": "TokenTransferFailed",
+      "code": 11
+    },
+    {
+      "name": "ContractInvocationFailed",
+      "code": 12
+    },
+    {
+      "name": "WithdrawalLimitExceeded",
+      "code": 13
+    },
+    {
+      "name": "SubscriptionPastDue",
+      "code": 14
+    },
+    {
+      "name": "ProposerCooldown",
+      "code": 15
+    }
+  ]
+}

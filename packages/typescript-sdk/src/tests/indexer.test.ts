@@ -58,11 +58,23 @@ test("event type derivation recognizes lifecycle event names", () => {
   );
 });
 
+feat-indexer-add-a-restartable-multi-contract-event-indexer-with-cursor-checkpoints-Repo-Avatar
 test("vesting fixture resolves and loads through the common indexer API", () => {
   const events = loadFixtureEvents("vesting");
   assert.ok(events.length > 0, "vesting fixture must contain events");
   assert.ok(
     events.every((event) => event.contractId.length > 0),
     "every vesting event must carry a contract id",
+
+test("vesting fixture is loadable through the public indexer aliases", () => {
+  const events = loadFixtureEvents("vesting");
+  assert.ok(
+    events.length > 0,
+    "vesting fixture should contain at least one event",
+  );
+  assert.ok(
+    events.every((event) => event.contractId.length > 0),
+    "all vesting events should have a contract id",
+ develop
   );
 });
