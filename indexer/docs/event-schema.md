@@ -49,3 +49,36 @@ const filtered = indexer.filter({ fromLedger: 1000, toLedger: 1005 });
 ```
 
 The output of fixture mode is intentionally stable so any event-schema drift fails loudly during CI and local checks.
+
+## Persisted replay checkpoints
+
+When restarting or resuming an event indexer, persisted checkpoints (`soroban-forge/indexer-checkpoint@1`) record compatibility metadata alongside the replay cursor so a restart never silently resumes across incompatible environments:
+
+```json
+{
+  "schemaVersion": "soroban-forge/indexer-checkpoint@1",
+  "network": "testnet",
+  "contracts": [
+    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+  ],
+  "cursor": {
+    "ledger": 1004,
+    "eventIndex": 0,
+    "pagingToken": "1004-0"
+  },
+  "updatedAt": "2026-01-01T00:05:00.000Z"
+}
+```
+
+### Startup validation & error reference
+
+`validateCheckpoint`, `loadAndValidateCheckpoint`, and `resumeIndexerFromCheckpoint` fail closed with a typed `CheckpointValidationError` whenever a persisted checkpoint does not match the active `IndexerRuntimeConfig`:
+
+| Error Code | Cause | Operator Remediation |
+| --- | --- | --- |
+| `MALFORMED_CHECKPOINT` | Empty, non-JSON, or missing required `schemaVersion`, `network`, or `contracts` fields. | Discard or rebuild the corrupted checkpoint file with `discardCheckpoint(path)` or `rebuildCheckpoint(path, runtime, events)`. |
+| `SCHEMA_VERSION_MISMATCH` | Persisted `schemaVersion` does not match `soroban-forge/indexer-checkpoint@1`. | Run `rebuildCheckpoint(path, runtime, events)` to migrate to the current checkpoint format. |
+| `NETWORK_MISMATCH` | Checkpoint `network` differs from the configured runtime network (for example `testnet` vs `futurenet`). | Point the indexer back to the original network or call `discardCheckpoint(path)` / `rebuildCheckpoint(path, runtime, events)` to re-index on the target network. |
+| `CONTRACT_SET_MISMATCH` | Deduplicated, sorted `contracts` list differs from the configured contract set. | Call `rebuildCheckpoint(path, runtime, events)` so newly added or removed contracts are replayed from a clean boundary. |
+| `INVALID_CURSOR` | Cursor `ledger` or `eventIndex` is negative or non-integer, or `pagingToken` is malformed. | Reset the cursor with `discardCheckpoint(path)` or `rebuildCheckpoint(path, runtime, events)`. |
+
