@@ -9,6 +9,12 @@ import {
   networks,
   type EscrowData,
 } from "@soroban-forge/escrow-client";
+import {
+  createClientContractProbe,
+  resolveDisplayDiagnosticsState,
+  runDiagnosticsCheck,
+  type DiagnosticsReport,
+} from "../lib/diagnostics";
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE = networks.testnet.networkPassphrase;
@@ -39,6 +45,14 @@ export default function Home() {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [friendbotBusy, setFriendbotBusy] = useState(false);
 
+  // Contract health & network diagnostics state
+  const [diagnosticsReport, setDiagnosticsReport] =
+    useState<DiagnosticsReport | null>(null);
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
+  const [diagnosticsNowMs, setDiagnosticsNowMs] = useState<number>(() =>
+    Date.now()
+  );
+
   // Create-escrow form
   const [buyer, setBuyer] = useState("");
   const [seller, setSeller] = useState("");
@@ -66,11 +80,42 @@ export default function Home() {
   const [listTotal, setListTotal] = useState<number | null>(null);
   const [listBusy, setListBusy] = useState(false);
 
+  const readOnlyClient = useMemo(
+    () =>
+      new Client({
+        rpcUrl: RPC_URL,
+        networkPassphrase: NETWORK_PASSPHRASE,
+        contractId: CONTRACT_ID,
+      }),
+    []
+  );
+
   const pushLog = useCallback(
     (text: string, kind: LogEntry["kind"] = "info") => {
       setLog((prev) => [{ id: logId++, time: ts(), text, kind }, ...prev]);
     },
     []
+  );
+
+  const refreshDiagnostics = useCallback(
+    async (activeClient?: Client | null) => {
+      setDiagnosticsBusy(true);
+      try {
+        const targetClient = activeClient ?? client ?? readOnlyClient;
+        const probeContract = createClientContractProbe(() => targetClient);
+        const report = await runDiagnosticsCheck({
+          rpcUrl: RPC_URL,
+          expectedNetworkPassphrase: NETWORK_PASSPHRASE,
+          contractId: CONTRACT_ID,
+          probeContract,
+        });
+        setDiagnosticsReport(report);
+        setDiagnosticsNowMs(Date.now());
+      } finally {
+        setDiagnosticsBusy(false);
+      }
+    },
+    [client, readOnlyClient]
   );
 
   useEffect(() => {
@@ -79,7 +124,26 @@ export default function Home() {
     setMounted(true);
     StellarWalletsKit.init({ modules: defaultModules() });
     StellarWalletsKit.setNetwork(Networks.TESTNET);
-  }, []);
+    void refreshDiagnostics(readOnlyClient);
+  }, [readOnlyClient, refreshDiagnostics]);
+
+  useEffect(() => {
+    if (!diagnosticsReport) return;
+    const timer = window.setInterval(() => {
+      setDiagnosticsNowMs(Date.now());
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [diagnosticsReport]);
+
+  const diagnosticsView = useMemo(
+    () =>
+      resolveDisplayDiagnosticsState(
+        diagnosticsReport,
+        diagnosticsBusy,
+        diagnosticsNowMs
+      ),
+    [diagnosticsReport, diagnosticsBusy, diagnosticsNowMs]
+  );
 
   const listMine = useCallback(
     async (c: Client, addr: string) => {
@@ -344,6 +408,117 @@ export default function Home() {
         <code className="break-all">{CONTRACT_ID}</code> ·{" "}
         {NETWORK_PASSPHRASE}
       </p>
+
+      {/* Contract Health & Network Diagnostics */}
+      <section className="rounded-xl border border-gray-300 bg-gray-50/60 p-4 mb-6">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-700">
+              Contract Health &amp; Network Diagnostics
+            </h2>
+            <span
+              className={
+                "rounded-full px-2.5 py-0.5 text-xs font-medium " +
+                (diagnosticsView.displayState === "healthy"
+                  ? "bg-green-100 text-green-800"
+                  : diagnosticsView.displayState === "loading" ||
+                      diagnosticsView.displayState === "idle"
+                    ? "bg-blue-100 text-blue-800"
+                    : diagnosticsView.displayState === "stale"
+                      ? "bg-amber-100 text-amber-800"
+                      : "bg-red-100 text-red-800")
+              }
+            >
+              {diagnosticsView.displayState === "loading"
+                ? "Checking…"
+                : diagnosticsView.displayState}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshDiagnostics()}
+            disabled={diagnosticsBusy}
+            className="rounded border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+          >
+            {diagnosticsBusy ? "Checking…" : "Run diagnostics"}
+          </button>
+        </div>
+
+        <p className="mb-3 text-xs text-gray-700">
+          {diagnosticsReport
+            ? diagnosticsReport.summary
+            : "Running initial read-only connectivity and contract health check…"}
+        </p>
+
+        <dl className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+          <div className="rounded border border-gray-200 bg-white p-2">
+            <dt className="font-medium text-gray-500">Network</dt>
+            <dd className="mt-0.5 font-mono break-all text-gray-900">
+              {NETWORK_PASSPHRASE}
+            </dd>
+            <dd className="mt-0.5 text-gray-500">
+              {diagnosticsReport
+                ? diagnosticsReport.networkMatches
+                  ? "Passphrase matched"
+                  : `Mismatch (${diagnosticsReport.detectedNetworkPassphrase ?? "unknown"})`
+                : "Pending check"}
+            </dd>
+          </div>
+          <div className="rounded border border-gray-200 bg-white p-2">
+            <dt className="font-medium text-gray-500">RPC Endpoint</dt>
+            <dd className="mt-0.5 font-mono break-all text-gray-900">
+              {diagnosticsReport?.rpcUrl ?? RPC_URL}
+            </dd>
+            <dd className="mt-0.5 text-gray-500">
+              {diagnosticsReport
+                ? diagnosticsReport.rpcReachable
+                  ? "Reachable"
+                  : "Unavailable"
+                : "Pending check"}
+            </dd>
+          </div>
+          <div className="rounded border border-gray-200 bg-white p-2">
+            <dt className="font-medium text-gray-500">Contract</dt>
+            <dd className="mt-0.5 font-mono break-all text-gray-900">
+              {CONTRACT_ID.slice(0, 8)}…{CONTRACT_ID.slice(-6)}
+            </dd>
+            <dd className="mt-0.5 text-gray-500">
+              {diagnosticsReport
+                ? diagnosticsReport.contractReadable
+                  ? "Readable on-chain"
+                  : "Unreadable / missing"
+                : "Pending check"}
+            </dd>
+          </div>
+          <div className="rounded border border-gray-200 bg-white p-2">
+            <dt className="font-medium text-gray-500">Latest Ledger</dt>
+            <dd className="mt-0.5 font-mono text-gray-900">
+              {diagnosticsReport?.latestLedger !== null &&
+              diagnosticsReport?.latestLedger !== undefined
+                ? `#${diagnosticsReport.latestLedger}`
+                : "—"}
+            </dd>
+            <dd className="mt-0.5 text-gray-500">
+              {diagnosticsReport?.protocolVersion
+                ? `Protocol v${diagnosticsReport.protocolVersion}`
+                : diagnosticsView.isStale
+                  ? "Stale — click Run diagnostics"
+                  : "Read-only probe"}
+            </dd>
+          </div>
+        </dl>
+
+        {diagnosticsReport && diagnosticsReport.nextSteps.length > 0 && (
+          <div className="mt-3 rounded border border-red-200 bg-red-50 p-2.5 text-xs text-red-900">
+            <p className="font-semibold mb-1">Actionable next steps:</p>
+            <ul className="list-disc pl-4 space-y-0.5">
+              {diagnosticsReport.nextSteps.map((step, idx) => (
+                <li key={idx}>{step}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </section>
 
       {/* Wallet */}
       <section className="rounded-xl border border-gray-300 p-4 mb-6">
