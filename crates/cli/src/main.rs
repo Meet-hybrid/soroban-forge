@@ -17,8 +17,8 @@ mod commands;
 
 use clap::{Parser, Subcommand};
 use cli::{
-    BuildArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs,
-    ScaffoldValidateArgs, TestArgs, VerifyArgs,
+    BuildArgs, DecodeFailureArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs,
+    LintArgs, NewArgs, ScaffoldValidateArgs, TestArgs, VerifyArgs,
 };
 
 #[derive(Parser, Debug)]
@@ -43,6 +43,7 @@ pub enum Commands {
     ScaffoldValidate(ScaffoldValidateArgs),
     Verify(VerifyArgs),
     Invoke(InvokeArgs),
+    DecodeFailure(DecodeFailureArgs),
     Events(EventsArgs),
     Inspect(InspectArgs),
     Doctor(DoctorArgs),
@@ -61,6 +62,7 @@ fn main() -> anyhow::Result<()> {
         Commands::ScaffoldValidate(args) => commands::scaffold_validate::run(args)?,
         Commands::Verify(args) => commands::verify::run(args)?,
         Commands::Invoke(args) => commands::invoke::run(args)?,
+        Commands::DecodeFailure(args) => commands::decode_failure::run(args)?,
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,
         Commands::Doctor(args) => commands::doctor::run(args)?,
@@ -136,6 +138,40 @@ mod tests {
             panic!("expected verify command");
         };
         assert_eq!(args.manifest, "provenance-manifest.json");
+    }
+
+    #[test]
+    fn decode_failure_accepts_receipt_xdr_and_optional_diagnostics() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "decode-failure",
+            "--result-xdr",
+            "AAAA",
+            "--diagnostic-events-xdr",
+            "BBBB",
+        ])
+        .unwrap();
+
+        let Commands::DecodeFailure(args) = cli.command else {
+            panic!("expected decode-failure command");
+        };
+        assert_eq!(args.result_xdr.as_deref(), Some("AAAA"));
+        assert_eq!(args.diagnostic_events_xdr.as_deref(), Some("BBBB"));
+        assert!(args.error.is_none());
+    }
+
+    #[test]
+    fn decode_failure_requires_exactly_one_input() {
+        assert!(Cli::try_parse_from(["soroban-forge", "decode-failure"]).is_err());
+        assert!(Cli::try_parse_from([
+            "soroban-forge",
+            "decode-failure",
+            "--error",
+            "failed",
+            "--result-xdr",
+            "AAAA",
+        ])
+        .is_err());
     }
 
     #[test]
