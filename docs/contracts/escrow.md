@@ -19,6 +19,8 @@ fn get_status(escrow_id) -> Result<EscrowStatus, ForgeError>   // either record 
 fn get_escrow(escrow_id) -> Result<EscrowData, ForgeError>     // single-token records
 fn escrows_for_participant(participant, cursor, limit) -> ParticipantEscrowsPage
 fn touch_ttl(escrow_id) -> Result<(), ForgeError>              // either record kind
+fn preflight_token_balance(buyer, token, amount) -> TokenBalancePreflight
+fn preflight_deposit(escrow_id) -> Result<TokenBalancePreflight, ForgeError>
 
 // Multi-asset baskets (additive; the single-token interface above is unchanged)
 fn create_basket(buyer, seller, arbiter, assets: Vec<EscrowAsset>, timeout) -> Result<u64, ForgeError>
@@ -31,6 +33,19 @@ fn resolve_basket(escrow_id, in_favor_of_seller) -> Result<(), ForgeError>
 fn cancel_basket(escrow_id) -> Result<(), ForgeError>
 fn get_basket(escrow_id) -> Result<BasketEscrowData, ForgeError> // basket records
 ```
+
+## Token-Balance and Allowance Preflight
+
+`preflight_token_balance(buyer, token, amount)` and `preflight_deposit(escrow_id)` provide read-only deposit preflight checks before requesting a signature:
+
+- **Balance and allowance inspection**: Queries the SEP-41 token contract's `balance(buyer)` and `allowance(buyer, escrow_contract)` and computes `balance_shortfall` and `allowance_shortfall`.
+- **Distinct classifications (`TokenPreflightState`)**:
+  - `Sufficient` — both balance and allowance cover `required_amount`.
+  - `InsufficientBalance` — buyer balance is below `required_amount`.
+  - `InsufficientAllowance` — allowance granted to the escrow contract is below `required_amount`.
+  - `Unavailable` — token contract could not be queried.
+  - `InvalidInput` — `amount <= 0` or the target escrow is no longer `Pending`.
+- **No side effects**: Never mutates escrow state, token balances, allowances, or persistent TTLs.
 
 ## Multi-Asset Baskets
 
