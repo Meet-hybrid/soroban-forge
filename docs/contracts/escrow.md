@@ -19,6 +19,7 @@ fn get_status(escrow_id) -> Result<EscrowStatus, ForgeError>   // either record 
 fn get_escrow(escrow_id) -> Result<EscrowData, ForgeError>     // single-token records
 fn escrows_for_participant(participant, cursor, limit) -> ParticipantEscrowsPage
 fn touch_ttl(escrow_id) -> Result<(), ForgeError>              // either record kind
+fn get_action_eligibility(escrow_id, caller) -> Result<EscrowActionSummary, ForgeError> // either record kind
 
 // Multi-asset baskets (additive; the single-token interface above is unchanged)
 fn create_basket(buyer, seller, arbiter, assets: Vec<EscrowAsset>, timeout) -> Result<u64, ForgeError>
@@ -31,6 +32,10 @@ fn resolve_basket(escrow_id, in_favor_of_seller) -> Result<(), ForgeError>
 fn cancel_basket(escrow_id) -> Result<(), ForgeError>
 fn get_basket(escrow_id) -> Result<BasketEscrowData, ForgeError> // basket records
 ```
+
+## Read-Only Action Eligibility Summary
+
+`get_action_eligibility(escrow_id, caller)` returns an `EscrowActionSummary` reporting whether `caller` can currently invoke `deposit`, `release`, `refund`, `dispute`, `resolve`, or `cancel`, together with a stable `EscrowActionReason` category (`Eligible`, `WrongStatus`, `DisputedFrozen`, `CallerNotBuyer`, `CallerNotSeller`, `CallerNotArbiter`, `CallerNotParty`, `DeadlineNotReached`, `DeadlinePassed`). Works on both single-token and basket escrows, returns `ForgeError::NotFound` for unknown IDs, and never mutates escrow, token, or TTL state.
 
 ## Multi-Asset Baskets
 

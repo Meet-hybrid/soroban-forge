@@ -19,7 +19,10 @@
 //! signature testing needs `set_auths` fixtures and is tracked in the
 //! security-invariant backlog.
 
-use crate::{DataKey, Escrow, EscrowData, EscrowDataV1, EscrowStatus, SorobanForgeEscrowClient};
+use crate::{
+    ActionEligibility, DataKey, Escrow, EscrowActionReason, EscrowActionSummary, EscrowData,
+    EscrowDataV1, EscrowStatus, SorobanForgeEscrowClient,
+};
 use soroban_forge_shared_utils::{xdr_round_trip, ForgeError};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
@@ -1225,4 +1228,217 @@ fn conservation_holds_on_every_terminal_path() {
             );
         }
     }
+}
+
+// -----------------------------------------------------------------------
+// Read-only action eligibility summary
+// -----------------------------------------------------------------------
+
+#[test]
+fn action_eligibility_tracks_buyer_seller_arbiter_timeout_and_dispute_states() {
+    let (env, token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let outsider = Address::generate(&env);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+
+    // 1. Pending state: only buyer can deposit or cancel.
+    let pending_buyer: EscrowActionSummary = client.get_action_eligibility(&id, buyer);
+    assert_eq!(pending_buyer.status, EscrowStatus::Pending);
+    assert!(!pending_buyer.is_disputed);
+    assert!(pending_buyer.is_buyer);
+    assert!(!pending_buyer.is_seller);
+    assert!(!pending_buyer.is_arbiter);
+    assert_eq!(pending_buyer.deadline, START + TIMEOUT);
+    assert!(!pending_buyer.is_expired);
+    assert_eq!(
+        pending_buyer.deposit,
+        ActionEligibility {
+            eligible: true,
+            reason: EscrowActionReason::Eligible,
+        }
+    );
+    assert_eq!(
+        pending_buyer.cancel,
+        ActionEligibility {
+            eligible: true,
+            reason: EscrowActionReason::Eligible,
+        }
+    );
+    assert_eq!(
+        pending_buyer.release,
+        ActionEligibility {
+            eligible: false,
+            reason: EscrowActionReason::WrongStatus,
+        }
+    );
+    assert_eq!(
+        pending_buyer.refund,
+        ActionEligibility {
+            eligible: false,
+            reason: EscrowActionReason::WrongStatus,
+        }
+    );
+    assert_eq!(
+        pending_buyer.dispute,
+        ActionEligibility {
+            eligible: false,
+            reason: EscrowActionReason::WrongStatus,
+        }
+    );
+    assert_eq!(
+        pending_buyer.resolve,
+        ActionEligibility {
+            eligible: false,
+            reason: EscrowActionReason::WrongStatus,
+        }
+    );
+
+    let pending_seller = client.get_action_eligibility(&id, seller);
+    assert_eq!(
+        pending_seller.deposit,
+        ActionEligibility {
+            eligible: false,
+            reason: EscrowActionReason::CallerNotBuyer,
+        }
+    );
+    assert_eq!(
+        pending_seller.cancel,
+        ActionEligibility {
+            eligible: false,
+            reason: EscrowActionReason::CallerNotBuyer,
+        }
+    );
+
+    // 2. Funded pre-deadline: seller can release, refund, or dispute; buyer can dispute (not refund yet).
+    client.deposit(&id);
+    let funded_seller = client.get_action_eligibility(&id, seller);
+    assert_eq!(funded_seller.status, EscrowStatus::Funded);
+    assert!(funded_seller.release.eligible);
+    assert!(funded_seller.refund.eligible);
+    assert!(funded_seller.dispute.eligible);
+    assert_eq!(
+        funded_seller.deposit.reason,
+        EscrowActionReason::WrongStatus
+    );
+    assert_eq!(funded_seller.cancel.reason, EscrowActionReason::WrongStatus);
+    assert_eq!(
+        funded_seller.resolve.reason,
+        EscrowActionReason::WrongStatus
+    );
+
+    let funded_buyer = client.get_action_eligibility(&id, buyer);
+    assert_eq!(
+        funded_buyer.release.reason,
+        EscrowActionReason::CallerNotSeller
+    );
+    assert_eq!(
+        funded_buyer.refund,
+        ActionEligibility {
+            eligible: false,
+            reason: EscrowActionReason::DeadlineNotReached,
+        }
+    );
+    assert!(funded_buyer.dispute.eligible);
+
+    let funded_outsider = client.get_action_eligibility(&id, &outsider);
+    assert_eq!(
+        funded_outsider.refund.reason,
+        EscrowActionReason::CallerNotSeller
+    );
+    assert_eq!(
+        funded_outsider.dispute.reason,
+        EscrowActionReason::CallerNotParty
+    );
+
+    // 3. Funded at/after deadline: refund shifts from seller to buyer.
+    env.ledger().set_timestamp(START + TIMEOUT);
+    let expired_buyer = client.get_action_eligibility(&id, buyer);
+    assert!(expired_buyer.is_expired);
+    assert_eq!(
+        expired_buyer.refund,
+        ActionEligibility {
+            eligible: true,
+            reason: EscrowActionReason::Eligible,
+        }
+    );
+    let expired_seller = client.get_action_eligibility(&id, seller);
+    assert_eq!(
+        expired_seller.refund,
+        ActionEligibility {
+            eligible: false,
+            reason: EscrowActionReason::DeadlinePassed,
+        }
+    );
+    assert!(expired_seller.release.eligible);
+
+    // 4. Disputed state: release, refund, and dispute report DisputedFrozen; only arbiter can resolve.
+    client.dispute(&id, buyer);
+    let disputed_arbiter = client.get_action_eligibility(&id, arbiter);
+    assert!(disputed_arbiter.is_disputed);
+    assert!(disputed_arbiter.is_arbiter);
+    assert_eq!(
+        disputed_arbiter.resolve,
+        ActionEligibility {
+            eligible: true,
+            reason: EscrowActionReason::Eligible,
+        }
+    );
+    assert_eq!(
+        disputed_arbiter.release.reason,
+        EscrowActionReason::DisputedFrozen
+    );
+    assert_eq!(
+        disputed_arbiter.refund.reason,
+        EscrowActionReason::DisputedFrozen
+    );
+    assert_eq!(
+        disputed_arbiter.dispute.reason,
+        EscrowActionReason::DisputedFrozen
+    );
+
+    let disputed_buyer = client.get_action_eligibility(&id, buyer);
+    assert_eq!(
+        disputed_buyer.resolve,
+        ActionEligibility {
+            eligible: false,
+            reason: EscrowActionReason::CallerNotArbiter,
+        }
+    );
+
+    // 5. Terminal state: all actions report WrongStatus.
+    client.resolve(&id, &true);
+    let completed = client.get_action_eligibility(&id, seller);
+    assert_eq!(completed.status, EscrowStatus::Completed);
+    assert!(!completed.deposit.eligible);
+    assert!(!completed.release.eligible);
+    assert!(!completed.refund.eligible);
+    assert!(!completed.dispute.eligible);
+    assert!(!completed.resolve.eligible);
+    assert!(!completed.cancel.eligible);
+}
+
+#[test]
+fn action_eligibility_missing_is_not_found_and_preserves_state_and_ttl() {
+    let (_env, token, tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+
+    assert_eq!(
+        client
+            .try_get_action_eligibility(&999, buyer)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::NotFound
+    );
+
+    let ttl_before = client.ttl_info(&id);
+    let status_before = client.get_status(&id);
+    let balance_before = tc.balance(buyer);
+
+    let summary = client.get_action_eligibility(&id, buyer);
+    assert!(summary.deposit.eligible);
+
+    assert_eq!(client.ttl_info(&id), ttl_before);
+    assert_eq!(client.get_status(&id), status_before);
+    assert_eq!(tc.balance(buyer), balance_before);
 }
