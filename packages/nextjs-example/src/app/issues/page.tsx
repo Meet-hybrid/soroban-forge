@@ -26,6 +26,26 @@ function isWave(issue: Issue) {
   );
 }
 
+function labelNames(issue: Issue) {
+  return issue.labels.map((label) => label.name.toLowerCase());
+}
+
+function complexity(issue: Issue) {
+  const label = labelNames(issue).find((name) => name.startsWith("complexity:"));
+  return label ? label.replace("complexity:", "").trim() : "Unclassified";
+}
+
+function priority(issue: Issue) {
+  const labels = labelNames(issue);
+  if (labels.some((label) => label.includes("critical"))) return "Critical";
+  if (labels.some((label) => label.includes("high"))) return "High";
+  return "Standard";
+}
+
+function isStale(issue: Issue) {
+  return issue.state === "open" && Date.now() - Date.parse(issue.updated_at) > 14 * 24 * 60 * 60 * 1000;
+}
+
 function age(updated: string) {
   const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(updated)) / 60000));
   if (minutes < 1) return "just now";
@@ -48,11 +68,13 @@ function IssueCard({ issue }: { issue: Issue }) {
         <a href={issue.html_url} target="_blank" rel="noreferrer" className="issue-number">#{issue.number} ↗</a>
         <span className="issue-pill">{issue.state === "open" ? "Open" : "Closed"}</span>
         <span className={`issue-pill ${isWave(issue) ? "wave" : "muted"}`}>{isWave(issue) ? "Stellar Wave" : "No Wave label"}</span>
+        {priority(issue) !== "Standard" && <span className="issue-pill priority">{priority(issue)}</span>}
+        {isStale(issue) && <span className="issue-pill stale">Stale</span>}
       </div>
       <a href={issue.html_url} target="_blank" rel="noreferrer" className="issue-title">{issue.title}</a>
       <div className="issue-card-foot">
         <span className={assigned.length ? "" : "unassigned"}>◉ {assigned.length ? assigned.join(", ") : "Unassigned"}</span>
-        <span>{age(issue.updated_at)}</span>
+        <span>{complexity(issue)} · {age(issue.updated_at)}</span>
       </div>
     </article>
   );
@@ -98,6 +120,8 @@ export default function IssuesPage() {
       unassigned: wave.filter((issue) => issue.assignees.length === 0).length,
       outside: open.filter((issue) => !isWave(issue)).length,
       closed: issues.filter((issue) => issue.state === "closed").length,
+      stale: open.filter(isStale).length,
+      attention: open.filter((issue) => (isWave(issue) && issue.assignees.length === 0) || isStale(issue)).length,
     };
   }, [issues]);
 
@@ -143,6 +167,11 @@ export default function IssuesPage() {
       </header>
       <div className="issue-intro"><span><strong>One live view of the Soroban Forge queue.</strong> Track ownership, Wave labels, and contribution opportunities from GitHub.</span><code>Meet-hybrid / soroban-forge</code></div>
       <section className="issue-stats"><Stat label="Open issues" value={counts.open} tone="blue" /><Stat label="Stellar Wave label" value={counts.wave} tone="green" /><Stat label="Wave assigned" value={counts.assigned} tone="blue" /><Stat label="Wave unassigned" value={counts.unassigned} tone="amber" /><Stat label="No Wave label" value={counts.outside} tone="amber" /><Stat label="Closed" value={counts.closed} /></section>
+      <section className="issue-pulse">
+        <div className="issue-pulse-copy"><div className="issue-eyebrow">Repository operating pulse</div><h2>Turn the queue into momentum.</h2><p>Start with an unassigned Wave issue, or revive work that has gone quiet. This view keeps contributor effort pointed at the highest-value next move.</p><div className="issue-progress"><span><b>{counts.open ? Math.round((counts.assigned / counts.open) * 100) : 0}%</b> ownership coverage</span><div><i style={{ width: `${counts.open ? Math.round((counts.assigned / counts.open) * 100) : 0}%` }} /></div></div></div>
+        <div className="issue-pulse-metrics"><div><strong>{counts.attention}</strong><span>needs attention</span></div><div><strong>{counts.stale}</strong><span>stale &gt; 14 days</span></div><div><strong>{new Set(issues.flatMap((issue) => issue.assignees.map((a) => a.login))).size}</strong><span>active contributors</span></div></div>
+      </section>
+      {issues.length > 0 && <section className="issue-next"><div className="issue-section-heading"><div><div className="issue-eyebrow">Recommended next</div><h2>Good places to contribute now</h2></div><button className="issue-link-button" onClick={() => setFilter("needs")}>See all unassigned ↗</button></div><div className="issue-next-grid">{issues.filter((issue) => issue.state === "open" && isWave(issue) && issue.assignees.length === 0).slice(0, 3).map((issue) => <a className="issue-next-card" href={issue.html_url} target="_blank" rel="noreferrer" key={issue.number}><span>#{issue.number} · {complexity(issue)}</span><strong>{issue.title}</strong><small>{priority(issue)} priority · available on GitHub ↗</small></a>)}{issues.filter((issue) => issue.state === "open" && isWave(issue) && issue.assignees.length === 0).length === 0 && <div className="issue-next-empty">All Wave-labeled issues are currently assigned. Explore the full queue for the next opportunity.</div>}</div></section>}
       {error && <div className="issue-error">{error}</div>}
       <div className="issue-controls"><div className="issue-tabs">{tabs.map(([id, label, count]) => <button key={id} className={`issue-tab ${filter === id ? "selected" : ""}`} onClick={() => setFilter(id)}>{label} <span>{count}</span></button>)}</div><input className="issue-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search title, issue number, contributor" /></div>
       <section className={`issue-board ${filter === "people" ? "people" : filter === "closed" ? "single" : filter === "all" ? "four" : ""}`}>
