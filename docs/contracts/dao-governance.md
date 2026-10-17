@@ -24,9 +24,12 @@ fn get_proposal(proposal_id) -> Result<Proposal, ForgeError>
 fn get_proposal_count() -> u64
 fn get_proposals(offset, limit) -> Result<Vec<Proposal>, ForgeError>
 fn has_voted(proposal_id, voter) -> Result<bool, ForgeError>
+fn get_vote_receipt(proposal_id, voter) -> Result<VoteReceipt, ForgeError>
 fn get_active_proposal_count(proposer) -> u32
 fn touch_ttl(proposal_id) -> Result<(), ForgeError>
 ```
+
+`get_vote_receipt(proposal_id, voter)` returns a read-only `VoteReceipt { proposal_id, voter, voted, support, voting_power }` without mutating proposal, vote, delegation, or TTL storage. When a vote was cast, `voted == true`, `support` reports `Some(true)` ("for") or `Some(false)` ("against"), and `voting_power` returns the governance-token weight recorded at vote time rather than recalculating historical balances. When the voter has not voted on an existing proposal, `voted == false`, `support == None`, and `voting_power == 0`. Unknown `proposal_id` values return `ForgeError::NotFound`.
 
 `initialize(governance_token)` must configure a SEP-41 token once before
 voting; a second call returns `ForgeError::AlreadyInitialized`. `action` is
