@@ -1,0 +1,466 @@
+{
+  "schema": "soroban-forge/contract-abi@1",
+  "contract": "soroban-forge-marketplace-royalties",
+  "functions": [
+    {
+      "name": "distribute",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "payer",
+          "type": "address"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_royalty",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<udt:Royalty,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_settlement_summary",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<udt:SettlementSummary,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "quote_sale",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<udt:SaleQuote,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_royalty",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        },
+        {
+          "name": "bps",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_royalty_splits",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "recipients",
+          "type": "vec<udt:RoyaltyShare>"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "settle_sale",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "payer",
+          "type": "address"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<udt:Settlement,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "settle_sales",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "payer",
+          "type": "address"
+        },
+        {
+          "name": "sales",
+          "type": "vec<tuple<address,i128>>"
+        }
+      ],
+      "outputs": [
+        "result<vec<udt:Settlement>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "touch_ttl",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "RoyaltyConfigured",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        },
+        {
+          "name": "bps",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "SaleSettled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "payer",
+          "type": "address"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "royalty_recipient",
+          "type": "address"
+        },
+        {
+          "name": "gross_amount",
+          "type": "i128"
+        },
+        {
+          "name": "seller_net",
+          "type": "i128"
+        },
+        {
+          "name": "royalty_share",
+          "type": "i128"
+        }
+      ]
+    }
+  ],
+  "types": [
+    {
+      "kind": "error-enum",
+      "name": "ForgeError",
+      "variants": [
+        {
+          "name": "Unauthorized",
+          "value": 1
+        },
+        {
+          "name": "NotFound",
+          "value": 2
+        },
+        {
+          "name": "InvalidInput",
+          "value": 3
+        },
+        {
+          "name": "InsufficientFunds",
+          "value": 4
+        },
+        {
+          "name": "AlreadyInitialized",
+          "value": 5
+        },
+        {
+          "name": "NotInitialized",
+          "value": 6
+        },
+        {
+          "name": "DeadlineReached",
+          "value": 7
+        },
+        {
+          "name": "InsufficientAllowance",
+          "value": 8
+        },
+        {
+          "name": "ArithmeticOverflow",
+          "value": 9
+        },
+        {
+          "name": "Custom",
+          "value": 10
+        },
+        {
+          "name": "TokenTransferFailed",
+          "value": 11
+        },
+        {
+          "name": "ContractInvocationFailed",
+          "value": 12
+        },
+        {
+          "name": "WithdrawalLimitExceeded",
+          "value": 13
+        },
+        {
+          "name": "SubscriptionPastDue",
+          "value": 14
+        },
+        {
+          "name": "ProposerCooldown",
+          "value": 15
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Royalty",
+      "fields": [
+        {
+          "name": "bps",
+          "type": "u32"
+        },
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        },
+        {
+          "name": "status",
+          "type": "udt:RoyaltyStatus"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "RoyaltyShare",
+      "fields": [
+        {
+          "name": "bps",
+          "type": "u32"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "RoyaltyStatus",
+      "variants": [
+        {
+          "name": "Active",
+          "types": []
+        },
+        {
+          "name": "Disabled",
+          "types": []
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "SaleQuote",
+      "fields": [
+        {
+          "name": "gross",
+          "type": "i128"
+        },
+        {
+          "name": "royalty_amount",
+          "type": "i128"
+        },
+        {
+          "name": "royalty_bps",
+          "type": "u32"
+        },
+        {
+          "name": "seller_net",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Settlement",
+      "fields": [
+        {
+          "name": "royalty_share",
+          "type": "i128"
+        },
+        {
+          "name": "seller_net",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "SettlementSummary",
+      "fields": [
+        {
+          "name": "gross_volume",
+          "type": "i128"
+        },
+        {
+          "name": "royalties_paid",
+          "type": "i128"
+        },
+        {
+          "name": "sales",
+          "type": "u32"
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "name": "Unauthorized",
+      "code": 1
+    },
+    {
+      "name": "NotFound",
+      "code": 2
+    },
+    {
+      "name": "InvalidInput",
+      "code": 3
+    },
+    {
+      "name": "InsufficientFunds",
+      "code": 4
+    },
+    {
+      "name": "AlreadyInitialized",
+      "code": 5
+    },
+    {
+      "name": "NotInitialized",
+      "code": 6
+    },
+    {
+      "name": "DeadlineReached",
+      "code": 7
+    },
+    {
+      "name": "InsufficientAllowance",
+      "code": 8
+    },
+    {
+      "name": "ArithmeticOverflow",
+      "code": 9
+    },
+    {
+      "name": "Custom",
+      "code": 10
+    },
+    {
+      "name": "TokenTransferFailed",
+      "code": 11
+    },
+    {
+      "name": "ContractInvocationFailed",
+      "code": 12
+    },
+    {
+      "name": "WithdrawalLimitExceeded",
+      "code": 13
+    },
+    {
+      "name": "SubscriptionPastDue",
+      "code": 14
+    },
+    {
+      "name": "ProposerCooldown",
+      "code": 15
+    }
+  ]
+}
