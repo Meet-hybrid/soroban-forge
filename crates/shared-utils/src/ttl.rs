@@ -84,7 +84,8 @@ mod tests {
 
     fn advance_ledger(env: &Env, amount: u32) {
         let next = env.ledger().sequence().saturating_add(amount);
-        env.ledger().with_mut(|ledger| ledger.sequence_number = next);
+        env.ledger()
+            .with_mut(|ledger| ledger.sequence_number = next);
     }
 
     fn seed_entry(env: &Env, contract: &Address, key: &ProbeKey) {
@@ -122,7 +123,10 @@ mod tests {
                 };
                 if env.storage().persistent().has(key) {
                     assert!(ttl_after >= ttl_before, "TTL should not shrink after touch");
-                    assert_eq!(ttl_after, BUMP_AMOUNT, "existing key TTL should be refreshed");
+                    assert_eq!(
+                        ttl_after, BUMP_AMOUNT,
+                        "existing key TTL should be refreshed"
+                    );
                 } else {
                     assert_eq!(ttl_after, 0, "missing key should remain absent");
                 }
@@ -186,7 +190,11 @@ mod tests {
         seed_entry(&env, &contract, &also_existing);
         advance_ledger(&env, BUMP_THRESHOLD);
 
-        assert_refresh_harness(&env, &contract, &[missing, existing, also_existing, ProbeKey::Three]);
+        assert_refresh_harness(
+            &env,
+            &contract,
+            &[missing, existing, also_existing, ProbeKey::Three],
+        );
 
         assert_ttl_refreshed(&env, &contract, &existing, BUMP_AMOUNT);
         assert_ttl_refreshed(&env, &contract, &also_existing, BUMP_AMOUNT);

@@ -91,7 +91,11 @@ fn verify_wasm(
         println!(
             "{}",
             render_verification_summary_json(&VerificationSummary {
-                status: if status == VerifyStatus::Match { "pass".to_string() } else { "fail".to_string() },
+                status: if status == VerifyStatus::Match {
+                    "pass".to_string()
+                } else {
+                    "fail".to_string()
+                },
                 artifacts: vec![ArtifactVerification {
                     name: package.clone(),
                     state: status,
@@ -175,7 +179,11 @@ fn verify_expected(expected: &str, package: Option<&str>, json: bool) -> Result<
 
     if json {
         let summary = VerificationSummary {
-            status: if mismatches == 0 { "pass".to_string() } else { "fail".to_string() },
+            status: if mismatches == 0 {
+                "pass".to_string()
+            } else {
+                "fail".to_string()
+            },
             artifacts,
         };
         println!("{}", render_verification_summary_json(&summary));
@@ -259,7 +267,9 @@ fn verify_manifest(manifest_path: &str, json: bool) -> Result<()> {
         let size_drift = match artifact.bytes {
             Some(recorded) => match fs::metadata(&rebuilt_path).map(|meta| meta.len()) {
                 Ok(actual) if actual != recorded => {
-                    let message = format!("size drifted: manifest {recorded} bytes vs rebuilt {actual} bytes");
+                    let message = format!(
+                        "size drifted: manifest {recorded} bytes vs rebuilt {actual} bytes"
+                    );
                     if !json {
                         println!("  note: {:<32} {}", artifact.name, message);
                     }
@@ -285,7 +295,9 @@ fn verify_manifest(manifest_path: &str, json: bool) -> Result<()> {
                 Some(format!(
                     "size drifted: manifest {} bytes vs rebuilt {} bytes",
                     artifact.bytes.unwrap_or(0),
-                    fs::metadata(&rebuilt_path).map(|meta| meta.len()).unwrap_or(0)
+                    fs::metadata(&rebuilt_path)
+                        .map(|meta| meta.len())
+                        .unwrap_or(0)
                 ))
             } else {
                 None
@@ -303,13 +315,20 @@ fn verify_manifest(manifest_path: &str, json: bool) -> Result<()> {
                 status,
             );
         }
-        if status == VerifyStatus::Mismatch || status == VerifyStatus::SizeDrift || status == VerifyStatus::Missing {
+        if status == VerifyStatus::Mismatch
+            || status == VerifyStatus::SizeDrift
+            || status == VerifyStatus::Missing
+        {
             mismatches += 1;
         }
     }
 
     if json {
-        summary.status = if mismatches == 0 { "pass".to_string() } else { "fail".to_string() };
+        summary.status = if mismatches == 0 {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        };
         println!("{}", render_verification_summary_json(&summary));
     }
 
@@ -642,7 +661,8 @@ mod tests {
                 message: None,
             }],
         };
-        let value: serde_json::Value = serde_json::from_str(&render_verification_summary_json(&pass)).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&render_verification_summary_json(&pass)).unwrap();
         assert_eq!(value["status"], "pass");
         assert_eq!(value["artifacts"][0]["state"], "match");
 
@@ -658,7 +678,8 @@ mod tests {
                 message: Some("size drifted: manifest 128 bytes vs rebuilt 256 bytes".to_owned()),
             }],
         };
-        let value: serde_json::Value = serde_json::from_str(&render_verification_summary_json(&drift)).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&render_verification_summary_json(&drift)).unwrap();
         assert_eq!(value["status"], "fail");
         assert_eq!(value["artifacts"][0]["state"], "size-drift");
     }
