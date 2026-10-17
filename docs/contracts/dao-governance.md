@@ -21,12 +21,15 @@ fn vote(proposal_id, voter, support) -> Result<(), ForgeError>
 fn execute(proposal_id) -> Result<(), ForgeError>
 fn cancel_proposal(proposal_id, proposer) -> Result<(), ForgeError>
 fn get_proposal(proposal_id) -> Result<Proposal, ForgeError>
+fn get_proposal_readiness(proposal_id) -> Result<ProposalReadinessSummary, ForgeError>
 fn get_proposal_count() -> u64
 fn get_proposals(offset, limit) -> Result<Vec<Proposal>, ForgeError>
 fn has_voted(proposal_id, voter) -> Result<bool, ForgeError>
 fn get_active_proposal_count(proposer) -> u32
 fn touch_ttl(proposal_id) -> Result<(), ForgeError>
 ```
+
+`get_proposal_readiness(proposal_id)` returns a read-only `ProposalReadinessSummary { proposal_id, state, voting_window, voting_ends, for_votes, against_votes, quorum_reached, readiness, can_execute }` without mutating proposal, vote, bond, or TTL storage. It reports whether the voting window is `Open` or `Closed`, whether strict majority (`quorum_reached`: `for_votes > against_votes`) is currently met, and classifies execution readiness across active voting (`VotingOpen`), post-deadline finalisation (`ReadyToFinalizeSucceeded`, `ReadyToFinalizeDefeated`), dispatch (`Executable`), retryable dependency holds (`RetryablePendingDependency`), permanent dependency/conflict blocks (`BlockedByFailedDependency`, `BlockedByExecutedConflict`), and terminal states (`TerminalDefeated`, `TerminalExecuted`, `TerminalCancelled`). Unknown proposal IDs return `ForgeError::NotFound`.
 
 `initialize(governance_token)` must configure a SEP-41 token once before
 voting; a second call returns `ForgeError::AlreadyInitialized`. `action` is

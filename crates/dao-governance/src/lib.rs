@@ -303,6 +303,92 @@ pub trait SorobanForgeDaoGovernance {
 
     /// Read how many active proposals `proposer` currently has in flight (read-only view).
     fn get_active_proposal_count(env: Env, proposer: Address) -> u32;
+
+    /// Read a combined readiness summary for `proposal_id` at the current ledger
+    /// time without mutating proposal, vote, bond, or TTL storage (read-only view).
+    ///
+    /// Reports the stored proposal state, voting-window state (`Open` or `Closed`),
+    /// vote tallies and majority/quorum status, and whether `execute` is currently
+    /// ready to finalise/dispatch, blocked by a retryable condition (voting still
+    /// open or a required dependency not yet executed), or permanently blocked by
+    /// a terminal state or dependency/conflict failure.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no proposal with this id.
+    fn get_proposal_readiness(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<ProposalReadinessSummary, soroban_forge_shared_utils::ForgeError>;
+}
+
+/// Whether a proposal's voting window is currently open or closed at the ledger timestamp.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VotingWindowState {
+    /// `now < voting_ends`: voting is open and `execute` is not yet permitted.
+    Open,
+    /// `now >= voting_ends`: voting has closed and finalisation/dispatch can proceed.
+    Closed,
+}
+
+/// Execution readiness classification for a DAO proposal at the current ledger time.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionReadiness {
+    /// Voting is still open (`Active` and `now < voting_ends`); retryable once voting ends.
+    VotingOpen,
+    /// Voting has ended on an `Active` proposal with `for_votes > against_votes`;
+    /// calling `execute` will finalise it to `Succeeded`.
+    ReadyToFinalizeSucceeded,
+    /// Voting has ended on an `Active` proposal with `for_votes <= against_votes`;
+    /// calling `execute` will finalise it to `Defeated` and forfeit its bond.
+    ReadyToFinalizeDefeated,
+    /// Proposal is `Succeeded` and all dependency/conflict checks pass; calling
+    /// `execute` will invoke the target contract and refund the bond.
+    Executable,
+    /// Proposal is `Succeeded`, but at least one `requires` dependency is still
+    /// `Active` or `Succeeded` (not yet `Executed`); retryable once dependencies execute.
+    RetryablePendingDependency,
+    /// Proposal is `Succeeded`, but a required dependency was `Defeated` or `Cancelled`,
+    /// permanently blocking execution.
+    BlockedByFailedDependency,
+    /// Proposal is `Succeeded`, but its `conflicts_with` proposal has already `Executed`,
+    /// permanently blocking execution.
+    BlockedByExecutedConflict,
+    /// Proposal was rejected by vote (`Defeated`, terminal).
+    TerminalDefeated,
+    /// Proposal has already been executed (`Executed`, terminal).
+    TerminalExecuted,
+    /// Proposal was withdrawn by its proposer (`Cancelled`, terminal).
+    TerminalCancelled,
+    /// Proposal is in the reserved `Queued` state and not currently executable.
+    Queued,
+}
+
+/// Read-only readiness summary for a governance proposal at the current ledger time.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalReadinessSummary {
+    /// Proposal identifier.
+    pub proposal_id: u64,
+    /// Stored lifecycle state of the proposal.
+    pub state: ProposalState,
+    /// Whether the voting window is currently open or closed (`now >= voting_ends`).
+    pub voting_window: VotingWindowState,
+    /// Ledger timestamp at which voting closes.
+    pub voting_ends: u64,
+    /// Recorded "for" vote weight.
+    pub for_votes: i128,
+    /// Recorded "against" vote weight.
+    pub against_votes: i128,
+    /// Whether the proposal currently meets the strict majority threshold (`for_votes > against_votes`).
+    pub quorum_reached: bool,
+    /// Detailed execution readiness classification.
+    pub readiness: ExecutionReadiness,
+    /// `true` when `execute(proposal_id)` can be called right now to advance the proposal
+    /// (`ReadyToFinalizeSucceeded`, `ReadyToFinalizeDefeated`, or `Executable`).
+    pub can_execute: bool,
 }
 
 /// Lifecycle state of a governance proposal.
@@ -987,6 +1073,73 @@ impl DaoGovernance {
     /// Read how many active proposals `proposer` currently has in flight (read-only view).
     pub fn get_active_proposal_count(env: Env, proposer: Address) -> u32 {
         Self::active_proposal_count(&env, &proposer)
+    }
+
+    /// Read a combined readiness summary for `proposal_id` at the current ledger
+    /// time without mutating proposal, vote, bond, or TTL storage (read-only view).
+    pub fn get_proposal_readiness(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<ProposalReadinessSummary, ForgeError> {
+        let proposal = Self::get_proposal_impl(&env, proposal_id)?;
+        let now = env.ledger().timestamp();
+        let voting_window = if now < proposal.voting_ends {
+            VotingWindowState::Open
+        } else {
+            VotingWindowState::Closed
+        };
+        let quorum_reached = proposal.for_votes > proposal.against_votes;
+        let readiness = match proposal.state {
+            ProposalState::Active => {
+                if now < proposal.voting_ends {
+                    ExecutionReadiness::VotingOpen
+                } else if quorum_reached {
+                    ExecutionReadiness::ReadyToFinalizeSucceeded
+                } else {
+                    ExecutionReadiness::ReadyToFinalizeDefeated
+                }
+            }
+            ProposalState::Succeeded => {
+                if now < proposal.voting_ends {
+                    ExecutionReadiness::VotingOpen
+                } else {
+                    match Self::check_dependencies(&env, &proposal) {
+                        Ok(()) => ExecutionReadiness::Executable,
+                        Err(ForgeError::DeadlineReached) => {
+                            ExecutionReadiness::RetryablePendingDependency
+                        }
+                        Err(ForgeError::ContractInvocationFailed) => {
+                            ExecutionReadiness::BlockedByFailedDependency
+                        }
+                        Err(ForgeError::InvalidInput) => {
+                            ExecutionReadiness::BlockedByExecutedConflict
+                        }
+                        Err(other) => return Err(other),
+                    }
+                }
+            }
+            ProposalState::Defeated => ExecutionReadiness::TerminalDefeated,
+            ProposalState::Executed => ExecutionReadiness::TerminalExecuted,
+            ProposalState::Cancelled => ExecutionReadiness::TerminalCancelled,
+            ProposalState::Queued => ExecutionReadiness::Queued,
+        };
+        let can_execute = matches!(
+            readiness,
+            ExecutionReadiness::ReadyToFinalizeSucceeded
+                | ExecutionReadiness::ReadyToFinalizeDefeated
+                | ExecutionReadiness::Executable
+        );
+        Ok(ProposalReadinessSummary {
+            proposal_id: proposal.proposal_id,
+            state: proposal.state,
+            voting_window,
+            voting_ends: proposal.voting_ends,
+            for_votes: proposal.for_votes,
+            against_votes: proposal.against_votes,
+            quorum_reached,
+            readiness,
+            can_execute,
+        })
     }
 
     fn active_proposal_count(env: &Env, proposer: &Address) -> u32 {
@@ -3102,6 +3255,252 @@ mod tests {
             client.get_active_proposal_count(&accounts.user1),
             DEFAULT_MAX_ACTIVE_PROPOSALS - 1
         );
+    }
+
+    #[test]
+    fn proposal_readiness_tracks_voting_finalization_dispatch_and_terminal_states() {
+        let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+
+        // 1. Passing proposal: VotingOpen -> ReadyToFinalizeSucceeded -> Executable -> TerminalExecuted
+        let pass_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        assert_eq!(
+            client.get_proposal_readiness(&pass_id),
+            ProposalReadinessSummary {
+                proposal_id: pass_id,
+                state: ProposalState::Active,
+                voting_window: VotingWindowState::Open,
+                voting_ends: START + DURATION,
+                for_votes: 0,
+                against_votes: 0,
+                quorum_reached: false,
+                readiness: ExecutionReadiness::VotingOpen,
+                can_execute: false,
+            }
+        );
+
+        client.vote(&pass_id, &accounts.user2, &true);
+        // One second before voting_ends boundary: still Open, quorum_reached == true, can_execute == false
+        env.ledger().set_timestamp(START + DURATION - 1);
+        assert_eq!(
+            client.get_proposal_readiness(&pass_id),
+            ProposalReadinessSummary {
+                proposal_id: pass_id,
+                state: ProposalState::Active,
+                voting_window: VotingWindowState::Open,
+                voting_ends: START + DURATION,
+                for_votes: FUNDS,
+                against_votes: 0,
+                quorum_reached: true,
+                readiness: ExecutionReadiness::VotingOpen,
+                can_execute: false,
+            }
+        );
+
+        // Exactly at voting_ends boundary: Closed, ReadyToFinalizeSucceeded, can_execute == true
+        env.ledger().set_timestamp(START + DURATION);
+        assert_eq!(
+            client.get_proposal_readiness(&pass_id),
+            ProposalReadinessSummary {
+                proposal_id: pass_id,
+                state: ProposalState::Active,
+                voting_window: VotingWindowState::Closed,
+                voting_ends: START + DURATION,
+                for_votes: FUNDS,
+                against_votes: 0,
+                quorum_reached: true,
+                readiness: ExecutionReadiness::ReadyToFinalizeSucceeded,
+                can_execute: true,
+            }
+        );
+
+        // First execute finalises to Succeeded -> readiness becomes Executable
+        client.execute(&pass_id);
+        assert_eq!(
+            client.get_proposal_readiness(&pass_id),
+            ProposalReadinessSummary {
+                proposal_id: pass_id,
+                state: ProposalState::Succeeded,
+                voting_window: VotingWindowState::Closed,
+                voting_ends: START + DURATION,
+                for_votes: FUNDS,
+                against_votes: 0,
+                quorum_reached: true,
+                readiness: ExecutionReadiness::Executable,
+                can_execute: true,
+            }
+        );
+
+        // Second execute dispatches target -> readiness becomes TerminalExecuted
+        client.execute(&pass_id);
+        assert_eq!(
+            client.get_proposal_readiness(&pass_id),
+            ProposalReadinessSummary {
+                proposal_id: pass_id,
+                state: ProposalState::Executed,
+                voting_window: VotingWindowState::Closed,
+                voting_ends: START + DURATION,
+                for_votes: FUNDS,
+                against_votes: 0,
+                quorum_reached: true,
+                readiness: ExecutionReadiness::TerminalExecuted,
+                can_execute: false,
+            }
+        );
+
+        // 2. Defeated proposal: ReadyToFinalizeDefeated -> TerminalDefeated
+        let defeat_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.vote(&defeat_id, &accounts.user2, &false);
+        env.ledger().set_timestamp(START + 2 * DURATION);
+        assert_eq!(
+            client.get_proposal_readiness(&defeat_id).readiness,
+            ExecutionReadiness::ReadyToFinalizeDefeated
+        );
+        assert!(client.get_proposal_readiness(&defeat_id).can_execute);
+
+        client.execute(&defeat_id);
+        assert_eq!(
+            client.get_proposal_readiness(&defeat_id),
+            ProposalReadinessSummary {
+                proposal_id: defeat_id,
+                state: ProposalState::Defeated,
+                voting_window: VotingWindowState::Closed,
+                voting_ends: START + 2 * DURATION,
+                for_votes: 0,
+                against_votes: FUNDS,
+                quorum_reached: false,
+                readiness: ExecutionReadiness::TerminalDefeated,
+                can_execute: false,
+            }
+        );
+
+        // 3. Cancelled proposal: TerminalCancelled
+        let cancel_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.cancel_proposal(&cancel_id, &accounts.user1);
+        assert_eq!(
+            client.get_proposal_readiness(&cancel_id).readiness,
+            ExecutionReadiness::TerminalCancelled
+        );
+        assert!(!client.get_proposal_readiness(&cancel_id).can_execute);
+    }
+
+    #[test]
+    fn proposal_readiness_distinguishes_dependency_and_conflict_blockers_and_is_read_only() {
+        let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+
+        // Create base prerequisite p1 and conflicting proposal p_conflict
+        let p1 = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let p_conflict = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        // p_dep requires p1
+        let p_dep = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::vec![&env, p1],
+            &None,
+        );
+        // p_conf_consumer conflicts with p_conflict
+        let p_conf_consumer = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &Some(p_conflict),
+        );
+
+        for id in [p1, p_conflict, p_dep, p_conf_consumer] {
+            client.vote(&id, &accounts.user2, &true);
+        }
+
+        // Advance past voting window and finalise p_dep and p_conf_consumer to Succeeded
+        env.ledger().set_timestamp(START + DURATION);
+        client.execute(&p_dep);
+        client.execute(&p_conf_consumer);
+
+        // While p1 is still Active (not Executed), p_dep is RetryablePendingDependency
+        assert_eq!(
+            client.get_proposal_readiness(&p_dep).readiness,
+            ExecutionReadiness::RetryablePendingDependency
+        );
+        assert!(!client.get_proposal_readiness(&p_dep).can_execute);
+
+        // Cancel p1 -> p_dep becomes permanently BlockedByFailedDependency
+        client.cancel_proposal(&p1, &accounts.user1);
+        assert_eq!(
+            client.get_proposal_readiness(&p_dep).readiness,
+            ExecutionReadiness::BlockedByFailedDependency
+        );
+        assert!(!client.get_proposal_readiness(&p_dep).can_execute);
+
+        // Before p_conflict executes, p_conf_consumer is Executable
+        assert_eq!(
+            client.get_proposal_readiness(&p_conf_consumer).readiness,
+            ExecutionReadiness::Executable
+        );
+        assert!(client.get_proposal_readiness(&p_conf_consumer).can_execute);
+
+        // Finalise and execute p_conflict -> p_conf_consumer becomes BlockedByExecutedConflict
+        client.execute(&p_conflict);
+        client.execute(&p_conflict);
+        assert_eq!(
+            client.get_proposal_readiness(&p_conf_consumer).readiness,
+            ExecutionReadiness::BlockedByExecutedConflict
+        );
+        assert!(!client.get_proposal_readiness(&p_conf_consumer).can_execute);
+
+        // Unknown proposal IDs return NotFound, and query requires no auth and mutates no state
+        let stored_before = client.get_proposal(&p_conf_consumer);
+        env.mock_auths(&[]);
+        assert_eq!(
+            client
+                .try_get_proposal_readiness(&999)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+        let summary = client.get_proposal_readiness(&p_conf_consumer);
+        assert_eq!(
+            summary.readiness,
+            ExecutionReadiness::BlockedByExecutedConflict
+        );
+        assert!(env.auths().is_empty());
+        assert_eq!(client.get_proposal(&p_conf_consumer), stored_before);
     }
 }
 
