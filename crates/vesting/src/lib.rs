@@ -1157,3 +1157,6 @@ mod authz;
 
 #[cfg(test)]
 mod props;
+
+#[cfg(test)]
+mod indexer_fixtures;
