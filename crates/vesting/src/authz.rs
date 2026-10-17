@@ -25,14 +25,15 @@
 //!   sub-invocations, and a claim payout legitimately completes on the beneficiary's
 //!   signature alone.
 
-use crate::{SorobanForgeVestingClient, Vesting, VestingStatus};
+use crate::{SorobanForgeVestingClient, Tranche, Vesting, VestingStatus};
 
 extern crate std;
+use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::testutils::{
     Address as _, AuthorizedFunction, AuthorizedInvocation, Ledger as _, MockAuth, MockAuthInvoke,
 };
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{Address, Env, IntoVal, InvokeError, Symbol};
+use soroban_sdk::{vec, Address, Env, IntoVal, InvokeError, Symbol};
 
 const START: u64 = 1_000_000;
 const CLIFF: u64 = 1_000;
@@ -723,4 +724,412 @@ fn reassignment_rejects_old_new_and_outsider_signatures() {
         assert_eq!(client.get_schedule(&id).beneficiary, accounts.user1);
         assert_eq!(client.get_schedule(&id).reassignment_count, 0);
     }
+}
+
+// -----------------------------------------------------------------------
+// Full authorization matrix: creation, cancellation, claim, and state preservation
+// -----------------------------------------------------------------------
+
+#[test]
+fn create_schedule_matrix_rejects_funder_and_outsider_and_preserves_empty_state() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let outsider = &accounts.user2;
+
+    for unauthorized_signer in [funder, outsider] {
+        env.mock_auths(&[MockAuth {
+            address: unauthorized_signer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_schedule",
+                args: (funder, beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res =
+            client.try_create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+        assert_auth_abort!(res);
+        assert!(matches!(
+            client.try_get_schedule(&1),
+            Err(Ok(ForgeError::NotFound))
+        ));
+        assert_eq!(tc.balance(&contract_id), TOTAL);
+        assert_eq!(tc.balance(beneficiary), 0);
+    }
+
+    // Valid beneficiary authorization succeeds and allocates id 1.
+    env.mock_auths(&[MockAuth {
+        address: beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create_schedule",
+            args: (funder, beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let id = client
+        .try_create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION)
+        .expect("outer ok")
+        .expect("create_schedule ok");
+    assert_eq!(id, 1);
+}
+
+#[test]
+fn create_tranche_schedule_authorization_matrix_and_state_preservation() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let outsider = &accounts.user2;
+    let tranches = vec![
+        &env,
+        Tranche {
+            unlock_at: 500,
+            amount: 4_000,
+        },
+        Tranche {
+            unlock_at: 1_500,
+            amount: 6_000,
+        },
+    ];
+
+    for unauthorized_signer in [funder, outsider] {
+        env.mock_auths(&[MockAuth {
+            address: unauthorized_signer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_tranche_schedule",
+                args: (beneficiary, &token, &tranches).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_create_tranche_schedule(beneficiary, &token, &tranches);
+        assert_auth_abort!(res);
+        assert!(matches!(
+            client.try_get_tranche_schedule(&1),
+            Err(Ok(ForgeError::NotFound))
+        ));
+        assert_eq!(tc.balance(&contract_id), TOTAL);
+    }
+
+    // Valid beneficiary signature creates the tranche schedule at id 1.
+    env.mock_auths(&[MockAuth {
+        address: beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create_tranche_schedule",
+            args: (beneficiary, &token, &tranches).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let id = client
+        .try_create_tranche_schedule(beneficiary, &token, &tranches)
+        .expect("outer ok")
+        .expect("create_tranche_schedule ok");
+    assert_eq!(id, 1);
+    let stored = client.get_tranche_schedule(&id);
+    assert_eq!(stored.beneficiary, *beneficiary);
+    assert_eq!(stored.total_amount, TOTAL);
+    assert_eq!(stored.claimed, 0);
+}
+
+#[test]
+fn cancellation_matrix_covers_roles_terminal_schedules_and_state_preservation() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let reassigned_beneficiary = &accounts.user2;
+    let outsider = &accounts.validator;
+
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    // Advance into active vesting and reassign once so former & current beneficiaries both exist.
+    env.ledger().set_timestamp(START + 2_500);
+    client.reassign_beneficiary(&id, reassigned_beneficiary);
+
+    let before = client.get_schedule(&id);
+    let before_claimable_current = client.claimable(&id);
+    let before_claimable_former = client.claimable_for(&id, beneficiary);
+
+    // Every non-funder role (former beneficiary, current beneficiary, outsider) must fail to cancel.
+    for unauthorized in [beneficiary, reassigned_beneficiary, outsider] {
+        env.mock_auths(&[MockAuth {
+            address: unauthorized,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "revoke",
+                args: (id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_revoke(&id);
+        assert_auth_abort!(res);
+
+        let after = client.get_schedule(&id);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.claimed, before.claimed);
+        assert_eq!(after.beneficiary_claimed, before.beneficiary_claimed);
+        assert_eq!(after.reassignment_vested, before.reassignment_vested);
+        assert_eq!(after.reassignment_count, before.reassignment_count);
+        assert_eq!(after.revoked_vested, None);
+        assert_eq!(client.claimable(&id), before_claimable_current);
+        assert_eq!(
+            client.claimable_for(&id, beneficiary),
+            before_claimable_former
+        );
+    }
+
+    // Valid funder cancels the schedule, freezing vested tokens at START + 2_500.
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client
+        .try_revoke(&id)
+        .expect("outer ok")
+        .expect("revoke ok");
+    let revoked_snapshot = client.get_schedule(&id);
+    assert_eq!(revoked_snapshot.status, VestingStatus::Revoked);
+    assert_eq!(revoked_snapshot.revoked_vested, Some(5_000));
+
+    // Advance time further: cancelling an already-Revoked terminal schedule must be rejected
+    // with InvalidInput and leave the frozen state untouched.
+    env.ledger().set_timestamp(START + DURATION);
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_eq!(client.try_revoke(&id), Err(Ok(ForgeError::InvalidInput)));
+    let after_double_revoke = client.get_schedule(&id);
+    assert_eq!(after_double_revoke.status, VestingStatus::Revoked);
+    assert_eq!(
+        after_double_revoke.revoked_vested,
+        revoked_snapshot.revoked_vested
+    );
+    assert_eq!(after_double_revoke.claimed, revoked_snapshot.claimed);
+
+    // Cancelling a non-existent schedule id or a tranche schedule id returns NotFound.
+    env.mock_all_auths();
+    assert_eq!(client.try_revoke(&999), Err(Ok(ForgeError::NotFound)));
+
+    let tranche_id = client.create_tranche_schedule(
+        beneficiary,
+        &token,
+        &vec![
+            &env,
+            Tranche {
+                unlock_at: 100,
+                amount: 1_000,
+            },
+        ],
+    );
+    assert_eq!(
+        client.try_revoke(&tranche_id),
+        Err(Ok(ForgeError::NotFound))
+    );
+    assert_eq!(client.get_tranche_schedule(&tranche_id).claimed, 0);
+
+    // Create and fully claim a second linear schedule to reach Completed, then verify
+    // cancellation of a Completed terminal schedule is rejected without mutating state.
+    let token_admin = StellarAssetClient::new(&env, &token);
+    token_admin.mint(&contract_id, &TOTAL);
+    let completed_id =
+        client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    env.ledger().set_timestamp(START + DURATION * 2);
+    let paid = client.claim(&completed_id);
+    assert_eq!(paid, TOTAL);
+    assert_eq!(client.get_status(&completed_id), VestingStatus::Completed);
+    let completed_before = client.get_schedule(&completed_id);
+    let beneficiary_bal_before = tc.balance(beneficiary);
+
+    assert_eq!(
+        client.try_revoke(&completed_id),
+        Err(Ok(ForgeError::InvalidInput))
+    );
+    let completed_after = client.get_schedule(&completed_id);
+    assert_eq!(completed_after.status, VestingStatus::Completed);
+    assert_eq!(completed_after.claimed, completed_before.claimed);
+    assert_eq!(completed_after.revoked_vested, None);
+    assert_eq!(tc.balance(beneficiary), beneficiary_bal_before);
+}
+
+#[test]
+fn claim_and_claim_for_matrix_across_linear_reassigned_and_tranche_schedules() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let former_beneficiary = &accounts.user1;
+    let current_beneficiary = &accounts.user2;
+    let outsider = &accounts.validator;
+
+    let token_admin = StellarAssetClient::new(&env, &token);
+    token_admin.mint(&contract_id, &TOTAL);
+
+    let linear_id = client.create_schedule(
+        funder,
+        former_beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+
+    // At START + 2_500 (halfway through post-cliff ramp), 5_000 is vested for former_beneficiary.
+    env.ledger().set_timestamp(START + 2_500);
+    client.reassign_beneficiary(&linear_id, current_beneficiary);
+
+    // Advance to START + DURATION so the remaining 5_000 vests for current_beneficiary.
+    env.ledger().set_timestamp(START + DURATION);
+
+    let schedule_before = client.get_schedule(&linear_id);
+    assert_eq!(client.claimable(&linear_id), 5_000);
+    assert_eq!(client.claimable_for(&linear_id, former_beneficiary), 5_000);
+    assert_eq!(client.claimable_for(&linear_id, current_beneficiary), 5_000);
+
+    // 1. Unauthorized `claim` by funder, former_beneficiary, or outsider must abort and preserve state.
+    for unauthorized in [funder, former_beneficiary, outsider] {
+        env.mock_auths(&[MockAuth {
+            address: unauthorized,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "claim",
+                args: (linear_id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_claim(&linear_id);
+        assert_auth_abort!(res);
+
+        let after = client.get_schedule(&linear_id);
+        assert_eq!(after.claimed, schedule_before.claimed);
+        assert_eq!(
+            after.beneficiary_claimed,
+            schedule_before.beneficiary_claimed
+        );
+        assert_eq!(client.claimable(&linear_id), 5_000);
+        assert_eq!(client.claimable_for(&linear_id, former_beneficiary), 5_000);
+        assert_eq!(tc.balance(former_beneficiary), 0);
+        assert_eq!(tc.balance(current_beneficiary), 0);
+    }
+
+    // 2. Unauthorized `claim_for` where caller signs for someone else's frozen balance must abort.
+    for wrong_signer in [funder, current_beneficiary, outsider] {
+        env.mock_auths(&[MockAuth {
+            address: wrong_signer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "claim_for",
+                args: (linear_id, former_beneficiary).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_claim_for(&linear_id, former_beneficiary);
+        assert_auth_abort!(res);
+        assert_eq!(client.claimable_for(&linear_id, former_beneficiary), 5_000);
+        assert_eq!(tc.balance(former_beneficiary), 0);
+    }
+
+    // 3. Authorized `claim_for` by former_beneficiary succeeds for their frozen 5_000 without touching current_beneficiary's 5_000.
+    env.mock_auths(&[MockAuth {
+        address: former_beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "claim_for",
+            args: (linear_id, former_beneficiary).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let former_paid = client
+        .try_claim_for(&linear_id, former_beneficiary)
+        .expect("outer ok")
+        .expect("claim_for ok");
+    assert_eq!(former_paid, 5_000);
+    assert_eq!(tc.balance(former_beneficiary), 5_000);
+    assert_eq!(client.claimable_for(&linear_id, former_beneficiary), 0);
+    assert_eq!(client.claimable(&linear_id), 5_000);
+
+    // 4. Authorized `claim` by current_beneficiary claims the remaining 5_000 and completes the schedule.
+    env.mock_auths(&[MockAuth {
+        address: current_beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "claim",
+            args: (linear_id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let current_paid = client
+        .try_claim(&linear_id)
+        .expect("outer ok")
+        .expect("claim ok");
+    assert_eq!(current_paid, 5_000);
+    assert_eq!(tc.balance(current_beneficiary), 5_000);
+    assert_eq!(client.claimable(&linear_id), 0);
+    assert_eq!(client.get_status(&linear_id), VestingStatus::Completed);
+
+    // 5. Tranche schedule claim authorization matrix: funder/outsider rejected, beneficiary accepted.
+    env.mock_all_auths();
+    let tranche_id = client.create_tranche_schedule(
+        former_beneficiary,
+        &token,
+        &vec![
+            &env,
+            Tranche {
+                unlock_at: 0,
+                amount: 3_000,
+            },
+            Tranche {
+                unlock_at: 500,
+                amount: 7_000,
+            },
+        ],
+    );
+
+    for unauthorized in [funder, current_beneficiary, outsider] {
+        env.mock_auths(&[MockAuth {
+            address: unauthorized,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "claim",
+                args: (tranche_id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let res = client.try_claim(&tranche_id);
+        assert_auth_abort!(res);
+        assert_eq!(client.get_tranche_schedule(&tranche_id).claimed, 0);
+        assert_eq!(client.claimable(&tranche_id), 3_000);
+    }
+
+    env.mock_auths(&[MockAuth {
+        address: former_beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "claim",
+            args: (tranche_id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let tranche_paid = client
+        .try_claim(&tranche_id)
+        .expect("outer ok")
+        .expect("tranche claim ok");
+    assert_eq!(tranche_paid, 3_000);
+    assert_eq!(client.get_tranche_schedule(&tranche_id).claimed, 3_000);
+    assert_eq!(client.claimable(&tranche_id), 0);
 }
