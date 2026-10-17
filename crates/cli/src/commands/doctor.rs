@@ -1,5 +1,6 @@
 use crate::cli::DoctorArgs;
 use anyhow::Result;
+use serde::Serialize;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -45,12 +46,43 @@ fn command_output(output: Output) -> CommandOutput {
 
 pub fn run(args: DoctorArgs) -> Result<()> {
     let results = collect_checks(&SystemCommandRunner, args.wasm.as_deref());
-    print_report(&results);
+    if args.json {
+        println!("{}", render_report_json(&results));
+    } else {
+        print_report(&results);
+    }
     if results.iter().all(|result| result.ok) {
         Ok(())
     } else {
         anyhow::bail!("environment preflight failed")
     }
+}
+
+#[derive(Serialize)]
+struct JsonCheckResult {
+    name: String,
+    ok: bool,
+    status: String,
+    detail: String,
+    fix_hint: Option<String>,
+}
+
+fn render_report_json(results: &[CheckResult]) -> String {
+    let payload: Vec<_> = results
+        .iter()
+        .map(|result| JsonCheckResult {
+            name: result.name.to_owned(),
+            ok: result.ok,
+            status: if result.ok {
+                "pass".to_owned()
+            } else {
+                "fail".to_owned()
+            },
+            detail: result.detail.clone(),
+            fix_hint: result.fix_hint.map(str::to_owned),
+        })
+        .collect();
+    serde_json::to_string(&payload).unwrap()
 }
 
 pub fn collect_checks(runner: &impl CommandRunner, wasm: Option<&Path>) -> Vec<CheckResult> {
@@ -247,6 +279,36 @@ mod tests {
         assert!(results[1].ok);
         assert!(!results[2].ok);
         assert_eq!(results[2].detail, "could not verify rustup target list");
+    }
+
+    #[test]
+    fn json_report_embeds_required_fields_for_missing_tool_and_target() {
+        let results = vec![
+            CheckResult {
+                name: "stellar",
+                ok: false,
+                detail: "not found on PATH".to_owned(),
+                fix_hint: Some("cargo install soroban-cli"),
+            },
+            CheckResult {
+                name: "wasm32v1-none",
+                ok: false,
+                detail: "not installed".to_owned(),
+                fix_hint: Some("rustup target add wasm32v1-none"),
+            },
+        ];
+
+        let json = render_report_json(&results);
+        let payload: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(payload.as_array().unwrap().len(), 2);
+        assert_eq!(payload[0]["name"], "stellar");
+        assert_eq!(payload[0]["ok"], false);
+        assert_eq!(payload[0]["status"], "fail");
+        assert_eq!(payload[0]["detail"], "not found on PATH");
+        assert_eq!(payload[0]["fix_hint"], "cargo install soroban-cli");
+        assert_eq!(payload[1]["name"], "wasm32v1-none");
+        assert_eq!(payload[1]["status"], "fail");
+        assert_eq!(payload[1]["fix_hint"], "rustup target add wasm32v1-none");
     }
 
     #[test]

@@ -112,6 +112,16 @@ mod tests {
     }
 
     #[test]
+    fn doctor_json_flag_parses() {
+        let cli = Cli::try_parse_from(["soroban-forge", "doctor", "--json"]).unwrap();
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(args.json);
+    }
+
+    #[test]
     fn verify_flags_parse() {
         let cli = Cli::try_parse_from([
             "soroban-forge",
@@ -144,6 +154,12 @@ mod tests {
     }
 
     #[test]
+    fn verify_json_flag_parses() {
+        let cli = Cli::try_parse_from(["soroban-forge", "verify", "--json"]).unwrap();
+        let Commands::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert!(args.json);
     fn decode_failure_accepts_receipt_xdr_and_optional_diagnostics() {
         let cli = Cli::try_parse_from([
             "soroban-forge",
@@ -188,6 +204,7 @@ mod tests {
         assert!(help.contains("--wasm"));
         assert!(help.contains("--expected"));
         assert!(help.contains("--manifest"));
+        assert!(help.contains("--json"));
     }
 
     #[test]
