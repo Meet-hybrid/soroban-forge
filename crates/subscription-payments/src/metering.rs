@@ -1080,6 +1080,173 @@ fn zero_balance_subscription_charge_moves_to_past_due_without_moving_funds() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Arrears Settlement Reconciliation Scenarios (#420)
+//
+// Invariant:
+// 1. Exact arrears settlement updates all related accounting fields consistently
+//    (last_charged, status -> Active, failed_attempts -> 0, balances).
+// 2. Partial / insufficient settlement preserves remaining due amount & arrears state
+//    without moving funds or partially mutating state.
+// 3. Repeated settlement in the same period cannot double-count or double-collect.
+// 4. Invalid settlement attempts return documented errors without partial state mutation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn arrears_settlement_reconciliation_exact_settlement_updates_accounting_consistently() {
+    let (env, token, _tc, client, accounts, _subscription_id) = setup!();
+    let broke = Address::generate(&env);
+    let broke_id = client.subscribe(&broke, &accounts.validator, &token, &AMOUNT, &PERIOD);
+    client.set_quotas(&broke_id, &calls_and_bytes(&env));
+    // 11_001 calls -> 1_001 overage units -> 2 started 1k-buckets -> 50 overage fee
+    client.record_usage(&broke_id, &Symbol::new(&env, CALLS), &11_001);
+    let due_amount = AMOUNT + 50;
+
+    let provider = client.get_subscription(&broke_id).provider;
+
+    // Period 1 elapses: subscriber has 0 tokens, charge fails and subscription enters PastDue
+    env.ledger().set_timestamp(START + PERIOD);
+    assert_eq!(client.charge(&broke_id), 0);
+    let past_due_sub = client.get_subscription(&broke_id);
+    assert_eq!(past_due_sub.status, SubscriptionStatus::PastDue);
+    assert_eq!(past_due_sub.failed_attempts, 1);
+    assert_eq!(past_due_sub.last_charged, START);
+
+    // Exact settlement reconciliation: fund subscriber with exactly the due amount
+    StellarAssetClient::new(&env, &token).mint(&broke, &due_amount);
+    assert_eq!(token_balance(&client, &broke), due_amount);
+    let provider_before = token_balance(&client, &provider);
+
+    // Retry settlement
+    let settled = client.charge(&broke_id);
+    assert_eq!(settled, due_amount);
+
+    // Invariant: accounting consistency
+    let active_sub = client.get_subscription(&broke_id);
+    assert_eq!(active_sub.status, SubscriptionStatus::Active);
+    assert_eq!(active_sub.failed_attempts, 0);
+    assert_eq!(active_sub.last_charged, START + PERIOD);
+    assert_eq!(token_balance(&client, &broke), 0);
+    assert_eq!(token_balance(&client, &provider), provider_before + due_amount);
+    // Period rollover: meter has been reset
+    assert_eq!(
+        client.get_usage(&broke_id, &Symbol::new(&env, CALLS)).units,
+        0
+    );
+}
+
+#[test]
+fn arrears_settlement_reconciliation_partial_insufficient_settlement_preserves_due_amount() {
+    let (env, token, _tc, client, accounts, _subscription_id) = setup!();
+    let broke = Address::generate(&env);
+    let broke_id = client.subscribe(&broke, &accounts.validator, &token, &AMOUNT, &PERIOD);
+    client.set_quotas(&broke_id, &calls_and_bytes(&env));
+    client.record_usage(&broke_id, &Symbol::new(&env, CALLS), &11_001);
+    let due_amount = AMOUNT + 50;
+
+    let provider = client.get_subscription(&broke_id).provider;
+
+    // Period 1 elapses: first attempt fails
+    env.ledger().set_timestamp(START + PERIOD);
+    assert_eq!(client.charge(&broke_id), 0);
+
+    // Subscriber is funded partially (less than full due_amount)
+    let partial_funds = due_amount - 1;
+    StellarAssetClient::new(&env, &token).mint(&broke, &partial_funds);
+    let provider_before = token_balance(&client, &provider);
+
+    // Second settlement attempt fails due to insufficient funds
+    assert_eq!(client.charge(&broke_id), 0);
+
+    // Invariant: no partial token transfer occurred, due amount & meters preserved
+    assert_eq!(token_balance(&client, &broke), partial_funds);
+    assert_eq!(token_balance(&client, &provider), provider_before);
+
+    let sub_after = client.get_subscription(&broke_id);
+    assert_eq!(sub_after.status, SubscriptionStatus::PastDue);
+    assert_eq!(sub_after.failed_attempts, 2);
+    assert_eq!(sub_after.last_charged, START);
+    // Usage meter still holds 11_001 units so the full due amount is preserved for future retry
+    assert_eq!(
+        client.get_usage(&broke_id, &Symbol::new(&env, CALLS)).units,
+        11_001
+    );
+    assert_eq!(client.quote_period(&broke_id), due_amount);
+}
+
+#[test]
+fn arrears_settlement_reconciliation_repeated_settlement_cannot_double_count() {
+    let (env, token, _tc, client, accounts, _subscription_id) = setup!();
+    let broke = Address::generate(&env);
+    let broke_id = client.subscribe(&broke, &accounts.validator, &token, &AMOUNT, &PERIOD);
+    client.set_quotas(&broke_id, &calls_and_bytes(&env));
+    client.record_usage(&broke_id, &Symbol::new(&env, CALLS), &11_001);
+    let due_amount = AMOUNT + 50;
+
+    let provider = client.get_subscription(&broke_id).provider;
+
+    env.ledger().set_timestamp(START + PERIOD);
+    assert_eq!(client.charge(&broke_id), 0);
+
+    // Fund ample tokens for multiple charges
+    StellarAssetClient::new(&env, &token).mint(&broke, &(due_amount * 5));
+    let subscriber_funded = token_balance(&client, &broke);
+    let provider_before = token_balance(&client, &provider);
+
+    // First settlement succeeds
+    let first_charge = client.charge(&broke_id);
+    assert_eq!(first_charge, due_amount);
+    assert_eq!(
+        token_balance(&client, &broke),
+        subscriber_funded - due_amount
+    );
+    assert_eq!(token_balance(&client, &provider), provider_before + due_amount);
+
+    // Immediate second settlement call in the same timestamp/period
+    let second_charge = client.charge(&broke_id);
+    // Invariant: returns 0, no tokens moved, no double-counting
+    assert_eq!(second_charge, 0);
+    assert_eq!(
+        token_balance(&client, &broke),
+        subscriber_funded - due_amount
+    );
+    assert_eq!(token_balance(&client, &provider), provider_before + due_amount);
+
+    let sub = client.get_subscription(&broke_id);
+    assert_eq!(sub.status, SubscriptionStatus::Active);
+    assert_eq!(sub.last_charged, START + PERIOD);
+}
+
+#[test]
+fn arrears_settlement_reconciliation_invalid_state_settlement_prevents_mutation() {
+    let (env, token, _tc, client, accounts, _subscription_id) = setup!();
+    let broke = Address::generate(&env);
+    let broke_id = client.subscribe(&broke, &accounts.validator, &token, &AMOUNT, &PERIOD);
+    client.set_quotas(&broke_id, &calls_and_bytes(&env));
+    client.record_usage(&broke_id, &Symbol::new(&env, CALLS), &11_001);
+
+    // Enter PastDue
+    env.ledger().set_timestamp(START + PERIOD);
+    assert_eq!(client.charge(&broke_id), 0);
+    assert_eq!(
+        client.get_subscription(&broke_id).status,
+        SubscriptionStatus::PastDue
+    );
+
+    // Cancel while in PastDue
+    client.cancel(&broke_id);
+    let cancelled_sub = client.get_subscription(&broke_id);
+    assert_eq!(cancelled_sub.status, SubscriptionStatus::Cancelled);
+
+    // Attempting settlement on cancelled subscription returns documented error
+    let charge_res = client.try_charge(&broke_id);
+    assert_eq!(charge_res.unwrap_err().unwrap(), ForgeError::InvalidInput);
+
+    // Invariant: no mutation to the subscription state
+    assert_eq!(client.get_subscription(&broke_id), cancelled_sub);
+}
+
+
 /// Every event this contract published under `name` in the latest invocation,
 /// as its remaining topics and its raw XDR data — the shape an indexer
 /// consumes, minus the name.

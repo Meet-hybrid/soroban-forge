@@ -639,4 +639,72 @@ proptest! {
             "the single-sale cross-check leaves the summary untouched"
         );
     }
+
+    #[test]
+    fn prop_batch_settlement_duplicate_and_zero_share_recipients_conserve_total(
+        amounts in prop_vec(1i128..=100_000, 1..=10),
+        share1_bps in 0u32..=3_000,
+        share2_bps in 0u32..=3_000,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(admin);
+        let token = sac.address();
+
+        let collection = Address::generate(&env);
+        let recipient1 = Address::generate(&env);
+        let payer = Address::generate(&env);
+
+        let total_amount: i128 = amounts.iter().sum();
+        StellarAssetClient::new(&env, &token).mint(&payer, &total_amount);
+
+        let contract_id = env.register(MarketplaceRoyalties, ());
+        let client = SorobanForgeMarketplaceRoyaltiesClient::new(&env, &contract_id);
+
+        // Configure splits containing duplicate recipient and zero-share entry
+        let mut splits = soroban_sdk::Vec::new(&env);
+        // Duplicate recipient: recipient1 with share1_bps and share2_bps
+        splits.push_back(crate::RoyaltyShare {
+            recipient: recipient1.clone(),
+            bps: share1_bps,
+        });
+        splits.push_back(crate::RoyaltyShare {
+            recipient: recipient1.clone(),
+            bps: share2_bps,
+        });
+        // Zero-share recipient
+        splits.push_back(crate::RoyaltyShare {
+            recipient: Address::generate(&env),
+            bps: 0,
+        });
+        client.set_royalty_splits(&collection, &splits);
+
+        let mut batch = soroban_sdk::Vec::new(&env);
+        let mut sellers = Vec::new();
+        for &amt in &amounts {
+            let s = Address::generate(&env);
+            sellers.push(s.clone());
+            batch.push_back((s, amt));
+        }
+
+        let settlements = client.settle_sales(&collection, &token, &payer, &batch);
+        let tc = TokenClient::new(&env, &token);
+
+        let mut sum_seller_net: i128 = 0;
+        let mut sum_royalty_shares: i128 = 0;
+        for (i, st) in settlements.iter().enumerate() {
+            sum_seller_net += st.seller_net;
+            sum_royalty_shares += st.royalty_share;
+            prop_assert_eq!(st.seller_net + st.royalty_share, amounts[i], "Conservation per sale in batch");
+        }
+
+        // Invariant: Total batch royalty + seller nets equals total sale amount
+        prop_assert_eq!(sum_seller_net + sum_royalty_shares, total_amount);
+        // Recipient1 received the combined shares from both duplicate entries
+        prop_assert_eq!(tc.balance(&recipient1), sum_royalty_shares);
+        prop_assert_eq!(tc.balance(&payer), 0);
+    }
 }
+

@@ -452,3 +452,119 @@ export class Client extends ContractClient {
         escrows_for_participant: this.txFromJSON<ParticipantEscrowsPage>
   }
 }
+
+// ---------------------------------------------------------------------------
+// Transaction Status Polling Helper
+// ---------------------------------------------------------------------------
+
+export type TransactionStatus = "PENDING" | "SUCCESS" | "FAILED" | "NOT_FOUND";
+
+export interface TransactionStatusResponse<T = unknown> {
+  status: TransactionStatus;
+  result?: T;
+  error?: string | Error;
+}
+
+export type TransactionStatusProvider<T = unknown> = (
+  txHash: string
+) => Promise<TransactionStatusResponse<T>>;
+
+export interface PollTransactionOptions {
+  /** Total maximum time in milliseconds to wait before timing out. Default: 30,000 ms. */
+  timeoutMs?: number;
+  /** Initial polling interval in milliseconds. Default: 1,000 ms. */
+  initialIntervalMs?: number;
+  /** Maximum polling interval in milliseconds when backing off. Default: 5,000 ms. */
+  maxIntervalMs?: number;
+  /** Backoff multiplier. Default: 1.5. */
+  backoffFactor?: number;
+  /** Custom delay function for sleep/backoff, defaulting to setTimeout-based promise. */
+  delayFn?: (ms: number) => Promise<void>;
+}
+
+export type PollTransactionResult<T = unknown> =
+  | { status: "SUCCESS"; result?: T }
+  | { status: "FAILED"; error?: string | Error };
+
+export class PollTimeoutError extends Error {
+  readonly txHash: string;
+  readonly elapsedMs: number;
+
+  constructor(txHash: string, elapsedMs: number) {
+    super(`Transaction status polling timed out for tx ${txHash} after ${elapsedMs}ms`);
+    this.name = "PollTimeoutError";
+    this.txHash = txHash;
+    this.elapsedMs = elapsedMs;
+  }
+}
+
+export class PollTerminalError extends Error {
+  readonly txHash: string;
+  readonly causeError?: unknown;
+
+  constructor(message: string, txHash: string, causeError?: unknown) {
+    super(message);
+    this.name = "PollTerminalError";
+    this.txHash = txHash;
+    this.causeError = causeError;
+  }
+}
+
+/**
+ * Polls for transaction confirmation using an injectable status provider and bounded backoff.
+ *
+ * Terminal conditions:
+ * - Status "SUCCESS": returns `{ status: "SUCCESS", result }`
+ * - Status "FAILED": returns terminal `{ status: "FAILED", error }` without retrying
+ * - Malformed request / known terminal provider errors (e.g. invalid tx hash format): throws immediately
+ * - Timeout elapsed: throws `PollTimeoutError`
+ */
+export async function pollTransactionStatus<T = unknown>(
+  txHash: string,
+  provider: TransactionStatusProvider<T>,
+  options: PollTransactionOptions = {}
+): Promise<PollTransactionResult<T>> {
+  if (!txHash || typeof txHash !== "string" || txHash.trim().length === 0) {
+    throw new PollTerminalError("Invalid transaction hash provided", txHash);
+  }
+
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const initialIntervalMs = options.initialIntervalMs ?? 1_000;
+  const maxIntervalMs = options.maxIntervalMs ?? 5_000;
+  const backoffFactor = options.backoffFactor ?? 1.5;
+  const delay = options.delayFn ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+
+  let interval = initialIntervalMs;
+  let elapsed = 0;
+
+  while (elapsed <= timeoutMs) {
+    let response: TransactionStatusResponse<T>;
+    try {
+      response = await provider(txHash);
+    } catch (err: any) {
+      if (err?.isTerminal || err?.status === 400 || err?.name === "MalformedRequestError") {
+        throw new PollTerminalError(err.message || "Terminal provider error", txHash, err);
+      }
+      throw err;
+    }
+
+    if (response.status === "SUCCESS") {
+      return { status: "SUCCESS", result: response.result };
+    }
+
+    if (response.status === "FAILED") {
+      return { status: "FAILED", error: response.error };
+    }
+
+    // "PENDING" or "NOT_FOUND" -> continue polling if time permits
+    if (elapsed + interval > timeoutMs) {
+      break;
+    }
+
+    await delay(interval);
+    elapsed += interval;
+    interval = Math.min(Math.round(interval * backoffFactor), maxIntervalMs);
+  }
+
+  throw new PollTimeoutError(txHash, elapsed);
+}

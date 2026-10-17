@@ -1136,3 +1136,123 @@ fn reassignment_rejects_unknown_tranche_and_completed_schedules() {
         .unwrap();
     assert_eq!(err, ForgeError::InvalidInput);
 }
+
+// ---------------------------------------------------------------------------
+// Revoke-and-claim conservation and beneficiary reassignment scenarios (#421)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn claim_followed_by_revoke_never_pays_more_than_original_allocation() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    // 1. Claim partial at 1/3 of the vesting ramp
+    env.ledger().set_timestamp(START + CLIFF + 1_000);
+    let claim1 = client.claim(&id);
+    assert_eq!(claim1, 3_333);
+    assert_eq!(tc.balance(&accounts.user1), 3_333);
+
+    // 2. Revoke at 2/3 of the vesting ramp (6_666 vested)
+    env.ledger().set_timestamp(START + CLIFF + 2_000);
+    client.revoke(&id);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+
+    // 3. Post-revocation claim at far future
+    env.ledger().set_timestamp(START + DURATION * 5);
+    assert_eq!(client.claimable(&id), 6_666 - 3_333);
+    let claim2 = client.claim(&id);
+    assert_eq!(claim2, 3_333);
+
+    // Total released is conserved at 6_666 <= TOTAL (10_000)
+    assert_eq!(claim1 + claim2, 6_666);
+    assert_eq!(tc.balance(&accounts.user1), 6_666);
+    assert_eq!(tc.balance(&contract_id), TOTAL - 6_666);
+    assert_eq!(tc.balance(&accounts.user1) + tc.balance(&contract_id), TOTAL);
+}
+
+#[test]
+fn revoke_followed_by_later_claim_cannot_release_revoked_value() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    // Revoke at 50%
+    env.ledger().set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
+    client.revoke(&id);
+    let frozen_vested = client.get_schedule(&id).revoked_vested.unwrap();
+    assert_eq!(frozen_vested, TOTAL / 2);
+
+    // Advance to far future past original duration
+    env.ledger().set_timestamp(START + DURATION * 10);
+    // Claimable must be capped at frozen_vested (5_000)
+    assert_eq!(client.claimable(&id), 5_000);
+    assert_eq!(client.claim(&id), 5_000);
+
+    // Further claims cannot release the unvested/revoked 5_000
+    assert_eq!(client.claimable(&id), 0);
+    assert_eq!(client.claim(&id), 0);
+    assert_eq!(tc.balance(&accounts.user1), 5_000);
+    assert_eq!(tc.balance(&contract_id), 5_000);
+}
+
+#[test]
+fn beneficiary_reassignment_preserves_already_claimed_and_remaining_amounts() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+    let new_beneficiary = Address::generate(&env);
+
+    // Beneficiary 1 claims 2_500
+    env.ledger().set_timestamp(START + CLIFF + (DURATION - CLIFF) / 4);
+    assert_eq!(client.claim(&id), 2_500);
+    assert_eq!(tc.balance(&accounts.user1), 2_500);
+
+    // Reassign at 50% window: vested total is 5_000, unvested is 5_000
+    // Beneficiary 1 is owed 2_500 (5_000 - 2_500 claimed)
+    env.ledger().set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
+    client.reassign_beneficiary(&id, &new_beneficiary);
+
+    // Beneficiary 1 claims historical balance
+    assert_eq!(client.claimable_for(&id, &accounts.user1), 2_500);
+    assert_eq!(client.claim_for(&id, &accounts.user1), 2_500);
+    assert_eq!(tc.balance(&accounts.user1), 5_000);
+
+    // End of schedule: new beneficiary claims their share (5_000)
+    env.ledger().set_timestamp(START + DURATION);
+    assert_eq!(client.claimable(&id), 5_000);
+    assert_eq!(client.claim(&id), 5_000);
+    assert_eq!(tc.balance(&new_beneficiary), 5_000);
+
+    // Total conservation check
+    assert_eq!(
+        tc.balance(&accounts.user1) + tc.balance(&new_beneficiary),
+        TOTAL
+    );
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), VestingStatus::Completed);
+}
+
+#[test]
+fn repeated_claims_and_repeated_revokes_are_stable_terminal_operations() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    // 1. Revoke at cliff
+    env.ledger().set_timestamp(START + CLIFF);
+    client.revoke(&id);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+
+    // Repeated revokes reject with InvalidInput and do not mutate state
+    for _ in 0..3 {
+        let err = client.try_revoke(&id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+
+    // Repeated claims return 0 and do not transfer tokens
+    for _ in 0..3 {
+        assert_eq!(client.claimable(&id), 0);
+        assert_eq!(client.claim(&id), 0);
+    }
+    assert_eq!(tc.balance(&accounts.user1), 0);
+    assert_eq!(tc.balance(&contract_id), TOTAL);
+}
+

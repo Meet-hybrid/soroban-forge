@@ -2425,4 +2425,152 @@ mod tests {
         assert_eq!(tc.balance(recipient), balances_before.2);
         assert!(env.events().all().events().is_empty());
     }
+
+    // -----------------------------------------------------------------------
+    // Batch settlement duplicate recipient and zero-share invariants (#422)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn batch_settlement_with_duplicate_recipients_conserves_royalty_and_net() {
+        let (env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let payer = &accounts.user1;
+        let recipient = &accounts.user2;
+
+        // Configure splits with duplicate recipient: 300 bps and 200 bps for recipient
+        let mut splits = soroban_sdk::Vec::new(&env);
+        splits.push_back(RoyaltyShare {
+            recipient: recipient.clone(),
+            bps: 300,
+        });
+        splits.push_back(RoyaltyShare {
+            recipient: recipient.clone(),
+            bps: 200,
+        });
+        client.set_royalty_splits(collection, &splits);
+
+        let seller1 = Address::generate(&env);
+        let seller2 = Address::generate(&env);
+
+        let mut sales = soroban_sdk::Vec::new(&env);
+        sales.push_back((seller1.clone(), 100_i128));
+        sales.push_back((seller2.clone(), 200_i128));
+
+        let settlements = client.settle_sales(collection, &token, payer, &sales);
+
+        // Sale 1: 100 gross -> share 1 = 3, share 2 = 2 (total 5 royalty), net = 95
+        assert_eq!(settlements.get(0).unwrap().royalty_share, 5);
+        assert_eq!(settlements.get(0).unwrap().seller_net, 95);
+
+        // Sale 2: 200 gross -> share 1 = 6, share 2 = 4 (total 10 royalty), net = 190
+        assert_eq!(settlements.get(1).unwrap().royalty_share, 10);
+        assert_eq!(settlements.get(1).unwrap().seller_net, 190);
+
+        // Balances:
+        // Payer paid 300
+        assert_eq!(tc.balance(payer), 1_000 - 300);
+        // Sellers received exact net
+        assert_eq!(tc.balance(&seller1), 95);
+        assert_eq!(tc.balance(&seller2), 190);
+        // Recipient received combined royalty shares: 5 + 10 = 15
+        assert_eq!(tc.balance(recipient), 15);
+        // Conservation check:
+        assert_eq!(95 + 190 + 15, 300);
+    }
+
+    #[test]
+    fn batch_settlement_with_zero_share_recipients_conserves_and_skips_zero_transfer() {
+        let (env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let payer = &accounts.user1;
+        let zero_recipient = Address::generate(&env);
+        let normal_recipient = &accounts.user2;
+
+        let mut splits = soroban_sdk::Vec::new(&env);
+        splits.push_back(RoyaltyShare {
+            recipient: zero_recipient.clone(),
+            bps: 0,
+        });
+        splits.push_back(RoyaltyShare {
+            recipient: normal_recipient.clone(),
+            bps: 500,
+        });
+        client.set_royalty_splits(collection, &splits);
+
+        let seller = Address::generate(&env);
+        let mut sales = soroban_sdk::Vec::new(&env);
+        sales.push_back((seller.clone(), 200_i128));
+
+        let settlements = client.settle_sales(collection, &token, payer, &sales);
+
+        assert_eq!(settlements.get(0).unwrap().royalty_share, 10);
+        assert_eq!(settlements.get(0).unwrap().seller_net, 190);
+
+        assert_eq!(tc.balance(&zero_recipient), 0);
+        assert_eq!(tc.balance(normal_recipient), 10);
+        assert_eq!(tc.balance(&seller), 190);
+        assert_eq!(tc.balance(payer), 1_000 - 200);
+    }
+
+    #[test]
+    fn batch_settlement_empty_batch_returns_documented_error_without_mutation() {
+        let (env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let payer = &accounts.user1;
+
+        let before_payer_balance = tc.balance(payer);
+        let empty_sales = soroban_sdk::Vec::new(&env);
+
+        let err = client
+            .try_settle_sales(collection, &token, payer, &empty_sales)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+
+        // Balances and state untouched
+        assert_eq!(tc.balance(payer), before_payer_balance);
+        assert_eq!(
+            client
+                .try_get_settlement_summary(collection)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+    }
+
+    #[test]
+    fn batch_settlement_malformed_batch_cannot_partially_mutate_state() {
+        let (env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let payer = &accounts.user1;
+        let seller1 = Address::generate(&env);
+        let seller2 = Address::generate(&env);
+
+        let before_payer_balance = tc.balance(payer);
+
+        // Malformed batch: second entry has zero amount
+        let mut malformed_sales = soroban_sdk::Vec::new(&env);
+        malformed_sales.push_back((seller1.clone(), 100_i128));
+        malformed_sales.push_back((seller2.clone(), 0_i128));
+
+        let err = client
+            .try_settle_sales(collection, &token, payer, &malformed_sales)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+
+        // Verification: atomic all-or-nothing, seller1 received nothing
+        assert_eq!(tc.balance(payer), before_payer_balance);
+        assert_eq!(tc.balance(&seller1), 0);
+        assert_eq!(tc.balance(&seller2), 0);
+        assert_eq!(tc.balance(&accounts.user2), 0);
+        assert_eq!(
+            client
+                .try_get_settlement_summary(collection)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+    }
+
 }

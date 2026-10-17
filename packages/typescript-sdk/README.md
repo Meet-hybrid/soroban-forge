@@ -92,6 +92,31 @@ const vestingClient = new vesting.Client({
 });
 ```
 
+### Transaction-status polling helper
+
+A bounded polling helper with configurable backoff and injectable status provider is available for consistent transaction status reconciliation:
+
+```ts
+import { pollTransactionStatus, PollTimeoutError, PollTerminalError } from "@soroban-forge/escrow-client";
+
+const result = await pollTransactionStatus("hash123", async (txHash) => {
+  // Query status via your RPC or indexer provider
+  return { status: "SUCCESS", result: { ledger: 12345 } };
+}, {
+  timeoutMs: 30_000,        // default: 30,000 ms
+  initialIntervalMs: 1_000, // default: 1,000 ms
+  maxIntervalMs: 5_000,     // default: 5,000 ms
+  backoffFactor: 1.5,       // default: 1.5
+});
+
+if (result.status === "SUCCESS") {
+  console.log("Confirmed with result:", result.result);
+} else {
+  console.error("Terminal failure:", result.error);
+}
+```
+
+
 Each namespace exposes its own `Client` and contract-specific types. The
 escrow client includes its existing `networks.testnet` preset; provide a
 contract ID, network passphrase, and `rpcUrl` for the other clients.
