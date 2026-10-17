@@ -289,11 +289,30 @@ Build a client package (or the Next.js demo that depends on the escrow client):
 ```bash
 cd packages/typescript-sdk && npm install && npm run build
 cd packages/nextjs-example && npm install && npm run build
+cd packages/nextjs-example && npm test
 ```
 
 The mapping of contract → package directory lives in
 `scripts/generate-clients.sh`; keep it in sync with `scripts/provenance.sh`
 (the crate list is duplicated deliberately so the build stays explicit).
+
+### Next.js Local Demo-State Reset and Export
+
+`packages/nextjs-example` includes a **Local Demo State (Devtools Only)** panel
+(`packages/nextjs-example/src/lib/demo-state.ts`) that persists local form
+drafts, selected escrow IDs, and local log entries under
+`soroban-forge:demo-state:v1` (`schemaVersion: "soroban-forge/demo-state@1"`,
+`scope: "LOCAL_DEMO_STATE_ONLY"`).
+
+- **Export & Restore**: Export a versioned JSON snapshot for reproducible issue
+  reports or restore a previously exported snapshot after schema/shape
+  validation.
+- **Secret Rejection**: Snapshots containing Stellar secret seeds (`S...`) or
+  signed transaction fields (`signedTxXdr`, `secretKey`, etc.) are rejected with
+  `SENSITIVE_DATA_REJECTED`.
+- **Confirmed Reset**: Resetting local demo state requires explicit two-step
+  confirmation and clears only `soroban-forge:demo-state:v1`, leaving live
+  network configuration and connected wallet sessions untouched.
 
 ## Contract Testing Notes
 
