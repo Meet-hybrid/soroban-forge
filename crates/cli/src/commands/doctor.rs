@@ -73,7 +73,11 @@ fn render_report_json(results: &[CheckResult]) -> String {
         .map(|result| JsonCheckResult {
             name: result.name.to_owned(),
             ok: result.ok,
-            status: if result.ok { "pass".to_owned() } else { "fail".to_owned() },
+            status: if result.ok {
+                "pass".to_owned()
+            } else {
+                "fail".to_owned()
+            },
             detail: result.detail.clone(),
             fix_hint: result.fix_hint.map(str::to_owned),
         })

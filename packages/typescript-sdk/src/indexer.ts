@@ -64,7 +64,7 @@ function scValToJson(value: unknown): unknown {
     return value;
   }
 
-  const scValType = xdr.ScValType as Record<string, unknown> | undefined;
+  const scValType = xdr.ScValType;
   const maybe = value as { switch?: () => unknown; value?: () => unknown };
   if (typeof maybe.switch === "function") {
     const kind = maybe.switch();
@@ -77,7 +77,7 @@ function scValToJson(value: unknown): unknown {
       return Boolean((maybe as { value?: () => boolean }).value?.());
     }
 
-    const ints = [
+    const ints: unknown[] = [
       typeof scValType?.scvI32 === "function" ? scValType.scvI32() : undefined,
       typeof scValType?.scvU32 === "function" ? scValType.scvU32() : undefined,
       typeof scValType?.scvI64 === "function" ? scValType.scvI64() : undefined,
