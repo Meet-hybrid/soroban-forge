@@ -1226,3 +1226,383 @@ fn conservation_holds_on_every_terminal_path() {
         }
     }
 }
+
+// -----------------------------------------------------------------------
+// Token authorization, allowance, and transfer failure boundaries (#447)
+// -----------------------------------------------------------------------
+
+#[soroban_sdk::contract]
+pub struct BoundaryToken;
+
+#[soroban_sdk::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BoundaryTokenKey {
+    Balance(Address),
+    Allowance(Address, Address),
+    EnforceAllowance,
+    FailTransfers,
+    FailRecipient(Address),
+}
+
+#[soroban_sdk::contractimpl]
+impl BoundaryToken {
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let bal = Self::balance(env.clone(), to.clone());
+        env.storage()
+            .persistent()
+            .set(&BoundaryTokenKey::Balance(to), &(bal + amount));
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&BoundaryTokenKey::Balance(id))
+            .unwrap_or(0)
+    }
+
+    pub fn approve_spender(env: Env, from: Address, spender: Address, amount: i128) {
+        env.storage()
+            .persistent()
+            .set(&BoundaryTokenKey::Allowance(from, spender), &amount);
+    }
+
+    pub fn allowance_for(env: Env, from: Address, spender: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&BoundaryTokenKey::Allowance(from, spender))
+            .unwrap_or(0)
+    }
+
+    pub fn set_enforce_allowance(env: Env, enforce: bool) {
+        env.storage()
+            .instance()
+            .set(&BoundaryTokenKey::EnforceAllowance, &enforce);
+    }
+
+    pub fn set_fail_transfers(env: Env, fail: bool) {
+        env.storage()
+            .instance()
+            .set(&BoundaryTokenKey::FailTransfers, &fail);
+    }
+
+    pub fn set_fail_recipient(env: Env, recipient: Address, fail: bool) {
+        env.storage()
+            .persistent()
+            .set(&BoundaryTokenKey::FailRecipient(recipient), &fail);
+    }
+
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        assert!(amount >= 0, "negative transfer amount");
+
+        let fail_all: bool = env
+            .storage()
+            .instance()
+            .get(&BoundaryTokenKey::FailTransfers)
+            .unwrap_or(false);
+        assert!(!fail_all, "injected token transfer failure");
+
+        let fail_to: bool = env
+            .storage()
+            .persistent()
+            .get(&BoundaryTokenKey::FailRecipient(to.clone()))
+            .unwrap_or(false);
+        assert!(!fail_to, "injected recipient transfer failure");
+
+        let enforce_allowance: bool = env
+            .storage()
+            .instance()
+            .get(&BoundaryTokenKey::EnforceAllowance)
+            .unwrap_or(false);
+        if enforce_allowance {
+            let current_allowance = Self::allowance_for(env.clone(), from.clone(), to.clone());
+            assert!(current_allowance >= amount, "insufficient token allowance");
+            env.storage().persistent().set(
+                &BoundaryTokenKey::Allowance(from.clone(), to.clone()),
+                &(current_allowance - amount),
+            );
+        }
+
+        let from_bal = Self::balance(env.clone(), from.clone());
+        assert!(from_bal >= amount, "insufficient token balance");
+        let to_bal = Self::balance(env.clone(), to.clone());
+
+        env.storage()
+            .persistent()
+            .set(&BoundaryTokenKey::Balance(from), &(from_bal - amount));
+        env.storage()
+            .persistent()
+            .set(&BoundaryTokenKey::Balance(to), &(to_bal + amount));
+    }
+}
+
+fn assert_escrow_record_eq(actual: &EscrowData, expected: &EscrowData) {
+    assert_eq!(actual.escrow_id, expected.escrow_id);
+    assert_eq!(actual.buyer, expected.buyer);
+    assert_eq!(actual.seller, expected.seller);
+    assert_eq!(actual.arbiter, expected.arbiter);
+    assert_eq!(actual.token, expected.token);
+    assert_eq!(actual.amount, expected.amount);
+    assert_eq!(actual.released, expected.released);
+    assert_eq!(actual.remaining(), expected.remaining());
+    assert_eq!(actual.timeout, expected.timeout);
+    assert_eq!(actual.status, expected.status);
+    assert_eq!(actual.created_at, expected.created_at);
+}
+
+#[test]
+fn deposit_insufficient_partial_balance_preserves_escrow_record_and_balances() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user3;
+    let (_, seller, arbiter) = parties(&accounts);
+    let partial_balance = AMOUNT - 1;
+    StellarAssetClient::new(&env, &token).mint(buyer, &partial_balance);
+
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    let before = client.get_escrow(&id);
+
+    let err = client.try_deposit(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::TokenTransferFailed);
+
+    let after = client.get_escrow(&id);
+    assert_escrow_record_eq(&after, &before);
+    assert_eq!(after.status, EscrowStatus::Pending);
+    assert_eq!(tc.balance(buyer), partial_balance);
+    assert_eq!(tc.balance(seller), 0);
+    assert_eq!(tc.balance(&contract_id), 0);
+    for party in [buyer, seller, arbiter] {
+        assert_full_index(&client, party, &[id]);
+    }
+}
+
+#[test]
+fn deposit_missing_or_insufficient_allowance_is_rejected_without_partial_state_changes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(START);
+
+    let token_id = env.register(BoundaryToken, ());
+    let boundary_token = BoundaryTokenClient::new(&env, &token_id);
+    boundary_token.set_enforce_allowance(&true);
+
+    let contract_id = env.register(Escrow, ());
+    let client = SorobanForgeEscrowClient::new(&env, &contract_id);
+    let accounts = soroban_forge_test_utils::TestAccounts::generate(&env);
+    let (buyer, seller, arbiter) = parties(&accounts);
+
+    boundary_token.mint(buyer, &AMOUNT);
+    let id = create(&client, &token_id, buyer, seller, arbiter, TIMEOUT);
+    let before = client.get_escrow(&id);
+
+    // 1. Missing allowance (0) is rejected and leaves escrow + balances untouched.
+    let missing_err = client.try_deposit(&id).unwrap_err().unwrap();
+    assert_eq!(missing_err, ForgeError::TokenTransferFailed);
+    assert_escrow_record_eq(&client.get_escrow(&id), &before);
+    assert_eq!(boundary_token.balance(buyer), AMOUNT);
+    assert_eq!(boundary_token.balance(&contract_id), 0);
+    assert_eq!(boundary_token.allowance_for(buyer, &contract_id), 0);
+
+    // 2. Insufficient allowance (AMOUNT - 1) is rejected and does not consume allowance.
+    boundary_token.approve_spender(buyer, &contract_id, &(AMOUNT - 1));
+    let insufficient_err = client.try_deposit(&id).unwrap_err().unwrap();
+    assert_eq!(insufficient_err, ForgeError::TokenTransferFailed);
+    assert_escrow_record_eq(&client.get_escrow(&id), &before);
+    assert_eq!(boundary_token.balance(buyer), AMOUNT);
+    assert_eq!(boundary_token.balance(&contract_id), 0);
+    assert_eq!(
+        boundary_token.allowance_for(buyer, &contract_id),
+        AMOUNT - 1
+    );
+
+    // 3. Exact allowance (AMOUNT) succeeds and transitions the escrow to Funded.
+    boundary_token.approve_spender(buyer, &contract_id, &AMOUNT);
+    client.deposit(&id);
+    let funded = client.get_escrow(&id);
+    assert_eq!(funded.status, EscrowStatus::Funded);
+    assert_eq!(funded.amount, AMOUNT);
+    assert_eq!(funded.released, 0);
+    assert_eq!(funded.remaining(), AMOUNT);
+    assert_eq!(boundary_token.balance(buyer), 0);
+    assert_eq!(boundary_token.balance(&contract_id), AMOUNT);
+    assert_eq!(boundary_token.allowance_for(buyer, &contract_id), 0);
+}
+
+#[test]
+fn failed_settlement_transfers_preserve_escrow_fields_and_custody_balances() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(START);
+
+    let token_id = env.register(BoundaryToken, ());
+    let boundary_token = BoundaryTokenClient::new(&env, &token_id);
+
+    let contract_id = env.register(Escrow, ());
+    let client = SorobanForgeEscrowClient::new(&env, &contract_id);
+    let accounts = soroban_forge_test_utils::TestAccounts::generate(&env);
+    let (buyer, seller, arbiter) = parties(&accounts);
+
+    boundary_token.mint(buyer, &AMOUNT);
+    let id = create(&client, &token_id, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    // Perform an initial partial release so `released` is non-zero before injecting failures.
+    let partial_paid = 300;
+    client.release_partial(&id, &partial_paid);
+    let funded_snapshot = client.get_escrow(&id);
+    assert_eq!(funded_snapshot.status, EscrowStatus::Funded);
+    assert_eq!(funded_snapshot.released, partial_paid);
+    assert_eq!(funded_snapshot.remaining(), AMOUNT - partial_paid);
+
+    // Inject token transfer failures for subsequent token-moving actions.
+    boundary_token.set_fail_transfers(&true);
+
+    // Failed partial release preserves Funded state and accounting.
+    assert_eq!(
+        client.try_release_partial(&id, &200).unwrap_err().unwrap(),
+        ForgeError::TokenTransferFailed
+    );
+    assert_escrow_record_eq(&client.get_escrow(&id), &funded_snapshot);
+
+    // Failed full release preserves Funded state and accounting.
+    assert_eq!(
+        client.try_release(&id).unwrap_err().unwrap(),
+        ForgeError::TokenTransferFailed
+    );
+    assert_escrow_record_eq(&client.get_escrow(&id), &funded_snapshot);
+
+    // Failed pre-deadline seller refund preserves Funded state and accounting.
+    assert_eq!(
+        client.try_refund(&id).unwrap_err().unwrap(),
+        ForgeError::TokenTransferFailed
+    );
+    assert_escrow_record_eq(&client.get_escrow(&id), &funded_snapshot);
+
+    // Failed post-deadline buyer refund and permissionless refund_expired preserve state.
+    env.ledger().set_timestamp(START + TIMEOUT + 1);
+    assert_eq!(
+        client.try_refund(&id).unwrap_err().unwrap(),
+        ForgeError::TokenTransferFailed
+    );
+    assert_escrow_record_eq(&client.get_escrow(&id), &funded_snapshot);
+    assert_eq!(
+        client.try_refund_expired(&id).unwrap_err().unwrap(),
+        ForgeError::TokenTransferFailed
+    );
+    assert_escrow_record_eq(&client.get_escrow(&id), &funded_snapshot);
+
+    // Transition to Disputed (non-token-moving) and verify failed resolve preserves Disputed state.
+    client.dispute(&id, buyer);
+    let disputed_snapshot = client.get_escrow(&id);
+    assert_eq!(disputed_snapshot.status, EscrowStatus::Disputed);
+    assert_eq!(disputed_snapshot.released, partial_paid);
+
+    assert_eq!(
+        client.try_resolve(&id, &true).unwrap_err().unwrap(),
+        ForgeError::TokenTransferFailed
+    );
+    assert_escrow_record_eq(&client.get_escrow(&id), &disputed_snapshot);
+
+    assert_eq!(
+        client.try_resolve(&id, &false).unwrap_err().unwrap(),
+        ForgeError::TokenTransferFailed
+    );
+    assert_escrow_record_eq(&client.get_escrow(&id), &disputed_snapshot);
+    assert_eq!(boundary_token.balance(&contract_id), AMOUNT - partial_paid);
+    assert_eq!(boundary_token.balance(seller), partial_paid);
+    assert_eq!(boundary_token.balance(buyer), 0);
+
+    // Clearing the token failure allows settlement to complete normally.
+    boundary_token.set_fail_transfers(&false);
+    client.resolve(&id, &true);
+    let completed = client.get_escrow(&id);
+    assert_eq!(completed.status, EscrowStatus::Completed);
+    assert_eq!(completed.released, AMOUNT);
+    assert_eq!(completed.remaining(), 0);
+    assert_eq!(boundary_token.balance(&contract_id), 0);
+    assert_eq!(boundary_token.balance(seller), AMOUNT);
+    assert_eq!(boundary_token.balance(buyer), 0);
+}
+
+#[test]
+fn resolve_split_second_transfer_failure_rolls_back_first_payout_and_preserves_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(START);
+
+    let token_id = env.register(BoundaryToken, ());
+    let boundary_token = BoundaryTokenClient::new(&env, &token_id);
+
+    let contract_id = env.register(Escrow, ());
+    let client = SorobanForgeEscrowClient::new(&env, &contract_id);
+    let accounts = soroban_forge_test_utils::TestAccounts::generate(&env);
+    let (buyer, seller, arbiter) = parties(&accounts);
+
+    boundary_token.mint(buyer, &AMOUNT);
+    let id = create(&client, &token_id, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.release_partial(&id, &200);
+    client.dispute(&id, buyer);
+
+    let disputed_snapshot = client.get_escrow(&id);
+    // Allow the seller payout leg to succeed, but fail the buyer refund leg in `resolve_split`.
+    boundary_token.set_fail_recipient(buyer, &true);
+
+    let err = client.try_resolve_split(&id, &5000).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::TokenTransferFailed);
+
+    // Host rollback must undo the seller payout leg and preserve the Disputed record.
+    assert_escrow_record_eq(&client.get_escrow(&id), &disputed_snapshot);
+    assert_eq!(boundary_token.balance(&contract_id), 800);
+    assert_eq!(boundary_token.balance(seller), 200);
+    assert_eq!(boundary_token.balance(buyer), 0);
+}
+
+#[test]
+fn deposit_token_authorization_mismatch_preserves_full_escrow_record() {
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+    use soroban_sdk::IntoVal;
+
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    let before = client.get_escrow(&id);
+
+    // 1. Entrypoint authorized by buyer, but missing token `transfer` sub-invocation.
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let missing_auth_err = client.try_deposit(&id).unwrap_err().unwrap();
+    assert_eq!(missing_auth_err, ForgeError::TokenTransferFailed);
+
+    // Re-enable mock_all_auths briefly to read state, or call read-only views directly.
+    assert_escrow_record_eq(&client.get_escrow(&id), &before);
+    assert_eq!(tc.balance(buyer), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+
+    // 2. Entrypoint authorized, but nested token `transfer` sub-invocation authorizes AMOUNT - 1.
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit",
+            args: (id,).into_val(&env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &token,
+                fn_name: "transfer",
+                args: (buyer.clone(), contract_id.clone(), AMOUNT - 1).into_val(&env),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+    let under_approved_err = client.try_deposit(&id).unwrap_err().unwrap();
+    assert_eq!(under_approved_err, ForgeError::TokenTransferFailed);
+    assert_escrow_record_eq(&client.get_escrow(&id), &before);
+    assert_eq!(tc.balance(buyer), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+}
