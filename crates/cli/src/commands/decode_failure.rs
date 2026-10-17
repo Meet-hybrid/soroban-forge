@@ -1,9 +1,25 @@
-use crate::cli::DecodeFailureArgs;
 use anyhow::{bail, Context, Result};
 use stellar_xdr::curr::{
     ContractEventBody, DiagnosticEvents, InvokeHostFunctionResult, Limits, OperationResult,
     OperationResultTr, ReadXdr, ScError, ScVal, TransactionResult, TransactionResultResult,
 };
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct DecodeFailureArgs {
+    /// Raw error text printed by Stellar CLI or an RPC transport.
+    #[arg(
+        long,
+        conflicts_with = "result_xdr",
+        required_unless_present = "result_xdr"
+    )]
+    pub error: Option<String>,
+    /// Base64-encoded Stellar TransactionResult XDR.
+    #[arg(long, conflicts_with = "error", required_unless_present = "error")]
+    pub result_xdr: Option<String>,
+    /// Optional base64-encoded Soroban DiagnosticEvents XDR for host details.
+    #[arg(long, requires = "result_xdr")]
+    pub diagnostic_events_xdr: Option<String>,
+}
 
 pub fn run(args: DecodeFailureArgs) -> Result<()> {
     let explanation = if let Some(error) = args.error {

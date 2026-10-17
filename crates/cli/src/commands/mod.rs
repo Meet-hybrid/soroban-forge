@@ -1,5 +1,4 @@
 pub mod build;
-pub mod decode_failure;
 pub mod deploy;
 pub mod doctor;
 pub mod events;

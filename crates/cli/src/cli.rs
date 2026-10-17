@@ -92,23 +92,6 @@ pub struct InvokeArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-pub struct DecodeFailureArgs {
-    /// Raw error text printed by Stellar CLI or an RPC transport.
-    #[arg(
-        long,
-        conflicts_with = "result_xdr",
-        required_unless_present = "result_xdr"
-    )]
-    pub error: Option<String>,
-    /// Base64-encoded Stellar TransactionResult XDR.
-    #[arg(long, conflicts_with = "error", required_unless_present = "error")]
-    pub result_xdr: Option<String>,
-    /// Optional base64-encoded Soroban DiagnosticEvents XDR for host details.
-    #[arg(long, requires = "result_xdr")]
-    pub diagnostic_events_xdr: Option<String>,
-}
-
-#[derive(Args, Debug, Clone)]
 pub struct EventsArgs {
     /// Contract address or alias
     #[arg(long)]

@@ -14,12 +14,15 @@
 
 mod cli;
 mod commands;
+#[path = "commands/decode_failure.rs"]
+mod decode_failure;
 
 use clap::{Parser, Subcommand};
 use cli::{
-    BuildArgs, DecodeFailureArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs,
-    LintArgs, NewArgs, ScaffoldValidateArgs, TestArgs, VerifyArgs,
+    BuildArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs,
+    ScaffoldValidateArgs, TestArgs, VerifyArgs,
 };
+use decode_failure::DecodeFailureArgs;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -62,7 +65,7 @@ fn main() -> anyhow::Result<()> {
         Commands::ScaffoldValidate(args) => commands::scaffold_validate::run(args)?,
         Commands::Verify(args) => commands::verify::run(args)?,
         Commands::Invoke(args) => commands::invoke::run(args)?,
-        Commands::DecodeFailure(args) => commands::decode_failure::run(args)?,
+        Commands::DecodeFailure(args) => decode_failure::run(args)?,
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,
         Commands::Doctor(args) => commands::doctor::run(args)?,
