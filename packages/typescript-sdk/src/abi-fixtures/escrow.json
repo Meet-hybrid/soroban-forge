@@ -1,0 +1,940 @@
+{
+  "schema": "soroban-forge/contract-abi@1",
+  "contract": "soroban-forge-escrow",
+  "functions": [
+    {
+      "name": "cancel",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "cancel_basket",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "create_basket",
+      "inputs": [
+        {
+          "name": "buyer",
+          "type": "address"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "arbiter",
+          "type": "address"
+        },
+        {
+          "name": "assets",
+          "type": "vec<udt:EscrowAsset>"
+        },
+        {
+          "name": "timeout",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "create_escrow",
+      "inputs": [
+        {
+          "name": "buyer",
+          "type": "address"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "arbiter",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "timeout",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "deposit",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "deposit_basket",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "dispute",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "claimant",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "dispute_basket",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "claimant",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "escrows_for_participant",
+      "inputs": [
+        {
+          "name": "participant",
+          "type": "address"
+        },
+        {
+          "name": "cursor",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "udt:ParticipantEscrowsPage"
+      ]
+    },
+    {
+      "name": "get_basket",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:BasketEscrowData,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_escrow",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:EscrowData,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_status",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:EscrowStatus,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "refund",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "refund_basket",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "refund_expired",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "release",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "release_basket",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "release_partial",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "release_partial_basket",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "resolve",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "in_favor_of_seller",
+          "type": "bool"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "resolve_basket",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "in_favor_of_seller",
+          "type": "bool"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "resolve_split",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "seller_bps",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "touch_ttl",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "ttl_info",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u32,udt:ForgeError>"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "BasketCancelled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:BasketEscrowData"
+        }
+      ]
+    },
+    {
+      "name": "BasketCreated",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:BasketEscrowData"
+        }
+      ]
+    },
+    {
+      "name": "BasketDeposited",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:BasketEscrowData"
+        }
+      ]
+    },
+    {
+      "name": "BasketDisputed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:BasketEscrowData"
+        }
+      ]
+    },
+    {
+      "name": "BasketPartiallyReleased",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "partial_amount",
+          "type": "i128"
+        },
+        {
+          "name": "data",
+          "type": "udt:BasketEscrowData"
+        }
+      ]
+    },
+    {
+      "name": "BasketRefunded",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:BasketEscrowData"
+        }
+      ]
+    },
+    {
+      "name": "BasketReleased",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:BasketEscrowData"
+        }
+      ]
+    },
+    {
+      "name": "BasketResolved",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:BasketEscrowData"
+        },
+        {
+          "name": "in_favor_of_seller",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "Cancelled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "Deposited",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "Disputed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "EscrowCreated",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "PartiallyReleased",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "partial_amount",
+          "type": "i128"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "RefundExpired",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "refunded_amount",
+          "type": "i128"
+        },
+        {
+          "name": "timestamp",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "Refunded",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "Released",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "Resolved",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        },
+        {
+          "name": "in_favor_of_seller",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "ResolvedSplit",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "data",
+          "type": "udt:EscrowData"
+        },
+        {
+          "name": "seller_bps",
+          "type": "u32"
+        },
+        {
+          "name": "seller_share",
+          "type": "i128"
+        },
+        {
+          "name": "buyer_share",
+          "type": "i128"
+        }
+      ]
+    }
+  ],
+  "types": [
+    {
+      "kind": "struct",
+      "name": "BasketEscrowData",
+      "fields": [
+        {
+          "name": "arbiter",
+          "type": "address"
+        },
+        {
+          "name": "assets",
+          "type": "vec<udt:EscrowAsset>"
+        },
+        {
+          "name": "buyer",
+          "type": "address"
+        },
+        {
+          "name": "created_at",
+          "type": "u64"
+        },
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "status",
+          "type": "udt:EscrowStatus"
+        },
+        {
+          "name": "timeout",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "EscrowAsset",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "released",
+          "type": "i128"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "EscrowData",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "arbiter",
+          "type": "address"
+        },
+        {
+          "name": "buyer",
+          "type": "address"
+        },
+        {
+          "name": "created_at",
+          "type": "u64"
+        },
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "released",
+          "type": "i128"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "status",
+          "type": "udt:EscrowStatus"
+        },
+        {
+          "name": "timeout",
+          "type": "u64"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "EscrowStatus",
+      "variants": [
+        {
+          "name": "Pending",
+          "types": []
+        },
+        {
+          "name": "Funded",
+          "types": []
+        },
+        {
+          "name": "Completed",
+          "types": []
+        },
+        {
+          "name": "Refunded",
+          "types": []
+        },
+        {
+          "name": "Disputed",
+          "types": []
+        },
+        {
+          "name": "Cancelled",
+          "types": []
+        }
+      ]
+    },
+    {
+      "kind": "error-enum",
+      "name": "ForgeError",
+      "variants": [
+        {
+          "name": "Unauthorized",
+          "value": 1
+        },
+        {
+          "name": "NotFound",
+          "value": 2
+        },
+        {
+          "name": "InvalidInput",
+          "value": 3
+        },
+        {
+          "name": "InsufficientFunds",
+          "value": 4
+        },
+        {
+          "name": "AlreadyInitialized",
+          "value": 5
+        },
+        {
+          "name": "NotInitialized",
+          "value": 6
+        },
+        {
+          "name": "DeadlineReached",
+          "value": 7
+        },
+        {
+          "name": "InsufficientAllowance",
+          "value": 8
+        },
+        {
+          "name": "ArithmeticOverflow",
+          "value": 9
+        },
+        {
+          "name": "Custom",
+          "value": 10
+        },
+        {
+          "name": "TokenTransferFailed",
+          "value": 11
+        },
+        {
+          "name": "ContractInvocationFailed",
+          "value": 12
+        },
+        {
+          "name": "WithdrawalLimitExceeded",
+          "value": 13
+        },
+        {
+          "name": "SubscriptionPastDue",
+          "value": 14
+        },
+        {
+          "name": "ProposerCooldown",
+          "value": 15
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ParticipantEscrowsPage",
+      "fields": [
+        {
+          "name": "ids",
+          "type": "vec<u64>"
+        },
+        {
+          "name": "next_cursor",
+          "type": "option<u32>"
+        },
+        {
+          "name": "total",
+          "type": "u32"
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "name": "Unauthorized",
+      "code": 1
+    },
+    {
+      "name": "NotFound",
+      "code": 2
+    },
+    {
+      "name": "InvalidInput",
+      "code": 3
+    },
+    {
+      "name": "InsufficientFunds",
+      "code": 4
+    },
+    {
+      "name": "AlreadyInitialized",
+      "code": 5
+    },
+    {
+      "name": "NotInitialized",
+      "code": 6
+    },
+    {
+      "name": "DeadlineReached",
+      "code": 7
+    },
+    {
+      "name": "InsufficientAllowance",
+      "code": 8
+    },
+    {
+      "name": "ArithmeticOverflow",
+      "code": 9
+    },
+    {
+      "name": "Custom",
+      "code": 10
+    },
+    {
+      "name": "TokenTransferFailed",
+      "code": 11
+    },
+    {
+      "name": "ContractInvocationFailed",
+      "code": 12
+    },
+    {
+      "name": "WithdrawalLimitExceeded",
+      "code": 13
+    },
+    {
+      "name": "SubscriptionPastDue",
+      "code": 14
+    },
+    {
+      "name": "ProposerCooldown",
+      "code": 15
+    }
+  ]
+}
