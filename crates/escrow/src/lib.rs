@@ -600,6 +600,92 @@ pub trait SorobanForgeEscrow {
     ///
     /// The view is read-only and does not extend either persistent entry.
     fn ttl_info(env: Env, escrow_id: u64) -> Result<u32, ForgeError>;
+
+    /// Return a read-only eligibility summary for `caller` across `deposit`,
+    /// `release`, `refund`, `dispute`, `resolve`, and `cancel` on `escrow_id`.
+    ///
+    /// Evaluates caller role (`buyer`, `seller`, `arbiter`, or outsider),
+    /// escrow lifecycle status, timeout deadline, and dispute freeze state
+    /// without mutating escrow, token, or TTL state. Supports both
+    /// single-token and basket escrows.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no escrow of either kind with this id.
+    /// * [`ForgeError::ArithmeticOverflow`] — computing the deadline overflowed.
+    fn get_action_eligibility(
+        env: Env,
+        escrow_id: u64,
+        caller: Address,
+    ) -> Result<EscrowActionSummary, ForgeError>;
+}
+
+/// Stable reason category explaining why an escrow action is eligible or ineligible.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EscrowActionReason {
+    /// The caller is authorized and the escrow state permits this action now.
+    Eligible,
+    /// The escrow is not in the lifecycle state required by this action.
+    WrongStatus,
+    /// The escrow is currently `Disputed` and frozen awaiting arbitration.
+    DisputedFrozen,
+    /// The action requires the buyer and `caller` is not the buyer.
+    CallerNotBuyer,
+    /// The action requires the seller and `caller` is not the seller.
+    CallerNotSeller,
+    /// The action requires the arbiter and `caller` is not the arbiter.
+    CallerNotArbiter,
+    /// Raising a dispute requires either the buyer or the seller.
+    CallerNotParty,
+    /// The buyer cannot self-refund before the timeout deadline has been reached.
+    DeadlineNotReached,
+    /// Pre-deadline seller refund is no longer active once the deadline has passed.
+    DeadlinePassed,
+}
+
+/// Eligibility status and stable reason category for a single escrow action.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ActionEligibility {
+    /// Whether `caller` may execute the action at the current ledger timestamp.
+    pub eligible: bool,
+    /// Reason category suitable for UI display.
+    pub reason: EscrowActionReason,
+}
+
+/// Read-only summary of all lifecycle actions for a given escrow and caller.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowActionSummary {
+    /// Inspected escrow identifier.
+    pub escrow_id: u64,
+    /// Current lifecycle state of the escrow.
+    pub status: EscrowStatus,
+    /// Whether the escrow is currently frozen in `Disputed` status.
+    pub is_disputed: bool,
+    /// Whether `caller` is the recorded buyer.
+    pub is_buyer: bool,
+    /// Whether `caller` is the recorded seller.
+    pub is_seller: bool,
+    /// Whether `caller` is the recorded arbiter.
+    pub is_arbiter: bool,
+    /// Refund timeout deadline (`created_at + timeout`).
+    pub deadline: u64,
+    /// Whether the current ledger timestamp is at or past `deadline`.
+    pub is_expired: bool,
+    /// Eligibility for `deposit` / `deposit_basket`.
+    pub deposit: ActionEligibility,
+    /// Eligibility for `release` / `release_partial` / `release_basket`.
+    pub release: ActionEligibility,
+    /// Eligibility for party-authorized `refund` / `refund_basket`.
+    pub refund: ActionEligibility,
+    /// Eligibility for `dispute` / `dispute_basket`.
+    pub dispute: ActionEligibility,
+    /// Eligibility for `resolve` / `resolve_split` / `resolve_basket`.
+    pub resolve: ActionEligibility,
+    /// Eligibility for `cancel` / `cancel_basket`.
+    pub cancel: ActionEligibility,
 }
 
 /// Lifecycle state of an escrow.
@@ -1581,9 +1667,151 @@ impl Escrow {
         Ok(expiry.saturating_sub(env.ledger().sequence()))
     }
 
+    /// Return a read-only eligibility summary for `caller` across `deposit`,
+    /// `release`, `refund`, `dispute`, `resolve`, and `cancel` on `escrow_id`.
+    ///
+    /// Supports both single-token and basket escrows and never mutates storage
+    /// or TTLs.
+    pub fn get_action_eligibility(
+        env: Env,
+        escrow_id: u64,
+        caller: Address,
+    ) -> Result<EscrowActionSummary, ForgeError> {
+        if let Ok(single) = Self::load_escrow(&env, escrow_id) {
+            return Self::evaluate_action_eligibility(
+                &env,
+                escrow_id,
+                &single.buyer,
+                &single.seller,
+                &single.arbiter,
+                single.created_at,
+                single.timeout,
+                single.status,
+                &caller,
+            );
+        }
+        if let Ok(basket) = Self::load_basket(&env, escrow_id) {
+            return Self::evaluate_action_eligibility(
+                &env,
+                escrow_id,
+                &basket.buyer,
+                &basket.seller,
+                &basket.arbiter,
+                basket.created_at,
+                basket.timeout,
+                basket.status,
+                &caller,
+            );
+        }
+        Err(ForgeError::NotFound)
+    }
+
     // -------------------------------------------------------------------
     // Internals
     // -------------------------------------------------------------------
+
+    /// Shared read-only predicate evaluator for escrow action eligibility.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_action_eligibility(
+        env: &Env,
+        escrow_id: u64,
+        buyer: &Address,
+        seller: &Address,
+        arbiter: &Address,
+        created_at: u64,
+        timeout: u64,
+        status: EscrowStatus,
+        caller: &Address,
+    ) -> Result<EscrowActionSummary, ForgeError> {
+        let deadline = created_at
+            .checked_add(timeout)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let is_expired = env.ledger().timestamp() >= deadline;
+        let is_buyer = caller == buyer;
+        let is_seller = caller == seller;
+        let is_arbiter = caller == arbiter;
+        let is_disputed = status == EscrowStatus::Disputed;
+
+        let eligibility = |reason: EscrowActionReason| ActionEligibility {
+            eligible: reason == EscrowActionReason::Eligible,
+            reason,
+        };
+
+        let deposit = if status != EscrowStatus::Pending {
+            eligibility(EscrowActionReason::WrongStatus)
+        } else if !is_buyer {
+            eligibility(EscrowActionReason::CallerNotBuyer)
+        } else {
+            eligibility(EscrowActionReason::Eligible)
+        };
+
+        let cancel = deposit;
+
+        let release = if is_disputed {
+            eligibility(EscrowActionReason::DisputedFrozen)
+        } else if status != EscrowStatus::Funded {
+            eligibility(EscrowActionReason::WrongStatus)
+        } else if !is_seller {
+            eligibility(EscrowActionReason::CallerNotSeller)
+        } else {
+            eligibility(EscrowActionReason::Eligible)
+        };
+
+        let refund = if is_disputed {
+            eligibility(EscrowActionReason::DisputedFrozen)
+        } else if status != EscrowStatus::Funded {
+            eligibility(EscrowActionReason::WrongStatus)
+        } else if !is_expired {
+            if is_seller {
+                eligibility(EscrowActionReason::Eligible)
+            } else if is_buyer {
+                eligibility(EscrowActionReason::DeadlineNotReached)
+            } else {
+                eligibility(EscrowActionReason::CallerNotSeller)
+            }
+        } else if is_buyer {
+            eligibility(EscrowActionReason::Eligible)
+        } else if is_seller {
+            eligibility(EscrowActionReason::DeadlinePassed)
+        } else {
+            eligibility(EscrowActionReason::CallerNotBuyer)
+        };
+
+        let dispute = if is_disputed {
+            eligibility(EscrowActionReason::DisputedFrozen)
+        } else if status != EscrowStatus::Funded {
+            eligibility(EscrowActionReason::WrongStatus)
+        } else if !is_buyer && !is_seller {
+            eligibility(EscrowActionReason::CallerNotParty)
+        } else {
+            eligibility(EscrowActionReason::Eligible)
+        };
+
+        let resolve = if !is_disputed {
+            eligibility(EscrowActionReason::WrongStatus)
+        } else if !is_arbiter {
+            eligibility(EscrowActionReason::CallerNotArbiter)
+        } else {
+            eligibility(EscrowActionReason::Eligible)
+        };
+
+        Ok(EscrowActionSummary {
+            escrow_id,
+            status,
+            is_disputed,
+            is_buyer,
+            is_seller,
+            is_arbiter,
+            deadline,
+            is_expired,
+            deposit,
+            release,
+            refund,
+            dispute,
+            resolve,
+            cancel,
+        })
+    }
 
     /// Load an escrow record by id with backward-compatible schema migration.
     ///
