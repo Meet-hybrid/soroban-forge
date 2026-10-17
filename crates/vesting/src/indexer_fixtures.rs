@@ -5,7 +5,7 @@ extern crate std;
 use crate::{SorobanForgeVestingClient, Vesting};
 use serde_json::Value;
 use soroban_forge_test_utils::TestAccounts;
-use soroban_sdk::testutils::{Address as _, Events as _};
+use soroban_sdk::testutils::Events as _;
 use soroban_sdk::xdr::{self, WriteXdr};
 use soroban_sdk::{Address, Env};
 use std::format;
@@ -57,7 +57,8 @@ fn generate() -> Value {
     let schedule_id = client.create_schedule(
         &funder,
         &beneficiary,
-        &env.register_stellar_asset_contract_v2(accounts.deployer.clone()).address(),
+        &env.register_stellar_asset_contract_v2(accounts.deployer.clone())
+            .address(),
         &1_000_i128,
         &100_u64,
         &1_000_u64,
