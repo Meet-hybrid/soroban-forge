@@ -110,10 +110,22 @@ npm run generate
 The script builds all six contract crates for `wasm32v1-none` with Cargo's
 locked release configuration, then generates typed bindings from each WASM.
 The unified package modules are written to `src/clients/`; the five standalone
-client packages are regenerated alongside them. Contract mappings and output
-names are defined in `scripts/generate.mjs`. Generation requires stable Rust,
-the `wasm32v1-none` target, and the Stellar CLI; it does not require network
-access.
+client packages are regenerated alongside them. It also writes normalized ABI
+fixtures for all six clients to `src/abi-fixtures/`, covering function
+signatures, events, user-defined types, and error codes. Contract mappings and
+output names are defined in `scripts/generate.mjs`.
+
+To verify that generated TypeScript output and checked-in ABI fixtures match
+the current contract artifacts, run:
+
+```bash
+npm run verify:generated
+```
+
+This regenerates the clients and fixtures, then fails with generated file
+differences if the checked-in output is stale. Generation requires stable Rust,
+the `wasm32v1-none` target, the Stellar CLI, and SDK dependencies installed by
+`npm ci`; it does not require network access after setup.
 
 | Contract | Unified package export | Standalone package |
 | --- | --- | --- |
@@ -140,7 +152,14 @@ npm test
 ```
 
 The test script compiles TypeScript first (`tsconfig.test.json` → `dist-test/`)
-and then runs the compiled JavaScript with Node's built-in test runner.
+and then runs the compiled JavaScript with Node's built-in test runner. In
+addition to escrow and ABI compatibility coverage, `vesting-client.test.ts`
+smoke-tests the generated vesting client's `claimable` simulation/read path
+and verifies that a failed `create_schedule` simulation surfaces the RPC error.
+Both cases use deterministic local RPC fixtures and do not contact testnet. ABI
+compatibility tests validate every generated client's functions, parameter and
+return types, events, enums, errors, and public type exports against its
+checked-in fixture. The existing escrow suite remains enabled.
 
 ## Type-check
 
