@@ -1136,3 +1136,294 @@ fn reassignment_rejects_unknown_tranche_and_completed_schedules() {
         .unwrap();
     assert_eq!(err, ForgeError::InvalidInput);
 }
+
+#[test]
+fn schedule_summary_tracks_linear_time_boundaries_residue_and_completion() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let total = 10_000_i128;
+    let cliff = 1_000_u64;
+    let duration = 4_000_u64;
+    let id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user1,
+        &token,
+        &total,
+        &cliff,
+        &duration,
+    );
+
+    // 1. Before cliff (at start and start + cliff - 1): Locked, nothing unlocked.
+    for ts in [START, START + cliff - 1] {
+        env.ledger().set_timestamp(ts);
+        let summary = client.get_schedule_summary(&id);
+        assert_eq!(
+            summary,
+            ScheduleStatusSummary {
+                status: VestingStatus::Locked,
+                total_amount: total,
+                unlocked_amount: 0,
+                claimed_amount: 0,
+                claimable_amount: 0,
+            }
+        );
+        assert_eq!(
+            client.get_schedule_summary_for(&id, &accounts.user1),
+            summary
+        );
+        assert_eq!(
+            client
+                .get_schedule_summary_for(&id, &accounts.user2)
+                .claimable_amount,
+            0
+        );
+    }
+
+    // 2. Exactly at cliff: transitions to Vesting, unlocked and claimable still 0.
+    env.ledger().set_timestamp(START + cliff);
+    assert_eq!(
+        client.get_schedule_summary(&id),
+        ScheduleStatusSummary {
+            status: VestingStatus::Vesting,
+            total_amount: total,
+            unlocked_amount: 0,
+            claimed_amount: 0,
+            claimable_amount: 0,
+        }
+    );
+
+    // 3. Partially unlocked with floor-division residue:
+    // elapsed = 1_000 out of period = 3_000 -> floor(10_000 * 1_000 / 3_000) = 3_333.
+    env.ledger().set_timestamp(START + cliff + 1_000);
+    assert_eq!(
+        client.get_schedule_summary(&id),
+        ScheduleStatusSummary {
+            status: VestingStatus::Vesting,
+            total_amount: total,
+            unlocked_amount: 3_333,
+            claimed_amount: 0,
+            claimable_amount: 3_333,
+        }
+    );
+
+    // First claim drains the 3_333 unlocked so far.
+    assert_eq!(client.claim(&id), 3_333);
+    assert_eq!(
+        client.get_schedule_summary(&id),
+        ScheduleStatusSummary {
+            status: VestingStatus::Vesting,
+            total_amount: total,
+            unlocked_amount: 3_333,
+            claimed_amount: 3_333,
+            claimable_amount: 0,
+        }
+    );
+
+    // 4. Second partial unlock: elapsed = 2_000 -> floor(10_000 * 2_000 / 3_000) = 6_666.
+    env.ledger().set_timestamp(START + cliff + 2_000);
+    assert_eq!(
+        client.get_schedule_summary(&id),
+        ScheduleStatusSummary {
+            status: VestingStatus::Vesting,
+            total_amount: total,
+            unlocked_amount: 6_666,
+            claimed_amount: 3_333,
+            claimable_amount: 3_333,
+        }
+    );
+    assert_eq!(client.claim(&id), 3_333);
+
+    // 5. At full duration: unlocked reaches full 10_000, so claimable includes the
+    // final floor-division residue (10_000 - 6_666 = 3_334).
+    env.ledger().set_timestamp(START + duration);
+    assert_eq!(
+        client.get_schedule_summary(&id),
+        ScheduleStatusSummary {
+            status: VestingStatus::Vesting,
+            total_amount: total,
+            unlocked_amount: total,
+            claimed_amount: 6_666,
+            claimable_amount: 3_334,
+        }
+    );
+
+    // 6. Final claim transitions schedule to Completed with 0 claimable.
+    assert_eq!(client.claim(&id), 3_334);
+    assert_eq!(
+        client.get_schedule_summary(&id),
+        ScheduleStatusSummary {
+            status: VestingStatus::Completed,
+            total_amount: total,
+            unlocked_amount: total,
+            claimed_amount: total,
+            claimable_amount: 0,
+        }
+    );
+    assert_eq!(tc.balance(&accounts.user1), total);
+    assert_eq!(tc.balance(&contract_id), 0);
+}
+
+#[test]
+fn schedule_summary_handles_cancelled_and_reassigned_linear_schedules() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let new_beneficiary = Address::generate(&env);
+    let id = create(&client, &token, &accounts);
+
+    // Partial unlock at 1/3 of vesting window: unlocked = 3_333, claim 1_000 worth?
+    // Claim full 3_333 at +1_000 after cliff.
+    env.ledger().set_timestamp(START + CLIFF + 1_000);
+    assert_eq!(client.claim(&id), 3_333);
+
+    // Advance to +2_000 after cliff (unlocked = 6_666, user1 has 3_333 unclaimed)
+    // and reassign to new_beneficiary.
+    env.ledger().set_timestamp(START + CLIFF + 2_000);
+    client.reassign_beneficiary(&id, &new_beneficiary);
+
+    // Immediately after reassignment: current beneficiary has 0 claimable,
+    // former beneficiary (user1) still has 3_333 frozen claimable.
+    assert_eq!(
+        client.get_schedule_summary(&id),
+        ScheduleStatusSummary {
+            status: VestingStatus::Vesting,
+            total_amount: TOTAL,
+            unlocked_amount: 6_666,
+            claimed_amount: 3_333,
+            claimable_amount: 0,
+        }
+    );
+    assert_eq!(
+        client.get_schedule_summary_for(&id, &accounts.user1),
+        ScheduleStatusSummary {
+            status: VestingStatus::Vesting,
+            total_amount: TOTAL,
+            unlocked_amount: 6_666,
+            claimed_amount: 3_333,
+            claimable_amount: 3_333,
+        }
+    );
+
+    // Advance to +2_250 after cliff (unlocked = 7_500, new_beneficiary accrued 834)
+    // and revoke (cancel) the schedule.
+    env.ledger().set_timestamp(START + CLIFF + 2_250);
+    client.revoke(&id);
+
+    // Even after full duration passes, unlocked_amount stays frozen at 7_500 and
+    // status remains Revoked.
+    env.ledger().set_timestamp(START + DURATION + 500);
+    assert_eq!(
+        client.get_schedule_summary(&id),
+        ScheduleStatusSummary {
+            status: VestingStatus::Revoked,
+            total_amount: TOTAL,
+            unlocked_amount: 7_500,
+            claimed_amount: 3_333,
+            claimable_amount: 834,
+        }
+    );
+    assert_eq!(
+        client.get_schedule_summary_for(&id, &accounts.user1),
+        ScheduleStatusSummary {
+            status: VestingStatus::Revoked,
+            total_amount: TOTAL,
+            unlocked_amount: 7_500,
+            claimed_amount: 3_333,
+            claimable_amount: 3_333,
+        }
+    );
+
+    // Both beneficiaries claim their frozen entitlements; summary reflects drained state.
+    assert_eq!(client.claim_for(&id, &accounts.user1), 3_333);
+    assert_eq!(client.claim(&id), 834);
+    assert_eq!(
+        client.get_schedule_summary(&id),
+        ScheduleStatusSummary {
+            status: VestingStatus::Revoked,
+            total_amount: TOTAL,
+            unlocked_amount: 7_500,
+            claimed_amount: 7_500,
+            claimable_amount: 0,
+        }
+    );
+    assert_eq!(
+        client
+            .get_schedule_summary_for(&id, &accounts.user1)
+            .claimable_amount,
+        0
+    );
+}
+
+#[test]
+fn schedule_summary_tracks_tranche_schedule_and_is_pure_read_only() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let tranches = soroban_sdk::vec![
+        &env,
+        Tranche {
+            unlock_at: 500,
+            amount: 2_500,
+        },
+        Tranche {
+            unlock_at: 1_500,
+            amount: 7_500,
+        },
+    ];
+    let id = client.create_tranche_schedule(&accounts.user1, &token, &tranches);
+
+    // Before first tranche: Locked.
+    env.ledger().set_timestamp(START + 499);
+    assert_eq!(
+        client.get_schedule_summary(&id),
+        ScheduleStatusSummary {
+            status: VestingStatus::Locked,
+            total_amount: TOTAL,
+            unlocked_amount: 0,
+            claimed_amount: 0,
+            claimable_amount: 0,
+        }
+    );
+
+    // At first tranche: Vesting, 2_500 unlocked.
+    env.ledger().set_timestamp(START + 500);
+    let stored_before = client.get_tranche_schedule(&id);
+    let contract_bal_before = tc.balance(&contract_id);
+    let user_bal_before = tc.balance(&accounts.user1);
+
+    // Enforce-mode empty auths: query requires no signature and emits no events.
+    env.mock_auths(&[]);
+    let summary = client.get_schedule_summary(&id);
+    assert_eq!(
+        summary,
+        ScheduleStatusSummary {
+            status: VestingStatus::Vesting,
+            total_amount: TOTAL,
+            unlocked_amount: 2_500,
+            claimed_amount: 0,
+            claimable_amount: 2_500,
+        }
+    );
+    assert_eq!(
+        client
+            .get_schedule_summary_for(&id, &accounts.user2)
+            .claimable_amount,
+        0
+    );
+    assert!(env.auths().is_empty());
+
+    // Stored record and token balances are completely untouched.
+    let stored_after = client.get_tranche_schedule(&id);
+    assert_eq!(stored_after.claimed, stored_before.claimed);
+    assert_eq!(stored_after.status, stored_before.status);
+    assert_eq!(tc.balance(&contract_id), contract_bal_before);
+    assert_eq!(tc.balance(&accounts.user1), user_bal_before);
+
+    // Unknown schedule IDs return NotFound.
+    assert_eq!(
+        client.try_get_schedule_summary(&999).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(
+        client
+            .try_get_schedule_summary_for(&999, &accounts.user1)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::NotFound
+    );
+}
