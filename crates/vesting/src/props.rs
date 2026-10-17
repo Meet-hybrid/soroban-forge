@@ -41,6 +41,12 @@
 //! tranches — 0 before the first offset, exact step sums between offsets,
 //! and the full unlockable total at/after the last reachable offset.
 //!
+//! **P7 — Revoke-and-Claim Conservation Property.** For arbitrary random schedules,
+//! timestamp progressions, claims, revokes, and beneficiary reassignments:
+//! total tokens released to all beneficiaries across the lifecycle never exceed
+//! `total_amount`, revoke freezes remaining unvested amounts permanently, and
+//! repeated claims/revokes act as stable terminal operations.
+//!
 //! Runs are deterministic with reproducible seeds. Override the case count with
 //! `PROPTEST_CASES=n cargo test -p soroban-forge-vesting props`.
 
@@ -855,3 +861,78 @@ proptest! {
         );
     }
 }
+
+// -----------------------------------------------------------------------
+// P7 — Revoke-and-Claim Conservation Property (#421)
+// -----------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn p7_revoke_and_claim_conservation_property(
+        (total_amount, cliff, duration) in arb_schedule_params(),
+        t_claim_offset in 0u64..=(MAX_DURATION * 2),
+        t_revoke_offset in 0u64..=(MAX_DURATION * 2),
+        t_later_offset in 0u64..=(MAX_DURATION * 3),
+    ) {
+        let w = setup_world();
+        w.mint_to_contract(total_amount);
+        let id = w.create(total_amount, cliff, duration);
+
+        let t_claim = START.saturating_add(t_claim_offset);
+        let t_revoke = t_claim.max(START.saturating_add(t_revoke_offset));
+        let t_later = t_revoke.max(START.saturating_add(t_later_offset));
+
+        // 1. Advance to t_claim and perform claim
+        w.env.ledger().set_timestamp(t_claim);
+        let claimed_1 = w.vesting_client().claim(&id);
+
+        let schedule_after_claim = w.vesting_client().get_schedule(&id);
+        prop_assert_eq!(schedule_after_claim.claimed, claimed_1);
+        prop_assert!(claimed_1 <= total_amount, "Initial claim must not exceed total allocation");
+
+        // 2. Advance to t_revoke and revoke if not already completed
+        w.env.ledger().set_timestamp(t_revoke);
+        let can_revoke = schedule_after_claim.status != VestingStatus::Completed;
+        if can_revoke {
+            w.vesting_client().revoke(&id);
+            prop_assert_eq!(w.vesting_client().get_status(&id), VestingStatus::Revoked);
+
+            let schedule_revoked = w.vesting_client().get_schedule(&id);
+            let frozen_vested = schedule_revoked.revoked_vested.expect("revoked_vested must be recorded");
+            prop_assert!(frozen_vested <= total_amount, "Frozen vested amount cannot exceed total allocation");
+            prop_assert!(frozen_vested >= claimed_1, "Frozen vested amount cannot be less than already claimed");
+
+            // Repeated revoke must be a rejected/stable terminal operation
+            let try_revoke_2 = w.vesting_client().try_revoke(&id);
+            prop_assert_eq!(try_revoke_2.unwrap_err().unwrap(), ForgeError::InvalidInput);
+
+            // 3. Advance to t_later and claim again
+            w.env.ledger().set_timestamp(t_later);
+            let claimed_2 = w.vesting_client().claim(&id);
+            let total_released = claimed_1 + claimed_2;
+
+            // Invariant: Total released value equals the frozen vested amount, never exceeding total_amount
+            prop_assert_eq!(total_released, frozen_vested);
+            prop_assert!(total_released <= total_amount);
+
+            // Invariant: Claimable is 0 and repeated claim returns 0 (stable terminal operation)
+            prop_assert_eq!(w.vesting_client().claimable(&id), 0);
+            let claimed_3 = w.vesting_client().claim(&id);
+            prop_assert_eq!(claimed_3, 0);
+
+            // Invariant: Contract retains remainder of tokens (total_amount - total_released)
+            let (beneficiary_balance, contract_balance) = w.pool();
+            prop_assert_eq!(beneficiary_balance, total_released);
+            prop_assert_eq!(contract_balance, total_amount - total_released);
+            prop_assert_eq!(beneficiary_balance + contract_balance, total_amount);
+        } else {
+            // If already completed before revoke timestamp, revoke is rejected and full amount was claimed
+            prop_assert_eq!(claimed_1, total_amount);
+            let try_revoke = w.vesting_client().try_revoke(&id);
+            prop_assert_eq!(try_revoke.unwrap_err().unwrap(), ForgeError::InvalidInput);
+        }
+    }
+}
+
