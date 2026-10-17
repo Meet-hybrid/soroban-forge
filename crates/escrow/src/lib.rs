@@ -204,7 +204,8 @@ compile_error!(
 );
 
 use soroban_sdk::{
-    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env, Vec,
+    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env,
+    TryFromVal, Val, Vec,
 };
 
 use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ttl::TTLHelper, ForgeError};
@@ -1598,17 +1599,16 @@ impl Escrow {
     /// migrating the record on first use.
     fn load_escrow(env: &Env, escrow_id: u64) -> Result<EscrowData, ForgeError> {
         let key = DataKey::Escrow(escrow_id);
-        // Try current schema first.
-        if let Some(data) = env.storage().persistent().get::<DataKey, EscrowData>(&key) {
-            return Ok(data);
-        }
-        // Fallback: legacy schema (no `released` field).
-        if let Some(v1) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, EscrowDataV1>(&key)
-        {
-            return Ok(EscrowData::from(v1));
+        // Read the raw value first: a typed storage read panics when the
+        // stored map has a different field count, which would prevent the
+        // legacy fallback from running.
+        if let Some(raw) = env.storage().persistent().get::<DataKey, Val>(&key) {
+            if let Ok(data) = EscrowData::try_from_val(env, &raw) {
+                return Ok(data);
+            }
+            if let Ok(v1) = EscrowDataV1::try_from_val(env, &raw) {
+                return Ok(EscrowData::from(v1));
+            }
         }
         Err(ForgeError::NotFound)
     }

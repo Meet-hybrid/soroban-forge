@@ -143,19 +143,19 @@
 //!    **up** (a started bucket is charged in full), derived from raw units on
 //!    every derivation. A cap that is not a multiple of `bucket_units` bills
 //!    at most `ceil(cap / bucket_units)` buckets.
-//! 3. **Accumulator storage class** — instance storage
+//! 3. **Accumulator storage class** — persistent storage
 //!    ([`DataKey::Usage`]), one entry per `(subscription, metric)`, stamped
-//!    with the `last_charged` it belongs to. Instance storage matches the
-//!    rest of the crate; the persistent-storage migration with TTL maintenance
-//!    is tracked separately and does not change the rollover rules.
+//!    with the `last_charged` it belongs to. Successful writes renew the
+//!    workspace TTL horizon; the migration keeps the old instance records
+//!    readable and upgrades them lazily on the next state-changing call.
 
 #[cfg(test)]
 extern crate std;
 
-use soroban_forge_shared_utils::ForgeError;
+use soroban_forge_shared_utils::{bump_entry, ForgeError};
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env,
-    Symbol, Vec,
+    Symbol, TryFromVal, Val, Vec,
 };
 
 /// Maximum consecutive failed payment attempts before transitioning to Cancelled.
@@ -380,6 +380,12 @@ pub trait SorobanForgeSubscriptionPayments {
         subscription_id: u64,
     ) -> Result<Subscription, soroban_forge_shared_utils::ForgeError>;
 
+    /// Extend the persistent TTL of one subscription record.
+    fn touch_ttl(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
     /// Total number of subscriptions created so far (read-only view).
     fn get_subscription_count(env: Env) -> u64;
 
@@ -465,6 +471,48 @@ pub struct Subscription {
     /// `None` means pull mode; `Some(balance)` means prepaid mode is enabled.
     /// A zero balance remains `Some(0)` so topping up never changes modes.
     pub prepaid_balance: Option<i128>,
+}
+
+/// Subscription record written before prepaid balances were introduced.
+///
+/// Legacy records remain in instance storage after the persistent-storage
+/// migration. They are decoded by `get_subscription_impl` and are rewritten
+/// in the current shape on their next state-changing operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SubscriptionV1 {
+    subscription_id: u64,
+    subscriber: Address,
+    provider: Address,
+    token: Address,
+    amount: i128,
+    period: u64,
+    last_charged: u64,
+    status: SubscriptionStatus,
+    paused_at: Option<u64>,
+    failed_attempts: u32,
+    past_due_since: Option<u64>,
+    quotas: Vec<MetricQuota>,
+}
+
+impl From<SubscriptionV1> for Subscription {
+    fn from(legacy: SubscriptionV1) -> Self {
+        Self {
+            subscription_id: legacy.subscription_id,
+            subscriber: legacy.subscriber,
+            provider: legacy.provider,
+            token: legacy.token,
+            amount: legacy.amount,
+            period: legacy.period,
+            last_charged: legacy.last_charged,
+            status: legacy.status,
+            paused_at: legacy.paused_at,
+            failed_attempts: legacy.failed_attempts,
+            past_due_since: legacy.past_due_since,
+            quotas: legacy.quotas,
+            prepaid_balance: None,
+        }
+    }
 }
 
 /// One metered dimension's pricing terms: units included in the base period
@@ -708,9 +756,7 @@ impl SubscriptionPayments {
             subscription.status = SubscriptionStatus::Active;
             subscription.paused_at = None;
             Self::rollover_usage(&env, &subscription);
-            env.storage()
-                .instance()
-                .set(&DataKey::Subscription(subscription_id), &subscription);
+            Self::store_subscription(&env, subscription_id, &subscription);
             events::charged(&env, &subscription, amount);
             events::balance_debited(&env, subscription_id, amount, remaining);
             return Ok(amount);
@@ -732,9 +778,7 @@ impl SubscriptionPayments {
                 // Period rollover: the meters go in the same frame that closes
                 // the period, so the next period starts from zero units.
                 Self::rollover_usage(&env, &subscription);
-                env.storage()
-                    .instance()
-                    .set(&DataKey::Subscription(subscription_id), &subscription);
+                Self::store_subscription(&env, subscription_id, &subscription);
                 events::charged(&env, &subscription, amount);
                 Ok(amount)
             }
@@ -776,10 +820,7 @@ impl SubscriptionPayments {
         } else {
             None
         };
-        env.storage().instance().set(
-            &DataKey::Subscription(subscription.subscription_id),
-            subscription,
-        );
+        Self::store_subscription(env, subscription.subscription_id, subscription);
         if let Some(amount) = refund {
             events::balance_refunded(env, subscription.subscription_id, amount, 0);
         }
@@ -809,9 +850,7 @@ impl SubscriptionPayments {
             return Err(ForgeError::TokenTransferFailed);
         }
         subscription.prepaid_balance = Some(updated);
-        env.storage()
-            .instance()
-            .set(&DataKey::Subscription(subscription_id), &subscription);
+        Self::store_subscription(&env, subscription_id, &subscription);
         events::deposited(&env, subscription_id, amount, updated);
         Ok(updated)
     }
@@ -845,9 +884,7 @@ impl SubscriptionPayments {
             return Err(ForgeError::TokenTransferFailed);
         }
         subscription.prepaid_balance = Some(remaining);
-        env.storage()
-            .instance()
-            .set(&DataKey::Subscription(subscription_id), &subscription);
+        Self::store_subscription(&env, subscription_id, &subscription);
         events::balance_refunded(&env, subscription_id, amount, remaining);
         Ok(remaining)
     }
@@ -915,9 +952,7 @@ impl SubscriptionPayments {
             subscription.failed_attempts = 0;
             subscription.status = SubscriptionStatus::Active;
             subscription.paused_at = None;
-            env.storage()
-                .instance()
-                .set(&DataKey::Subscription(subscription_id), &subscription);
+            Self::store_subscription(&env, subscription_id, &subscription);
         }
         Ok(total)
     }
@@ -944,9 +979,7 @@ impl SubscriptionPayments {
         subscription.subscriber.require_auth();
 
         subscription.quotas = quotas;
-        env.storage()
-            .instance()
-            .set(&DataKey::Subscription(subscription_id), &subscription);
+        Self::store_subscription(&env, subscription_id, &subscription);
         events::quotas_set(&env, &subscription);
         Ok(())
     }
@@ -988,9 +1021,9 @@ impl SubscriptionPayments {
             units: period_units,
             period_start: subscription.last_charged,
         };
-        env.storage()
-            .instance()
-            .set(&DataKey::Usage(subscription_id, metric), &recorded);
+        let usage_key = DataKey::Usage(subscription_id, metric);
+        env.storage().persistent().set(&usage_key, &recorded);
+        bump_entry(&env, &usage_key);
         events::usage_recorded(&env, &recorded, units);
         Ok(())
     }
@@ -1031,9 +1064,7 @@ impl SubscriptionPayments {
 
         subscription.status = SubscriptionStatus::Paused;
         subscription.paused_at = Some(env.ledger().timestamp());
-        env.storage()
-            .instance()
-            .set(&DataKey::Subscription(subscription_id), &subscription);
+        Self::store_subscription(&env, subscription_id, &subscription);
         Ok(())
     }
 
@@ -1060,9 +1091,7 @@ impl SubscriptionPayments {
             .ok_or(ForgeError::ArithmeticOverflow)?;
         subscription.status = SubscriptionStatus::Active;
         subscription.paused_at = None;
-        env.storage()
-            .instance()
-            .set(&DataKey::Subscription(subscription_id), &subscription);
+        Self::store_subscription(&env, subscription_id, &subscription);
         Ok(())
     }
 
@@ -1096,9 +1125,7 @@ impl SubscriptionPayments {
 
         subscription.status = SubscriptionStatus::Cancelled;
         subscription.paused_at = None;
-        env.storage()
-            .instance()
-            .set(&DataKey::Subscription(subscription_id), &subscription);
+        Self::store_subscription(&env, subscription_id, &subscription);
         if let Some(amount) = refund {
             events::balance_refunded(&env, subscription_id, amount, 0);
         }
@@ -1109,6 +1136,23 @@ impl SubscriptionPayments {
     /// Read a stored subscription by id (read-only view).
     pub fn get_subscription(env: Env, subscription_id: u64) -> Result<Subscription, ForgeError> {
         Self::get_subscription_impl(&env, subscription_id)
+    }
+
+    /// Extend the persistent TTL of a subscription record without changing
+    /// its business state. This is intended for permissionless keeper calls.
+    pub fn touch_ttl(env: Env, subscription_id: u64) -> Result<(), ForgeError> {
+        let key = DataKey::Subscription(subscription_id);
+        if !env.storage().persistent().has(&key) {
+            let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+            Self::store_subscription(&env, subscription_id, &subscription);
+        } else {
+            env.storage().persistent().extend_ttl(
+                &key,
+                soroban_forge_shared_utils::ttl::BUMP_THRESHOLD,
+                soroban_forge_shared_utils::ttl::BUMP_AMOUNT,
+            );
+        }
+        Ok(())
     }
 
     /// Total number of subscriptions created so far (read-only view).
@@ -1205,9 +1249,7 @@ impl SubscriptionPayments {
             quotas: Vec::new(env),
             prepaid_balance: None,
         };
-        env.storage()
-            .instance()
-            .set(&DataKey::Subscription(subscription_id), &subscription);
+        Self::store_subscription(env, subscription_id, &subscription);
         Self::append_index(
             env,
             &DataKey::SubscriberSubscriptions(subscriber),
@@ -1230,10 +1272,28 @@ impl SubscriptionPayments {
     }
 
     fn get_subscription_impl(env: &Env, subscription_id: u64) -> Result<Subscription, ForgeError> {
-        env.storage()
-            .instance()
-            .get(&DataKey::Subscription(subscription_id))
-            .ok_or(ForgeError::NotFound)
+        let key = DataKey::Subscription(subscription_id);
+        if let Some(raw) = env.storage().persistent().get::<DataKey, Val>(&key) {
+            if let Ok(subscription) = Subscription::try_from_val(env, &raw) {
+                return Ok(subscription);
+            }
+        }
+        if let Some(raw) = env.storage().instance().get::<DataKey, Val>(&key) {
+            if let Ok(subscription) = Subscription::try_from_val(env, &raw) {
+                return Ok(subscription);
+            }
+            if let Ok(legacy) = SubscriptionV1::try_from_val(env, &raw) {
+                return Ok(legacy.into());
+            }
+        }
+        Err(ForgeError::NotFound)
+    }
+
+    /// Persist the current subscription shape and renew its TTL.
+    fn store_subscription(env: &Env, subscription_id: u64, subscription: &Subscription) {
+        let key = DataKey::Subscription(subscription_id);
+        env.storage().persistent().set(&key, subscription);
+        bump_entry(env, &key);
     }
 
     /// Append `subscription_id` to an index, carrying the address the index
@@ -1241,19 +1301,22 @@ impl SubscriptionPayments {
     fn append_index(env: &Env, key: &DataKey, subscription_id: u64) {
         let mut ids: Vec<u64> = env
             .storage()
-            .instance()
+            .persistent()
             .get(key)
+            .or_else(|| env.storage().instance().get(key))
             .unwrap_or_else(|| Vec::new(env));
         ids.push_back(subscription_id);
-        env.storage().instance().set(key, &ids);
+        env.storage().persistent().set(key, &ids);
+        bump_entry(env, key);
     }
 
     /// Read an index's id list, defaulting to empty when the address has no
     /// entries.
     fn index_ids(env: &Env, key: &DataKey) -> Vec<u64> {
         env.storage()
-            .instance()
+            .persistent()
             .get(key)
+            .or_else(|| env.storage().instance().get(key))
             .unwrap_or_else(|| Vec::new(env))
     }
 
@@ -1309,10 +1372,12 @@ impl SubscriptionPayments {
         subscription: &Subscription,
         metric: &Symbol,
     ) -> Option<UsageRecord> {
-        let record: UsageRecord = env.storage().instance().get(&DataKey::Usage(
-            subscription.subscription_id,
-            metric.clone(),
-        ))?;
+        let key = DataKey::Usage(subscription.subscription_id, metric.clone());
+        let record: UsageRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .or_else(|| env.storage().instance().get(&key))?;
         if record.period_start == subscription.last_charged {
             Some(record)
         } else {
@@ -1339,9 +1404,8 @@ impl SubscriptionPayments {
     fn rollover_usage(env: &Env, subscription: &Subscription) {
         for quota in subscription.quotas.iter() {
             let key = DataKey::Usage(subscription.subscription_id, quota.metric.clone());
-            if env.storage().instance().has(&key) {
-                env.storage().instance().remove(&key);
-            }
+            env.storage().persistent().remove(&key);
+            env.storage().instance().remove(&key);
         }
     }
 }
@@ -1614,7 +1678,7 @@ mod indexer_fixtures;
 mod tests {
     use super::*;
     use soroban_forge_test_utils::TestAccounts;
-    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use soroban_sdk::testutils::{storage::Persistent, Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{Address, Env};
 
@@ -2537,5 +2601,74 @@ mod tests {
 
         let sub = client.get_subscription(&subscription_id);
         assert_eq!(sub.last_charged, START + PERIOD * 2);
+    }
+
+    #[test]
+    fn legacy_instance_subscription_is_read_and_upgraded_on_write() {
+        let (env, token, _tc, contract_id, client, accounts, id) = setup!();
+        let current = client.get_subscription(&id);
+        let legacy = SubscriptionV1 {
+            subscription_id: current.subscription_id,
+            subscriber: current.subscriber,
+            provider: current.provider,
+            token: current.token,
+            amount: current.amount,
+            period: current.period,
+            last_charged: current.last_charged,
+            status: current.status,
+            paused_at: current.paused_at,
+            failed_attempts: current.failed_attempts,
+            past_due_since: current.past_due_since,
+            quotas: current.quotas,
+        };
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Subscription(id));
+            env.storage()
+                .instance()
+                .set(&DataKey::Subscription(id), &legacy);
+        });
+
+        let decoded = client.get_subscription(&id);
+        assert_eq!(decoded.subscription_id, id);
+        assert_eq!(decoded.subscriber, accounts.user1);
+        assert_eq!(decoded.provider, accounts.validator);
+        assert_eq!(decoded.token, token);
+        assert_eq!(decoded.prepaid_balance, None);
+
+        client.pause(&id);
+        env.as_contract(&contract_id, || {
+            assert!(env.storage().persistent().has(&DataKey::Subscription(id)));
+            assert_eq!(
+                env.storage()
+                    .persistent()
+                    .get::<_, Subscription>(&DataKey::Subscription(id))
+                    .unwrap()
+                    .status,
+                SubscriptionStatus::Paused
+            );
+        });
+    }
+
+    #[test]
+    fn touch_ttl_extends_persistent_subscription_without_changing_state() {
+        let (env, _token, _tc, contract_id, client, _accounts, id) = setup!();
+        let before = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Subscription(id))
+        });
+
+        client.touch_ttl(&id);
+
+        let after = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Subscription(id))
+        });
+        assert!(after >= before);
+        assert_eq!(client.get_subscription(&id).subscription_id, id);
     }
 }

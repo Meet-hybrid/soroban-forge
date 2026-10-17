@@ -1,0 +1,10 @@
+{
+  "name": "soroban-forge-vercel-build",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "next": "16.3.6"
+  }
+}
