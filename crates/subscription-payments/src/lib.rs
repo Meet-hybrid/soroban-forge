@@ -1983,6 +1983,14 @@ mod tests {
         let before = client.get_subscription(&sub_id);
         let err = client.try_charge_catchup(&sub_id, &2).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(
+            client.try_pause(&sub_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(
+            client.try_resume(&sub_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
         assert_eq!(client.get_subscription(&sub_id), before);
     }
 

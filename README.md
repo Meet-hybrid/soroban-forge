@@ -222,6 +222,7 @@ cargo build --release --target wasm32v1-none -p soroban-forge-escrow
 cargo run -p soroban-forge-cli -- --help
 cargo run -p soroban-forge-cli -- build --release
 cargo run -p soroban-forge-cli -- test --package soroban-forge-escrow
+cargo run -p soroban-forge-cli -- scaffold-validate crates/my-contract
 
 # New commands for contract interaction
 cargo run -p soroban-forge-cli -- invoke --contract <CONTRACT_ID> --function balance --network testnet
