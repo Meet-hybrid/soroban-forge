@@ -1550,7 +1550,7 @@ impl MultiSigWallet {
         let approvals = wallet_tx.confirmations.len();
         let remaining_approvals = match wallet_tx.status {
             TxStatus::Pending => threshold.saturating_sub(approvals),
-            TxStatus::Executed | TxStatus::Rejected => 0,
+            TxStatus::Executed | TxStatus::Rejected | TxStatus::Expired => 0,
         };
         Ok(TxPreview {
             status: wallet_tx.status,
@@ -1569,7 +1569,7 @@ impl MultiSigWallet {
     /// approval threshold (read-only view).
     ///
     /// Returns `0` if the threshold is already met or if the transaction is in a
-    /// terminal state ([`TxStatus::Executed`] or [`TxStatus::Rejected`]).
+    /// terminal state ([`TxStatus::Executed`], [`TxStatus::Rejected`], or [`TxStatus::Expired`]).
     ///
     /// # Errors
     ///
@@ -3336,7 +3336,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[test]
-    fn preview_threshold_one_pending_and_threshold_met() {
+    fn preview_threshold_one_pending_and_progress() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(MultiSigWallet, ());
@@ -3344,7 +3344,7 @@ mod tests {
         let accounts = TestAccounts::generate(&env);
         let owners = owner_vec(&env, &accounts);
         client.initialize(&owners, &1_u32);
-        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
 
         // Pending before any confirmation: 0 approvals, 1 required
         let preview = client.get_tx_preview(&tx_id);
@@ -3381,7 +3381,7 @@ mod tests {
 
         let mock_target_id = Address::generate(&env);
         env.register_at(&mock_target_id, MockTarget, ());
-        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env), &None);
         client.confirm(&tx_id, &accounts.user1);
         client.execute(&tx_id);
 
@@ -3404,7 +3404,7 @@ mod tests {
         let owners = owner_vec(&env, &accounts);
         client.initialize(&owners, &1_u32);
 
-        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
         // Single rejection reaches threshold 1 -> flips to Rejected
         client.reject(&tx_id, &accounts.user2);
 
@@ -3420,7 +3420,7 @@ mod tests {
     #[test]
     fn preview_threshold_greater_than_one_pending_and_progress() {
         let (env, client, accounts) = setup!(); // threshold 2, 3 owners
-        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
 
         // Initial pending: 0 approvals, 2 required
         let p0 = client.get_tx_preview(&tx_id);
@@ -3466,7 +3466,7 @@ mod tests {
         let (env, client, accounts) = setup!(); // threshold 2
         let mock_target_id = Address::generate(&env);
         env.register_at(&mock_target_id, MockTarget, ());
-        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env), &None);
         client.confirm(&tx_id, &accounts.user1);
         client.confirm(&tx_id, &accounts.user2);
         client.execute(&tx_id);
@@ -3483,24 +3483,43 @@ mod tests {
     #[test]
     fn preview_threshold_greater_than_one_rejected_terminal_state() {
         let (env, client, accounts) = setup!(); // threshold 2
-        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
         client.confirm(&tx_id, &accounts.user1);
 
-        // User2 rejects: pending with sub-threshold rejection
+        // Single rejection is terminal -> flips status to Rejected
         client.reject(&tx_id, &accounts.user2);
-        let pending_with_rejection = client.get_tx_preview(&tx_id);
-        assert_eq!(pending_with_rejection.status, TxStatus::Pending);
-        assert_eq!(pending_with_rejection.approvals, 1);
-        assert_eq!(pending_with_rejection.remaining_approvals, 1);
-
-        // User3 rejects -> reaches threshold 2 rejections -> Rejected
-        client.reject(&tx_id, &accounts.user3);
         let preview = client.get_tx_preview(&tx_id);
         assert_eq!(preview.status, TxStatus::Rejected);
         assert_eq!(preview.threshold, 2);
         assert_eq!(preview.approvals, 1);
         assert_eq!(preview.remaining_approvals, 0);
         assert_eq!(client.get_required_confirmations(&tx_id), 0);
+        assert_eq!(client.preview_tx(&tx_id), preview);
+    }
+
+    #[test]
+    fn preview_expired_tx_terminal_state() {
+        let (env, client, accounts) = setup!(); // threshold 2
+        env.ledger().set_timestamp(1_000);
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &Some(2_000));
+
+        let p_pending = client.get_tx_preview(&tx_id);
+        assert_eq!(p_pending.status, TxStatus::Pending);
+        assert_eq!(p_pending.threshold, 2);
+        assert_eq!(p_pending.approvals, 0);
+        assert_eq!(p_pending.remaining_approvals, 2);
+        assert_eq!(client.get_required_confirmations(&tx_id), 2);
+
+        // Advance ledger time past expiry boundary
+        env.ledger().set_timestamp(2_000);
+
+        let p_expired = client.get_tx_preview(&tx_id);
+        assert_eq!(p_expired.status, TxStatus::Expired);
+        assert_eq!(p_expired.threshold, 2);
+        assert_eq!(p_expired.approvals, 0);
+        assert_eq!(p_expired.remaining_approvals, 0);
+        assert_eq!(client.get_required_confirmations(&tx_id), 0);
+        assert_eq!(client.preview_tx(&tx_id), p_expired);
     }
 
     #[test]
@@ -3526,7 +3545,7 @@ mod tests {
         let accounts = TestAccounts::generate(&env);
         let owners = owner_vec(&env, &accounts);
         client.initialize(&owners, &2_u32);
-        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
         assert_eq!(client.get_tx_preview(&tx_id).status, TxStatus::Pending);
 
         // Simulate TTL expiration: persistent record is removed while Count remains
@@ -3563,7 +3582,7 @@ mod tests {
     #[test]
     fn preview_does_not_mutate_storage_or_state() {
         let (env, client, accounts) = setup!();
-        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
         client.confirm(&tx_id, &accounts.user2);
 
         let tx_before = client.get_tx(&tx_id);
@@ -3603,7 +3622,7 @@ mod tests {
 
         // Submit requires owner auth
         env.mock_all_auths();
-        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env));
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
 
         // Disable blanket mocking for the read queries
         env.set_auths(&[]);
