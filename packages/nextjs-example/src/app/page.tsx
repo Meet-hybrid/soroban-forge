@@ -1,11 +1,25 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Client,
   networks,
   type EscrowData,
 } from "@soroban-forge/escrow-client";
+import {
+  DEFAULT_DEMO_TOKEN,
+  DEMO_STATE_LABEL,
+  DEMO_STATE_SCHEMA_VERSION,
+  DEMO_STATE_STORAGE_KEY,
+  exportDemoStateJson,
+  isDemoStateEmpty,
+  loadDemoStateFromStorage,
+  resetDemoStateInStorage,
+  saveDemoStateToStorage,
+  validateDemoStateDocument,
+  type DemoLogEntry,
+  type DemoStatePayload,
+} from "../lib/demo-state";
 
 declare global {
   interface Window {
@@ -26,14 +40,13 @@ const CONTRACT_ID = networks.testnet.contractId;
 
 // 7-decimal demo token (SAC "credit" asset) used by the repo's own testnet demo
 // (see the README proof table at the repository root).
-const DEFAULT_TOKEN =
-  "CBJQ53EOHB5MWSS7CETN523WILLNVS7NQAQQAQIS5QAYTPRCZSGKL23O";
+const DEFAULT_TOKEN = DEFAULT_DEMO_TOKEN;
 
 // 1 unit = 10^7 stroops (SEP-41 default for 7-decimal tokens such as XLM)
 const DECIMALS = BigInt(7);
 const SCALE = BigInt(10) ** DECIMALS;
 
-type LogEntry = { id: number; time: string; text: string; kind: "info" | "ok" | "err" };
+type LogEntry = DemoLogEntry;
 
 let logId = 0;
 
@@ -74,6 +87,185 @@ export default function Home() {
   const [myIds, setMyIds] = useState<Array<bigint>>([]);
   const [listTotal, setListTotal] = useState<number | null>(null);
   const [listBusy, setListBusy] = useState(false);
+
+  // Local Demo State (Devtools reset & export)
+  const [mounted, setMounted] = useState(false);
+  const [exportJsonText, setExportJsonText] = useState("");
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  const [demoStateNotice, setDemoStateNotice] = useState<{
+    kind: "info" | "ok" | "err";
+    text: string;
+  } | null>(null);
+
+  const currentDemoState = useMemo<DemoStatePayload>(
+    () => ({
+      draft: {
+        buyer,
+        seller,
+        arbiter,
+        token,
+        amount,
+        timeoutSecs,
+      },
+      createdId,
+      actionEscrowId,
+      readEscrowId,
+      resolveFavor,
+      log,
+    }),
+    [
+      buyer,
+      seller,
+      arbiter,
+      token,
+      amount,
+      timeoutSecs,
+      createdId,
+      actionEscrowId,
+      readEscrowId,
+      resolveFavor,
+      log,
+    ]
+  );
+
+  const demoStateIsEmpty = useMemo(
+    () => isDemoStateEmpty(currentDemoState, DEFAULT_TOKEN),
+    [currentDemoState]
+  );
+
+  const applyDemoStatePayload = useCallback((state: DemoStatePayload) => {
+    setBuyer(state.draft.buyer);
+    setSeller(state.draft.seller);
+    setArbiter(state.draft.arbiter);
+    setToken(state.draft.token);
+    setAmount(state.draft.amount);
+    setTimeoutSecs(state.draft.timeoutSecs);
+    setCreatedId(state.createdId);
+    setActionEscrowId(state.actionEscrowId);
+    setReadEscrowId(state.readEscrowId);
+    setResolveFavor(state.resolveFavor);
+    setLog(state.log);
+    const maxId = state.log.reduce((acc, item) => Math.max(acc, item.id), -1);
+    if (maxId >= logId) {
+      logId = maxId + 1;
+    }
+  }, []);
+
+  useEffect(() => {
+    // localStorage requires browser APIs, so load stored demo state after hydration.
+    const loaded = loadDemoStateFromStorage(
+      typeof window !== "undefined" ? window.localStorage : null,
+      DEFAULT_TOKEN
+    );
+    if (!loaded.isEmpty) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      applyDemoStatePayload(loaded.state);
+    }
+    if (loaded.error) {
+      setDemoStateNotice({
+        kind: "err",
+        text: `Stored local demo state could not be loaded: ${loaded.error.message}`,
+      });
+    }
+    setMounted(true);
+  }, [applyDemoStatePayload]);
+
+  useEffect(() => {
+    if (!mounted || typeof window === "undefined") return;
+    try {
+      saveDemoStateToStorage(currentDemoState, window.localStorage);
+    } catch {
+      // Ignore persistence when sensitive material is present in transient draft input;
+      // explicit export/validation surfaces the structured error to the user.
+    }
+  }, [mounted, currentDemoState]);
+
+  const handleExportDemoState = useCallback(() => {
+    try {
+      const json = exportDemoStateJson(currentDemoState);
+      setExportJsonText(json);
+      setDemoStateNotice({
+        kind: "ok",
+        text: `Exported local demo state (${DEMO_STATE_SCHEMA_VERSION}) with ${currentDemoState.log.length} log entries.`,
+      });
+    } catch (e) {
+      setDemoStateNotice({
+        kind: "err",
+        text: `Export rejected: ${(e as Error).message}`,
+      });
+    }
+  }, [currentDemoState]);
+
+  const handleDownloadDemoState = useCallback(() => {
+    try {
+      const json = exportDemoStateJson(currentDemoState);
+      setExportJsonText(json);
+      if (typeof window !== "undefined") {
+        const blob = new Blob([json], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "soroban-forge-demo-state.json";
+        anchor.click();
+        URL.revokeObjectURL(url);
+      }
+      setDemoStateNotice({
+        kind: "ok",
+        text: "Downloaded versioned local demo-state JSON snapshot.",
+      });
+    } catch (e) {
+      setDemoStateNotice({
+        kind: "err",
+        text: `Download rejected: ${(e as Error).message}`,
+      });
+    }
+  }, [currentDemoState]);
+
+  const handleImportDemoState = useCallback(() => {
+    try {
+      const validated = validateDemoStateDocument(exportJsonText);
+      applyDemoStatePayload(validated.state);
+      if (typeof window !== "undefined") {
+        saveDemoStateToStorage(
+          validated.state,
+          window.localStorage,
+          validated.exportedAt
+        );
+      }
+      setConfirmingReset(false);
+      setDemoStateNotice({
+        kind: "ok",
+        text: `Validated and restored local demo state (${validated.schemaVersion}, exported ${validated.exportedAt}).`,
+      });
+    } catch (e) {
+      setDemoStateNotice({
+        kind: "err",
+        text: `Snapshot validation failed: ${(e as Error).message}`,
+      });
+    }
+  }, [applyDemoStatePayload, exportJsonText]);
+
+  const handleConfirmResetDemoState = useCallback(() => {
+    try {
+      const empty = resetDemoStateInStorage(
+        typeof window !== "undefined" ? window.localStorage : null,
+        DEFAULT_TOKEN,
+        { confirmed: true }
+      );
+      applyDemoStatePayload(empty);
+      setExportJsonText("");
+      setConfirmingReset(false);
+      setDemoStateNotice({
+        kind: "info",
+        text: "Local demo state was reset to the clean baseline. Live network config and connected wallet session were preserved.",
+      });
+    } catch (e) {
+      setDemoStateNotice({
+        kind: "err",
+        text: `Reset failed: ${(e as Error).message}`,
+      });
+    }
+  }, [applyDemoStatePayload]);
 
   const pushLog = useCallback(
     (text: string, kind: LogEntry["kind"] = "info") => {
@@ -674,6 +866,121 @@ export default function Home() {
             ))
           )}
         </div>
+      </section>
+
+      {/* Local Demo State (Devtools Only) */}
+      <section className="mt-6 rounded-xl border border-amber-300 bg-amber-50/40 p-4">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-lg font-semibold">
+            6 · Local Demo State (Devtools Only)
+          </h2>
+          <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+            <span className="rounded bg-amber-100 px-2 py-0.5 text-amber-900">
+              {DEMO_STATE_LABEL}
+            </span>
+            <span className="rounded bg-gray-200 px-2 py-0.5 text-gray-800">
+              {DEMO_STATE_SCHEMA_VERSION}
+            </span>
+            <span
+              className={
+                demoStateIsEmpty
+                  ? "rounded bg-gray-100 px-2 py-0.5 text-gray-600"
+                  : "rounded bg-blue-100 px-2 py-0.5 text-blue-800"
+              }
+            >
+              {demoStateIsEmpty ? "empty baseline" : "modified"}
+            </span>
+          </div>
+        </div>
+        <p className="mb-3 text-xs text-gray-600">
+          Persisted under <code className="font-mono">{DEMO_STATE_STORAGE_KEY}</code>.
+          Local demo state is strictly separate from live chain state: exporting or
+          resetting only affects local form drafts, selected escrow IDs, and local
+          activity logs. Live network configuration, on-chain escrow records, and
+          connected wallet sessions are never modified, and secret keys or signed
+          payloads are automatically rejected.
+        </p>
+
+        {demoStateNotice && (
+          <div
+            className={
+              "mb-3 rounded border px-3 py-2 text-xs " +
+              (demoStateNotice.kind === "err"
+                ? "border-red-300 bg-red-50 text-red-800"
+                : demoStateNotice.kind === "ok"
+                  ? "border-green-300 bg-green-50 text-green-800"
+                  : "border-blue-300 bg-blue-50 text-blue-800")
+            }
+          >
+            {demoStateNotice.text}
+          </div>
+        )}
+
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleExportDemoState}
+            className="rounded bg-gray-800 px-3 py-1.5 text-xs text-white hover:bg-gray-900"
+          >
+            Export JSON Snapshot
+          </button>
+          <button
+            type="button"
+            onClick={handleDownloadDemoState}
+            className="rounded border border-gray-400 bg-white px-3 py-1.5 text-xs text-gray-800 hover:bg-gray-100"
+          >
+            Download .json
+          </button>
+          <button
+            type="button"
+            onClick={handleImportDemoState}
+            disabled={!exportJsonText.trim()}
+            className="rounded border border-blue-600 bg-white px-3 py-1.5 text-xs text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+          >
+            Validate &amp; Restore Snapshot
+          </button>
+
+          {!confirmingReset ? (
+            <button
+              type="button"
+              onClick={() => setConfirmingReset(true)}
+              className="ml-auto rounded border border-red-600 bg-white px-3 py-1.5 text-xs text-red-700 hover:bg-red-50"
+            >
+              Reset Local Demo State…
+            </button>
+          ) : (
+            <div className="ml-auto flex flex-wrap items-center gap-2 rounded border border-red-300 bg-red-50 px-2.5 py-1">
+              <span className="text-xs font-medium text-red-800">
+                Confirm reset of local demo state?
+              </span>
+              <button
+                type="button"
+                onClick={handleConfirmResetDemoState}
+                className="rounded bg-red-600 px-2.5 py-1 text-xs text-white hover:bg-red-700"
+              >
+                Confirm Reset
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmingReset(false)}
+                className="rounded border border-gray-300 bg-white px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-100"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
+
+        <label className="block text-xs font-medium text-gray-700">
+          Versioned Demo-State JSON ({DEMO_STATE_SCHEMA_VERSION})
+          <textarea
+            value={exportJsonText}
+            onChange={(e) => setExportJsonText(e.target.value)}
+            rows={6}
+            placeholder="Click 'Export JSON Snapshot' to inspect the current local demo state, or paste a versioned snapshot here and click 'Validate & Restore Snapshot'."
+            className="mt-1 w-full rounded border border-gray-300 bg-white p-2 font-mono text-xs"
+          />
+        </label>
       </section>
     </main>
   );
