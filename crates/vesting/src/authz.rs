@@ -724,3 +724,191 @@ fn reassignment_rejects_old_new_and_outsider_signatures() {
         assert_eq!(client.get_schedule(&id).reassignment_count, 0);
     }
 }
+
+// -----------------------------------------------------------------------
+// Schedule creation and cancellation authorization matrix (Issue #451)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_creation_and_cancellation_authorization_matrix() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let creator = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let third_party = &accounts.user2;
+    let attacker = &accounts.user3;
+
+    // 1. CREATION AUTHORIZATION MATRIX
+    // A. Unauthorized creator / third-party / attacker signing alone must abort at host level
+    for unauthorized_signer in [creator, third_party, attacker] {
+        env.mock_auths(&[MockAuth {
+            address: unauthorized_signer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "create_schedule",
+                args: (creator, beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res =
+            client.try_create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+        assert_auth_abort!(res);
+    }
+
+    // Storage and monotonic counter unchanged: schedule 1 must not exist
+    assert_eq!(
+        client.try_get_schedule(&1).unwrap_err().unwrap(),
+        soroban_forge_shared_utils::ForgeError::NotFound
+    );
+    assert_eq!(
+        client.try_get_status(&1).unwrap_err().unwrap(),
+        soroban_forge_shared_utils::ForgeError::NotFound
+    );
+
+    // B. Authorized beneficiary signature creates the schedule
+    env.mock_auths(&[MockAuth {
+        address: beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create_schedule",
+            args: (creator, beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let sched_id = client
+        .try_create_schedule(creator, beneficiary, &token, &TOTAL, &CLIFF, &DURATION)
+        .expect("outer ok")
+        .expect("contract ok");
+    assert_eq!(sched_id, 1);
+    assert_eq!(client.get_status(&sched_id), VestingStatus::Locked);
+    let sched_record = client.get_schedule(&sched_id);
+    assert_eq!(sched_record.funder, *creator);
+    assert_eq!(sched_record.beneficiary, *beneficiary);
+    assert_eq!(sched_record.total_amount, TOTAL);
+    assert_eq!(sched_record.claimed, 0);
+
+    // 2. CANCELLATION / REVOCATION AUTHORIZATION MATRIX
+    env.ledger().set_timestamp(START + CLIFF + 500); // midway vesting
+
+    // A. Non-creator roles (beneficiary, third-party, attacker) are rejected
+    for unauthorized_caller in [beneficiary, third_party, attacker] {
+        env.mock_auths(&[MockAuth {
+            address: unauthorized_caller,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "revoke",
+                args: (sched_id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_revoke(&sched_id);
+        assert_auth_abort!(res);
+
+        // Assert relevant state remains completely unchanged on rejected calls
+        assert_eq!(client.get_status(&sched_id), VestingStatus::Vesting);
+        let s = client.get_schedule(&sched_id);
+        assert_eq!(s.status, VestingStatus::Locked); // stored status updated on claim/revoke
+        assert_eq!(s.revoked_vested, None);
+        assert_eq!(tc.balance(&contract_id), TOTAL);
+        assert_eq!(tc.balance(creator), 0);
+        assert_eq!(tc.balance(beneficiary), 0);
+    }
+
+    // B. Non-existent schedule revocation rejected with NotFound
+    env.mock_auths(&[MockAuth {
+        address: creator,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (999u64,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_eq!(
+        client.try_revoke(&999u64).unwrap_err().unwrap(),
+        soroban_forge_shared_utils::ForgeError::NotFound
+    );
+
+    // C. Valid creator/funder signature successfully revokes the schedule
+    env.mock_auths(&[MockAuth {
+        address: creator,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (sched_id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_revoke(&sched_id)
+        .expect("outer ok")
+        .expect("revoke ok");
+    assert_eq!(client.get_status(&sched_id), VestingStatus::Revoked);
+    let revoked_record = client.get_schedule(&sched_id);
+    assert_eq!(revoked_record.status, VestingStatus::Revoked);
+    assert!(revoked_record.revoked_vested.is_some());
+
+    // D. Second revocation attempt on already revoked schedule fails with InvalidInput, state preserved
+    env.mock_auths(&[MockAuth {
+        address: creator,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (sched_id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let double_revoke_res = client.try_revoke(&sched_id).unwrap_err().unwrap();
+    assert_eq!(
+        double_revoke_res,
+        soroban_forge_shared_utils::ForgeError::InvalidInput
+    );
+    assert_eq!(client.get_status(&sched_id), VestingStatus::Revoked);
+    assert_eq!(
+        client.get_schedule(&sched_id).revoked_vested,
+        revoked_record.revoked_vested
+    );
+
+    // 3. CLAIM AUTHORIZATION MATRIX ON REVOKED SCHEDULE
+    // A. Creator, third-party, and attacker cannot claim beneficiary's vested tokens
+    for unauthorized_claimer in [creator, third_party, attacker] {
+        env.mock_auths(&[MockAuth {
+            address: unauthorized_claimer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "claim",
+                args: (sched_id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let claim_res = client.try_claim(&sched_id);
+        assert_auth_abort!(claim_res);
+        assert_eq!(tc.balance(beneficiary), 0);
+        assert_eq!(tc.balance(&contract_id), TOTAL);
+    }
+
+    // B. Beneficiary can claim up to the frozen revoked amount
+    let claimable_amount = client.claimable(&sched_id);
+    assert!(claimable_amount > 0);
+    env.mock_auths(&[MockAuth {
+        address: beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "claim",
+            args: (sched_id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let claimed = client
+        .try_claim(&sched_id)
+        .expect("outer ok")
+        .expect("claim ok");
+    assert_eq!(claimed, claimable_amount);
+    assert_eq!(tc.balance(beneficiary), claimed);
+    assert_eq!(tc.balance(&contract_id), TOTAL - claimed);
+    assert_eq!(client.claimable(&sched_id), 0);
+}
