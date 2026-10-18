@@ -43,7 +43,7 @@
 //! nested sub-invocations appear in any tree (unlike the DAO's bond pull).
 
 use crate::{
-    LimitChange, MultiSigWallet, SorobanForgeMultiSigWalletClient, TxKind, TxStatus,
+    LimitChange, MultiSigWallet, SorobanForgeMultiSigWalletClient, TxKind, TxPreview, TxStatus,
     WithdrawalLimit,
 };
 use soroban_forge_test_utils::{MockTarget, TestAccounts};
@@ -1393,4 +1393,33 @@ fn blank_envelope_aborts_remove_withdrawal_limit_and_preserves_policy_and_window
         .expect("contract ok");
     assert_eq!(w_tx, 2);
     assert_eq!(client.get_window_usage(&token), 300);
+}
+
+#[test]
+fn get_tx_preview_is_callable_without_authorization() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let target = env.register(MockTarget, ());
+
+    // Submit a pending transaction with user1 auth
+    env.mock_all_auths();
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
+
+    // Blank envelope: read-only preview requires zero signatures
+    env.set_auths(&[]);
+    let preview = client.get_tx_preview(&tx_id);
+    assert_eq!(
+        preview,
+        TxPreview {
+            status: TxStatus::Pending,
+            threshold: 2,
+            approvals: 0,
+            remaining_approvals: 2,
+        }
+    );
+    assert_eq!(env.auths().len(), 0);
+
+    let remaining = client.get_required_confirmations(&tx_id);
+    assert_eq!(remaining, 2);
+    assert_eq!(env.auths().len(), 0);
 }

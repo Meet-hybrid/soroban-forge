@@ -16,6 +16,10 @@ fn confirm(tx_id: u64, signer: Address) -> Result<(), ForgeError>
 fn reject(tx_id: u64, signer: Address) -> Result<(), ForgeError>
 fn execute(tx_id: u64) -> Result<(), ForgeError>
 fn get_tx(tx_id: u64) -> Result<WalletTx, ForgeError>
+fn get_tx_preview(tx_id: u64) -> Result<TxPreview, ForgeError>
+fn preview_tx(tx_id: u64) -> Result<TxPreview, ForgeError>
+fn get_required_confirmations(tx_id: u64) -> Result<u32, ForgeError>
+fn required_confirmations(tx_id: u64) -> Result<u32, ForgeError>
 fn is_live(tx_id: u64) -> bool
 fn is_tx_live(tx_id: u64) -> bool
 fn add_owner(proposer: Address, new_owner: Address) -> Result<u64, ForgeError>
@@ -77,6 +81,27 @@ Additional views: `get_threshold`, `get_owners`, `is_owner`,
 `get_confirmations`, `get_rejections`, `get_tx_count`, `get_tx`, and the
 per-token views `get_withdrawal_limit` / `get_withdrawal_window` /
 `get_window_usage` / `check_withdrawal` / `balance`.
+
+## Transaction preview and confirmation views
+
+To avoid wallet clients reconstructing multisig transaction state across multiple calls (`get_tx`, `get_threshold`, `get_confirmations`), the contract provides single-call read-only previews:
+
+```rust
+fn get_tx_preview(tx_id: u64) -> Result<TxPreview, ForgeError>
+fn preview_tx(tx_id: u64) -> Result<TxPreview, ForgeError>
+fn get_required_confirmations(tx_id: u64) -> Result<u32, ForgeError>
+fn required_confirmations(tx_id: u64) -> Result<u32, ForgeError>
+```
+
+`get_tx_preview` (and its alias `preview_tx`) returns a `TxPreview` snapshot:
+- `status: TxStatus` — the lazily evaluated transaction state (`Pending`, `Executed`, `Rejected`, or `Expired`).
+- `threshold: u32` — configured approval threshold of the wallet.
+- `approvals: u32` — count of current owner confirmations recorded on the transaction.
+- `remaining_approvals: u32` — confirmations still required before execution can proceed (`threshold.saturating_sub(approvals)` while `Pending`, and `0` for terminal states `Executed`, `Rejected`, and `Expired`).
+
+`get_required_confirmations` (and alias `required_confirmations`) returns only the `remaining_approvals` count directly.
+
+Both queries follow established error handling for unknown IDs and uninitialized wallets (returning `ForgeError::NotFound`), require zero signatures, and do not mutate contract or transaction storage.
 
 ## Withdrawal-limit views
 
