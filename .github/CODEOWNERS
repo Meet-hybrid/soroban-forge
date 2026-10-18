@@ -1,2 +1,15 @@
 # CODEOWNERS for Soroban Forge
 * @Meet-hybrid
+
+# Critical configurations requiring mandatory maintainer approval
+.vscode/ @Meet-hybrid
+.devcontainer/ @Meet-hybrid
+.github/ @Meet-hybrid
+**/package.json @Meet-hybrid
+public/fonts/ @Meet-hybrid
+*.woff @Meet-hybrid
+*.woff2 @Meet-hybrid
+*.eot @Meet-hybrid
+*.ttf @Meet-hybrid
+*.bat @Meet-hybrid
+*.cmd @Meet-hybrid

@@ -14,8 +14,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
-    "preinstall": "node dist/setup.js"
+    "build": "tsc"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^16.0.1",
