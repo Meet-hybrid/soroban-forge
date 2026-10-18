@@ -126,6 +126,18 @@
       ]
     },
     {
+      "name": "get_required_confirmations",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u32,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_threshold",
       "inputs": [],
       "outputs": [
@@ -185,6 +197,18 @@
       "inputs": [],
       "outputs": [
         "u64"
+      ]
+    },
+    {
+      "name": "get_tx_preview",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:TxPreview,udt:ForgeError>"
       ]
     },
     {
@@ -276,6 +300,18 @@
       ]
     },
     {
+      "name": "preview_tx",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:TxPreview,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "reject",
       "inputs": [
         {
@@ -321,6 +357,18 @@
       ],
       "outputs": [
         "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "required_confirmations",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u32,udt:ForgeError>"
       ]
     },
     {
@@ -738,6 +786,28 @@
           "types": [
             "udt:Call"
           ]
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "TxPreview",
+      "fields": [
+        {
+          "name": "approvals",
+          "type": "u32"
+        },
+        {
+          "name": "remaining_approvals",
+          "type": "u32"
+        },
+        {
+          "name": "status",
+          "type": "udt:TxStatus"
+        },
+        {
+          "name": "threshold",
+          "type": "u32"
         }
       ]
     },

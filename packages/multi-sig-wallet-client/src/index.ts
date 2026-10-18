@@ -116,6 +116,30 @@ tx_id: u64;
 
 
 /**
+ * Read-only snapshot of a transaction's approval and execution readiness.
+ */
+export interface TxPreview {
+  /**
+ * Number of owner approvals currently recorded for the transaction.
+ */
+approvals: u32;
+  /**
+ * Number of approvals still required before the transaction can execute.
+ * For terminal states (`Executed`, `Rejected`, `Expired`), this is 0.
+ */
+remaining_approvals: u32;
+  /**
+ * Current lifecycle status of the transaction.
+ */
+status: TxStatus;
+  /**
+ * Configured approval threshold required to execute.
+ */
+threshold: u32;
+}
+
+
+/**
  * A typed token withdrawal record (see [`TxKind::Withdrawal`] and the
  * custody model in the module docs for why this is a record rather than
  * payload bytes).
@@ -434,6 +458,12 @@ export interface Client {
   is_tx_live: ({tx_id}: {tx_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<boolean>>
 
   /**
+   * Construct and simulate a preview_tx transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Read-only alias for `get_tx_preview`.
+   */
+  preview_tx: ({tx_id}: {tx_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<TxPreview>>>
+
+  /**
    * Construct and simulate a submit_call transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Submit a typed cross-contract call as a pending transaction.
    */
@@ -498,6 +528,13 @@ export interface Client {
   get_rejections: ({tx_id}: {tx_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Array<string>>>>
 
   /**
+   * Construct and simulate a get_tx_preview transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Read-only preview of a transaction's status, threshold, approvals,
+   * and confirmations still required.
+   */
+  get_tx_preview: ({tx_id}: {tx_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<TxPreview>>>
+
+  /**
    * Construct and simulate a check_withdrawal transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Simulate a withdrawal against the current policy and custody balance.
    */
@@ -558,11 +595,23 @@ export interface Client {
   get_withdrawal_window: ({token}: {token: string}, options?: MethodOptions) => Promise<AssembledTransaction<WindowState>>
 
   /**
+   * Construct and simulate a required_confirmations transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Read-only alias for `get_required_confirmations`.
+   */
+  required_confirmations: ({tx_id}: {tx_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u32>>>
+
+  /**
    * Construct and simulate a remove_withdrawal_limit transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Propose removing `token`'s rolling withdrawal limit (see the trait
    * docs).
    */
   remove_withdrawal_limit: ({submitter, token}: {submitter: string, token: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+
+  /**
+   * Construct and simulate a get_required_confirmations transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Read the number of remaining confirmations required before `tx_id` can execute.
+   */
+  get_required_confirmations: ({tx_id}: {tx_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u32>>>
 
   /**
    * Construct and simulate a get_transactions_by_status transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -593,6 +642,7 @@ export class Client extends ContractClient {
         "AAAAAgAAAZFXaGF0IGEgc3VibWl0dGVkIHRyYW5zYWN0aW9uIGNhcnJpZXMuCgpUaGUga2luZHMgZW5jb2RlIHRoZSBjdXN0b2R5IHNwbGl0IGRvY3VtZW50ZWQgaW4gdGhlIG1vZHVsZSBkb2NzOgpvcGFxdWUtcGF5bG9hZCB0cmFuc2FjdGlvbnMgZGlzcGF0Y2ggKG91dCBvZiBzY29wZSBoZXJlKSB0aHJvdWdoIHRoZWlyCmBwYXlsb2FkYCBieXRlcywgd2l0aGRyYXdhbCB0cmFuc2FjdGlvbnMgbW92ZSByZWFsIHRva2VucyB0aHJvdWdoIHRoZQp0eXBlZCByZWNvcmQgYmVsb3csIGxpbWl0LWNoYW5nZSB0cmFuc2FjdGlvbnMgcmV0dW5lIHRoZSBwZXItdG9rZW4Kcm9sbGluZyB3aXRoZHJhd2FsIGNhcCwgYW5kIGNhbGwgdHJhbnNhY3Rpb25zIGRpc3BhdGNoIHR5cGVkCmNyb3NzLWNvbnRyYWN0IGludm9jYXRpb25zLgAAAAAAAAAAAAAGVHhLaW5kAAAAAAAHAAAAAAAAAENPcGFxdWUtcGF5bG9hZCB0cmFuc2FjdGlvbjogYFdhbGxldFR4OjpwYXlsb2FkYCBjYXJyaWVzIHRoZSBpbnRlbnQuAAAAAAZPcGFxdWUAAAAAAAEAAAAXVHlwZWQgdG9rZW4gd2l0aGRyYXdhbC4AAAAACldpdGhkcmF3YWwAAAAAAAEAAAfQAAAACldpdGhkcmF3YWwAAAAAAAEAAAA9VGhyZXNob2xkLWdhdGVkIGNoYW5nZSB0byBhIHRva2VuJ3Mgcm9sbGluZyB3aXRoZHJhd2FsIGxpbWl0LgAAAAAAAAtMaW1pdENoYW5nZQAAAAABAAAH0AAAAAtMaW1pdENoYW5nZQAAAAABAAAAKFRocmVzaG9sZC1nYXRlZCBhZGRpdGlvbiBvZiBhIG5ldyBvd25lci4AAAAIQWRkT3duZXIAAAABAAAAEwAAAAEAAAAtVGhyZXNob2xkLWdhdGVkIHJlbW92YWwgb2YgYW4gZXhpc3Rpbmcgb3duZXIuAAAAAAAAC1JlbW92ZU93bmVyAAAAAAEAAAATAAAAAQAAADFUaHJlc2hvbGQtZ2F0ZWQgY2hhbmdlIHRvIHRoZSBhcHByb3ZhbCB0aHJlc2hvbGQuAAAAAAAADFNldFRocmVzaG9sZAAAAAEAAAAEAAAAAQAAABpUeXBlZCBjcm9zcy1jb250cmFjdCBjYWxsLgAAAAAABENhbGwAAAABAAAH0AAAAARDYWxs",
         "AAAAAgAAACtMaWZlY3ljbGUgc3RhdGUgb2YgYSBzdWJtaXR0ZWQgdHJhbnNhY3Rpb24uAAAAAAAAAAAIVHhTdGF0dXMAAAAEAAAAAAAAAC5PcGVuIGZvciBjb25maXJtYXRpb25zOyB0aHJlc2hvbGQgbm90IHlldCBtZXQuAAAAAAAHUGVuZGluZwAAAAAAAAAAKFRocmVzaG9sZCBtZXQgYW5kIGV4ZWN1dGVkIHN1Y2Nlc3NmdWxseS4AAAAIRXhlY3V0ZWQAAAAAAAAAHVZldG9lZCBieSBhbiBvd25lcjsgdGVybWluYWwuAAAAAAAACFJlamVjdGVkAAAAAAAAADlFeHBpcmVkIGJlZm9yZSByZWFjaGluZyB0aGUgYXBwcm92YWwgdGhyZXNob2xkOyB0ZXJtaW5hbC4AAAAAAAAHRXhwaXJlZAA=",
         "AAAAAQAAADBBIHRyYW5zYWN0aW9uIGF3YWl0aW5nIG11bHRpLXNpZ25hdHVyZSBhcHByb3ZhbC4AAAAAAAAACFdhbGxldFR4AAAACQAAACJPd25lcnMgdGhhdCBoYXZlIGNvbmZpcm1lZCBzbyBmYXIuAAAAAAANY29uZmlybWF0aW9ucwAAAAAAA+oAAAATAAAAR09wdGlvbmFsIGxlZGdlciB0aW1lc3RhbXAgYWZ0ZXIgd2hpY2ggdW4tY29uZmlybWVkIHRyYW5zYWN0aW9ucyBleHBpcmUuAAAAAAZleHBpcnkAAAAAA+gAAAAGAAAAXVdoYXQgdGhlIHRyYW5zYWN0aW9uIGNhcnJpZXM6IGFuIG9wYXF1ZSBwYXlsb2FkIG9yIGEgdHlwZWQgdG9rZW4Kd2l0aGRyYXdhbCAoc2VlIFtgVHhLaW5kYF0pLgAAAAAAAARraW5kAAAH0AAAAAZUeEtpbmQAAAAAADZUaGUgZW5jb2RlZCB0cmFuc2FjdGlvbiBwYXlsb2FkIHRvIHBhc3MgdG8gdGhlIHRhcmdldC4AAAAAAAdwYXlsb2FkAAAAAA4AAAAqT3duZXJzIHRoYXQgaGF2ZSBmb3JtYWxseSBvYmplY3RlZCBzbyBmYXIuAAAAAAAKcmVqZWN0aW9ucwAAAAAD6gAAABMAAAAOQ3VycmVudCBzdGF0ZS4AAAAAAAZzdGF0dXMAAAAAB9AAAAAIVHhTdGF0dXMAAAAnQWRkcmVzcyB0aGF0IHN1Ym1pdHRlZCB0aGUgdHJhbnNhY3Rpb24uAAAAAAlzdWJtaXR0ZXIAAAAAAAATAAAAK1RoZSB0YXJnZXQgY29udHJhY3QgdG8gaW52b2tlIG9uIGV4ZWN1dGlvbi4AAAAABnRhcmdldAAAAAAAEwAAAC5TdGFibGUgaWRlbnRpZmllciBhc3NpZ25lZCBhdCBzdWJtaXNzaW9uIHRpbWUuAAAAAAAFdHhfaWQAAAAAAAAG",
+        "AAAAAQAAAEdSZWFkLW9ubHkgc25hcHNob3Qgb2YgYSB0cmFuc2FjdGlvbidzIGFwcHJvdmFsIGFuZCBleGVjdXRpb24gcmVhZGluZXNzLgAAAAAAAAAACVR4UHJldmlldwAAAAAAAAQAAABBTnVtYmVyIG9mIG93bmVyIGFwcHJvdmFscyBjdXJyZW50bHkgcmVjb3JkZWQgZm9yIHRoZSB0cmFuc2FjdGlvbi4AAAAAAAAJYXBwcm92YWxzAAAAAAAABAAAAIpOdW1iZXIgb2YgYXBwcm92YWxzIHN0aWxsIHJlcXVpcmVkIGJlZm9yZSB0aGUgdHJhbnNhY3Rpb24gY2FuIGV4ZWN1dGUuCkZvciB0ZXJtaW5hbCBzdGF0ZXMgKGBFeGVjdXRlZGAsIGBSZWplY3RlZGAsIGBFeHBpcmVkYCksIHRoaXMgaXMgMC4AAAAAABNyZW1haW5pbmdfYXBwcm92YWxzAAAAAAQAAAAsQ3VycmVudCBsaWZlY3ljbGUgc3RhdHVzIG9mIHRoZSB0cmFuc2FjdGlvbi4AAAAGc3RhdHVzAAAAAAfQAAAACFR4U3RhdHVzAAAAMkNvbmZpZ3VyZWQgYXBwcm92YWwgdGhyZXNob2xkIHJlcXVpcmVkIHRvIGV4ZWN1dGUuAAAAAAAJdGhyZXNob2xkAAAAAAAABA==",
         "AAAAAQAAAJlBIHR5cGVkIHRva2VuIHdpdGhkcmF3YWwgcmVjb3JkIChzZWUgW2BUeEtpbmQ6OldpdGhkcmF3YWxgXSBhbmQgdGhlCmN1c3RvZHkgbW9kZWwgaW4gdGhlIG1vZHVsZSBkb2NzIGZvciB3aHkgdGhpcyBpcyBhIHJlY29yZCByYXRoZXIgdGhhbgpwYXlsb2FkIGJ5dGVzKS4AAAAAAAAAAAAACldpdGhkcmF3YWwAAAAAAAMAAAAhQW1vdW50IHRvIG1vdmU7IG11c3QgYmUgcG9zaXRpdmUuAAAAAAAABmFtb3VudAAAAAAACwAAABhSZWNpcGllbnQgb2YgdGhlIHRva2Vucy4AAAALZGVzdGluYXRpb24AAAAAEwAAACRTRVAtNDEgdG9rZW4gdG8gbW92ZSBvdXQgb2YgY3VzdG9keS4AAAAFdG9rZW4AAAAAAAAT",
         "AAAAAgAAAD9SZXN1bHQgb2Ygc2ltdWxhdGluZyBhIHdpdGhkcmF3YWwgYWdhaW5zdCBjdXJyZW50IHdhbGxldCBzdGF0ZS4AAAAAAAAAAAtDaGVja1Jlc3VsdAAAAAAGAAAAAAAAADhUaGUgYW1vdW50IHBhc3NlcyB0aGUgY3VycmVudCBwb2xpY3kgYW5kIGZ1bmRpbmcgY2hlY2tzLgAAAAdBbGxvd2VkAAAAAAAAAAAkVGhlIHdhbGxldCBoYXMgbm90IGJlZW4gaW5pdGlhbGl6ZWQuAAAAFFdhbGxldE5vdEluaXRpYWxpemVkAAAAAAAAACRXaXRoZHJhd2FsIGFtb3VudHMgbXVzdCBiZSBwb3NpdGl2ZS4AAAANSW52YWxpZEFtb3VudAAAAAAAAAAAAAAkVGhlIHJvbGxpbmcgbGltaXQgd291bGQgYmUgZXhjZWVkZWQuAAAADUxpbWl0RXhjZWVkZWQAAAAAAAAAAAAAM1RoZSB3YWxsZXQncyByZWNvcmRlZCBjdXN0b2R5IGJhbGFuY2UgaXMgdG9vIHNtYWxsLgAAAAARSW5zdWZmaWNpZW50RnVuZHMAAAAAAAAAAAAAQEFkZGluZyB0aGUgYW1vdW50IHRvIGN1cnJlbnQgd2luZG93IHVzYWdlIHdvdWxkIG92ZXJmbG93IGBpMTI4YC4AAAASQXJpdGhtZXRpY092ZXJmbG93AAA=",
         "AAAAAgAAAFtBIHRocmVzaG9sZC1nYXRlZCBjaGFuZ2UgdG8gYSB0b2tlbidzIHdpdGhkcmF3YWwgbGltaXQsIGNhcnJpZWQgYnkKW2BUeEtpbmQ6OkxpbWl0Q2hhbmdlYF0uAAAAAAAAAAALTGltaXRDaGFuZ2UAAAAAAgAAAAEAAAA+SW5zdGFsbCBvciByZXBsYWNlIGEgbGltaXQgKHZhbGlkYXRlZCBwb3NpdGl2ZSBhdCBzdWJtaXNzaW9uKS4AAAAAAANTZXQAAAAAAQAAB9AAAAAPV2l0aGRyYXdhbExpbWl0AAAAAAEAAABDRHJvcCB0aGUgbGltaXQgZm9yIHRoZSB0b2tlbiwgbWFraW5nIGl0cyB3aXRoZHJhd2FscyB1bmNvbnN0cmFpbmVkLgAAAAAGUmVtb3ZlAAAAAAABAAAAEw==",
@@ -612,6 +662,7 @@ export class Client extends ContractClient {
         "AAAAAAAAAJVSZWFkIHRoZSBjb25maWd1cmVkIG93bmVyIHNldCwgaW4gaW5pdGlhbGl6YXRpb24gb3JkZXIgKHJlYWQtb25seSB2aWV3KS4KCiMgRXJyb3JzCgoqIFtgRm9yZ2VFcnJvcjo6Tm90SW5pdGlhbGl6ZWRgXSDigJQgdGhlIHdhbGxldCBoYXMgbm8gb3duZXIgc2V0LgAAAAAAAApnZXRfb3duZXJzAAAAAAAAAAAAAQAAA+kAAAPqAAAAEwAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAAAAANNDb25maWd1cmUgdGhlIHdhbGxldCBmb3IgdGhlIGZpcnN0IGFuZCBvbmx5IHRpbWUuCgpSZXF1aXJlcyBhIG5vbi1lbXB0eSBvd25lciBzZXQgd2l0aCBubyBkdXBsaWNhdGVzIGFuZApgMCA8IHRocmVzaG9sZCA8PSBvd25lcnMubGVuKClgLiBUaGUgY2FsbGVyIGRlcGxveXMgdGhlIHdhbGxldCBhbmQKaW5pdGlhbGlzZXMgaXQgaW4gdGhlIHNhbWUgdHJhbnNhY3Rpb24uAAAAAAppbml0aWFsaXplAAAAAAACAAAAAAAAAAZvd25lcnMAAAAAA+oAAAATAAAAAAAAAAl0aHJlc2hvbGQAAAAAAAAEAAAAAQAAA+kAAAACAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAAB5SZWFkLW9ubHkgYWxpYXMgZm9yIGBpc19saXZlYC4AAAAAAAppc190eF9saXZlAAAAAAABAAAAAAAAAAV0eF9pZAAAAAAAAAYAAAABAAAAAQ==",
+        "AAAAAAAAACVSZWFkLW9ubHkgYWxpYXMgZm9yIGBnZXRfdHhfcHJldmlld2AuAAAAAAAACnByZXZpZXdfdHgAAAAAAAEAAAAAAAAABXR4X2lkAAAAAAAABgAAAAEAAAPpAAAH0AAAAAlUeFByZXZpZXcAAAAAAAfQAAAACkZvcmdlRXJyb3IAAA==",
         "AAAAAAAAADxTdWJtaXQgYSB0eXBlZCBjcm9zcy1jb250cmFjdCBjYWxsIGFzIGEgcGVuZGluZyB0cmFuc2FjdGlvbi4AAAALc3VibWl0X2NhbGwAAAAABQAAAAAAAAAJc3VibWl0dGVyAAAAAAAAEwAAAAAAAAAGdGFyZ2V0AAAAAAATAAAAAAAAAAdmbl9uYW1lAAAAABEAAAAAAAAABGFyZ3MAAAPqAAAAAAAAAAAAAAAGZXhwaXJ5AAAAAAPoAAAABgAAAAEAAAPpAAAABgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAAAAAOpSZWFkIHRoZSBudW1iZXIgb2YgdHJhbnNhY3Rpb25zIHN1Ym1pdHRlZCBzbyBmYXIgKHJlYWQtb25seSB2aWV3KS4KClRoZSBgQ291bnRgIGNvdW50ZXIgb25seSBhZHZhbmNlcyBvbiBzdWNjZXNzZnVsIGBzdWJtaXRgLwpgc3VibWl0X3dpdGhkcmF3YWxgLCBzbyB0aGlzIG1hdGNoZXMgdGhlIG51bWJlciBvZiByZWNvcmRlZAp0cmFuc2FjdGlvbnMuIFVuaW5pdGlhbGl6ZWQgd2FsbGV0cyByZWFkIGFzIGAwYC4AAAAAAAxnZXRfdHhfY291bnQAAAAAAAAAAQAAAAY=",
         "AAAAAAAAAUZQcm9wb3NlIHJlbW92aW5nIGBleGlzdGluZ19vd25lcmAgZnJvbSB0aGUgb3duZXIgc2V0IChzZWUgdGhlIHRyYWl0CmRvY3MpLgoKQ3JlYXRlcyBvbmx5IGEgcGVuZGluZyBnb3Zlcm5hbmNlIFtgVHhLaW5kOjpSZW1vdmVPd25lcmBdIHR4OyB0aGUKb3duZXIgc2V0IGlzIHVudG91Y2hlZCB1bnRpbCB0aGUgdGhyZXNob2xkLWFwcHJvdmVkIGBleGVjdXRlYCBhcHBsaWVzCml0LiBSZW1vdmluZyB0aGUgZmluYWwgb3duZXIgaXMgcmVqZWN0ZWQgYXQgc3VibWlzc2lvbiBzbyBhIHBlbmRpbmcKcHJvcG9zYWwgY2FuIG5ldmVyIGxlYXZlIHRoZSB3YWxsZXQgb3duZXJsZXNzLgAAAAAADHJlbW92ZV9vd25lcgAAAAIAAAAAAAAACXN1Ym1pdHRlcgAAAAAAABMAAAAAAAAADmV4aXN0aW5nX293bmVyAAAAAAATAAAAAQAAA+kAAAAGAAAH0AAAAApGb3JnZUVycm9yAAA=",
@@ -619,6 +670,7 @@ export class Client extends ContractClient {
         "AAAAAAAAADhSZWFkIHRoZSBjb25maWd1cmVkIGFwcHJvdmFsIHRocmVzaG9sZCAocmVhZC1vbmx5IHZpZXcpLgAAAA1nZXRfdGhyZXNob2xkAAAAAAAAAAAAAAEAAAPpAAAABAAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAAAAARJQcm9wb3NlIGNoYW5naW5nIHRoZSBhcHByb3ZhbCB0aHJlc2hvbGQgdG8gYG5ld190aHJlc2hvbGRgIChzZWUgdGhlCnRyYWl0IGRvY3MpLgoKQ3JlYXRlcyBvbmx5IGEgcGVuZGluZyBnb3Zlcm5hbmNlIFtgVHhLaW5kOjpTZXRUaHJlc2hvbGRgXSB0eC4gVGhlCnRocmVzaG9sZCBpcyB2YWxpZGF0ZWQgYWdhaW5zdCB0aGUgY3VycmVudCBvd25lciBzZXQgYXQgc3VibWlzc2lvbiBhbmQKcmUtdmFsaWRhdGVkIGFnYWluc3QgdGhlIHJlc3VsdGluZyBzdGF0ZSBhdCBleGVjdXRpb24uAAAAAAANc2V0X3RocmVzaG9sZAAAAAAAAAIAAAAAAAAACXN1Ym1pdHRlcgAAAAAAABMAAAAAAAAADW5ld190aHJlc2hvbGQAAAAAAAAEAAAAAQAAA+kAAAAGAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAAM1SZWFkIHRoZSByZWplY3Rpb24gbGlzdCByZWNvcmRlZCBmb3IgYHR4X2lkYCwgaW4gdGhlIG9yZGVyIHRoZQpyZWplY3Rpb25zIHdlcmUgcmVjb3JkZWQgKHJlYWQtb25seSB0d2luIG9mIGBXYWxsZXRUeDo6cmVqZWN0aW9uc2ApLgoKIyBFcnJvcnMKCiogW2BGb3JnZUVycm9yOjpOb3RGb3VuZGBdIOKAlCBubyB0cmFuc2FjdGlvbiB3aXRoIGlkIGB0eF9pZGAuAAAAAAAADmdldF9yZWplY3Rpb25zAAAAAAABAAAAAAAAAAV0eF9pZAAAAAAAAAYAAAABAAAD6QAAA+oAAAATAAAH0AAAAApGb3JnZUVycm9yAAA=",
+        "AAAAAAAAAGRSZWFkLW9ubHkgcHJldmlldyBvZiBhIHRyYW5zYWN0aW9uJ3Mgc3RhdHVzLCB0aHJlc2hvbGQsIGFwcHJvdmFscywKYW5kIGNvbmZpcm1hdGlvbnMgc3RpbGwgcmVxdWlyZWQuAAAADmdldF90eF9wcmV2aWV3AAAAAAABAAAAAAAAAAV0eF9pZAAAAAAAAAYAAAABAAAD6QAAB9AAAAAJVHhQcmV2aWV3AAAAAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAAEVTaW11bGF0ZSBhIHdpdGhkcmF3YWwgYWdhaW5zdCB0aGUgY3VycmVudCBwb2xpY3kgYW5kIGN1c3RvZHkgYmFsYW5jZS4AAAAAAAAQY2hlY2tfd2l0aGRyYXdhbAAAAAIAAAAAAAAABXRva2VuAAAAAAAAEwAAAAAAAAAGYW1vdW50AAAAAAALAAAAAQAAB9AAAAALQ2hlY2tSZXN1bHQA",
         "AAAAAAAAAEJSZWFkIHRyYW5zYWN0aW9ucyBpbiBhc2NlbmRpbmcgaWQgb3JkZXIsIHdpdGggYSB6ZXJvLWJhc2VkIG9mZnNldC4AAAAAABBnZXRfdHJhbnNhY3Rpb25zAAAAAgAAAAAAAAAGb2Zmc2V0AAAAAAAEAAAAAAAAAAVsaW1pdAAAAAAAAAQAAAABAAAD6QAAA+oAAAfQAAAACFdhbGxldFR4AAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAALlSZWFkIGB0b2tlbmAncyBjdXJyZW50IGluLXdpbmRvdyB3aXRoZHJhd2FsIHRvdGFsIChyZWFkLW9ubHkgdmlldykuCgpFeHBpcmVkIGVudHJpZXMgYXJlIGV4Y2x1ZGVkLiBSZWFkcyBhcyBgMGAgd2hlbiBubyBsaW1pdCBpcwpjb25maWd1cmVkLCBiZWNhdXNlIHRoZSB3aW5kb3cgaXMgZGVmaW5lZCBieSB0aGF0IGxpbWl0LgAAAAAAABBnZXRfd2luZG93X3VzYWdlAAAAAQAAAAAAAAAFdG9rZW4AAAAAAAATAAAAAQAAAAs=",
@@ -627,7 +679,9 @@ export class Client extends ContractClient {
         "AAAAAAAAAERSZWFkIGB0b2tlbmAncyBjb25maWd1cmVkIHJvbGxpbmcgd2l0aGRyYXdhbCBsaW1pdCAocmVhZC1vbmx5IHZpZXcpLgAAABRnZXRfd2l0aGRyYXdhbF9saW1pdAAAAAEAAAAAAAAABXRva2VuAAAAAAAAEwAAAAEAAAPoAAAH0AAAAA9XaXRoZHJhd2FsTGltaXQA",
         "AAAAAAAAAKhQcm9wb3NlIGEgcm9sbGluZyB3aXRoZHJhd2FsIGxpbWl0IGZvciBgdG9rZW5gIChzZWUgdGhlIHRyYWl0IGRvY3MpLgoKT25seSB0aGUgdGhyZXNob2xkLWFwcHJvdmVkIGBleGVjdXRlYCBhcHBsaWVzIGl0LCBzbyBhCnBhcnRpYWwtdGhyZXNob2xkIHByb3Bvc2FsIGNoYW5nZXMgbm90aGluZy4AAAAUc2V0X3dpdGhkcmF3YWxfbGltaXQAAAAEAAAAAAAAAAlzdWJtaXR0ZXIAAAAAAAATAAAAAAAAAAV0b2tlbgAAAAAAABMAAAAAAAAABmFtb3VudAAAAAAACwAAAAAAAAAOd2luZG93X3NlY29uZHMAAAAAAAYAAAABAAAD6QAAAAYAAAfQAAAACkZvcmdlRXJyb3IAAA==",
         "AAAAAAAAAENSZWFkIHRoZSBhY3RpdmUgcm9sbGluZyB3aW5kb3cgZm9yIGB0b2tlbmAgd2l0aG91dCBwcnVuaW5nIHN0b3JhZ2UuAAAAABVnZXRfd2l0aGRyYXdhbF93aW5kb3cAAAAAAAABAAAAAAAAAAV0b2tlbgAAAAAAABMAAAABAAAH0AAAAAtXaW5kb3dTdGF0ZQA=",
+        "AAAAAAAAADFSZWFkLW9ubHkgYWxpYXMgZm9yIGBnZXRfcmVxdWlyZWRfY29uZmlybWF0aW9uc2AuAAAAAAAAFnJlcXVpcmVkX2NvbmZpcm1hdGlvbnMAAAAAAAEAAAAAAAAABXR4X2lkAAAAAAAABgAAAAEAAAPpAAAABAAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAAAAAElQcm9wb3NlIHJlbW92aW5nIGB0b2tlbmAncyByb2xsaW5nIHdpdGhkcmF3YWwgbGltaXQgKHNlZSB0aGUgdHJhaXQKZG9jcykuAAAAAAAAF3JlbW92ZV93aXRoZHJhd2FsX2xpbWl0AAAAAAIAAAAAAAAACXN1Ym1pdHRlcgAAAAAAABMAAAAAAAAABXRva2VuAAAAAAAAEwAAAAEAAAPpAAAABgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
+        "AAAAAAAAAE9SZWFkIHRoZSBudW1iZXIgb2YgcmVtYWluaW5nIGNvbmZpcm1hdGlvbnMgcmVxdWlyZWQgYmVmb3JlIGB0eF9pZGAgY2FuIGV4ZWN1dGUuAAAAABpnZXRfcmVxdWlyZWRfY29uZmlybWF0aW9ucwAAAAAAAQAAAAAAAAAFdHhfaWQAAAAAAAAGAAAAAQAAA+kAAAAEAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAAHFSZWFkIG1hdGNoaW5nIHRyYW5zYWN0aW9ucywgYXBwbHlpbmcgb2Zmc2V0IGFuZCBsaW1pdCB0byB0aGUgZmlsdGVyZWQKc2VxdWVuY2UgaW4gYXNjZW5kaW5nIHRyYW5zYWN0aW9uLWlkIG9yZGVyLgAAAAAAABpnZXRfdHJhbnNhY3Rpb25zX2J5X3N0YXR1cwAAAAAAAwAAAAAAAAAGc3RhdHVzAAAAAAfQAAAACFR4U3RhdHVzAAAAAAAAAAZvZmZzZXQAAAAAAAQAAAAAAAAABWxpbWl0AAAAAAAABAAAAAEAAAPpAAAD6gAAB9AAAAAIV2FsbGV0VHgAAAfQAAAACkZvcmdlRXJyb3IAAA==",
         "AAAABQAAAAAAAAAAAAAAClR4RXhlY3V0ZWQAAAAAAAEAAAALdHhfZXhlY3V0ZWQAAAAAAwAAAAAAAAAFdHhfaWQAAAAAAAAGAAAAAQAAAAAAAAATY29uZmlybWF0aW9uc19jb3VudAAAAAAEAAAAAAAAAAAAAAAJdGhyZXNob2xkAAAAAAAABAAAAAAAAAAC",
         "AAAABQAAAAAAAAAAAAAAClR4UmVqZWN0ZWQAAAAAAAEAAAALdHhfcmVqZWN0ZWQAAAAAAgAAAAAAAAAFdHhfaWQAAAAAAAAGAAAAAQAAAAAAAAAIcmVqZWN0b3IAAAATAAAAAAAAAAI=",
@@ -654,6 +708,7 @@ export class Client extends ContractClient {
         get_owners: this.txFromJSON<Result<Array<string>>>,
         initialize: this.txFromJSON<Result<void>>,
         is_tx_live: this.txFromJSON<boolean>,
+        preview_tx: this.txFromJSON<Result<TxPreview>>,
         submit_call: this.txFromJSON<Result<u64>>,
         get_tx_count: this.txFromJSON<u64>,
         remove_owner: this.txFromJSON<Result<u64>>,
@@ -661,6 +716,7 @@ export class Client extends ContractClient {
         get_threshold: this.txFromJSON<Result<u32>>,
         set_threshold: this.txFromJSON<Result<u64>>,
         get_rejections: this.txFromJSON<Result<Array<string>>>,
+        get_tx_preview: this.txFromJSON<Result<TxPreview>>,
         check_withdrawal: this.txFromJSON<CheckResult>,
         get_transactions: this.txFromJSON<Result<Array<WalletTx>>>,
         get_window_usage: this.txFromJSON<i128>,
@@ -669,7 +725,9 @@ export class Client extends ContractClient {
         get_withdrawal_limit: this.txFromJSON<Option<WithdrawalLimit>>,
         set_withdrawal_limit: this.txFromJSON<Result<u64>>,
         get_withdrawal_window: this.txFromJSON<WindowState>,
+        required_confirmations: this.txFromJSON<Result<u32>>,
         remove_withdrawal_limit: this.txFromJSON<Result<u64>>,
+        get_required_confirmations: this.txFromJSON<Result<u32>>,
         get_transactions_by_status: this.txFromJSON<Result<Array<WalletTx>>>
   }
 }

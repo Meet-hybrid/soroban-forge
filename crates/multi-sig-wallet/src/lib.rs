@@ -5014,7 +5014,6 @@ mod tests {
         let tx_id2 = client2.submit(&accounts2.user1, &target(&env2), &payload(&env2), &None);
         client2.confirm(&tx_id2, &accounts2.user1);
         client2.reject(&tx_id2, &accounts2.user2);
-        client2.reject(&tx_id2, &accounts2.user3);
 
         let preview2 = client2.get_tx_preview(&tx_id2);
         assert_eq!(preview2.status, TxStatus::Rejected);

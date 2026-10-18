@@ -1424,6 +1424,9 @@ fn get_tx_preview_is_callable_without_authorization() {
     let remaining = client.get_required_confirmations(&tx_id);
     assert_eq!(remaining, 2);
     assert_eq!(env.auths().len(), 0);
+}
+
+#[test]
 fn governance_entrypoints_require_the_declared_submitter_and_preserve_state() {
     let (env, contract_id, client, accounts) = setup!();
     initialize_wallet(&env, &client, &accounts);
