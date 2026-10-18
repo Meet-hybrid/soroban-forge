@@ -1,0 +1,46 @@
+{
+  "contract": {
+    "id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+    "name": "soroban-forge-vesting"
+  },
+  "description": "Deterministic vesting reassignment events from Soroban Forge.",
+  "events": [
+    {
+      "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+      "eventIndex": 0,
+      "id": "0-0",
+      "inSuccessfulContractCall": true,
+      "ledger": 0,
+      "ledgerClosedAt": "2026-09-23T00:00:00.000Z",
+      "operationIndex": 0,
+      "pagingToken": "0-0",
+      "topic": [
+        "AAAADwAAABtiZW5lZmljaWFyeV9yZWFzc2lnbmVkX2Zyb20A",
+        "AAAABQAAAAAAAAAB",
+        "AAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABA=="
+      ],
+      "transactionHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "type": "contract",
+      "value": "AAAAEQAAAAEAAAADAAAADwAAAA9uZXdfYmVuZWZpY2lhcnkAAAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAAA8AAAAScmVhc3NpZ25tZW50X2NvdW50AAAAAAADAAAAAQAAAA8AAAAQdmVzdGVkX3VuY2xhaW1lZAAAAAoAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+      "eventIndex": 1,
+      "id": "0-1",
+      "inSuccessfulContractCall": true,
+      "ledger": 0,
+      "ledgerClosedAt": "2026-09-23T00:00:00.000Z",
+      "operationIndex": 0,
+      "pagingToken": "0-1",
+      "topic": [
+        "AAAADwAAABliZW5lZmljaWFyeV9yZWFzc2lnbmVkX3RvAAAA",
+        "AAAABQAAAAAAAAAB",
+        "AAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQ=="
+      ],
+      "transactionHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "type": "contract",
+      "value": "AAAAEQAAAAEAAAADAAAADwAAAA9vbGRfYmVuZWZpY2lhcnkAAAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAA8AAAAScmVhc3NpZ25tZW50X2NvdW50AAAAAAADAAAAAQAAAA8AAAAQdmVzdGVkX3VuY2xhaW1lZAAAAAoAAAAAAAAAAAAAAAAAAAAA"
+    }
+  ],
+  "schema": 1
+}

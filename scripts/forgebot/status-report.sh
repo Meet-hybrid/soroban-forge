@@ -17,7 +17,7 @@
 #   FORGEBOT_REPO          required  owner/repo
 #   FORGEBOT_RUN_ID        required  the completed `CI` workflow run to report on
 #   FORGEBOT_LOGIN         optional  comment author to update (default: github-actions[bot])
-#   FORGEBOT_BASE_BRANCH   optional  base branch of the campaign (default: main)
+#   FORGEBOT_BASE_BRANCH   optional  base branch of the campaign (default: develop)
 #   FORGEBOT_CI_WORKFLOW   optional  CI workflow file name (default: ci.yml)
 #   FORGEBOT_DRY_RUN       optional  set to 1 to print the comment instead of posting
 #
@@ -47,7 +47,7 @@ fail() {
   || fail "FORGEBOT_RUN_ID must be a numeric workflow run ID, got: ${FORGEBOT_RUN_ID}"
 
 FORGEBOT_LOGIN="${FORGEBOT_LOGIN:-github-actions[bot]}"
-FORGEBOT_BASE_BRANCH="${FORGEBOT_BASE_BRANCH:-main}"
+FORGEBOT_BASE_BRANCH="${FORGEBOT_BASE_BRANCH:-develop}"
 FORGEBOT_CI_WORKFLOW="${FORGEBOT_CI_WORKFLOW:-ci.yml}"
 FORGEBOT_DRY_RUN="${FORGEBOT_DRY_RUN:-0}"
 
@@ -124,12 +124,14 @@ jobs_json=$(gh api -X GET "${API}/actions/runs/${FORGEBOT_RUN_ID}/jobs" -f per_p
   || fail "cannot list jobs for run ${FORGEBOT_RUN_ID}"
 
 total_count=$(jq '(.jobs // []) | length' <<<"$jobs_json")
-not_passed=$(jq -c '[.jobs[]? | select((.conclusion // "pending") as $c
-  | ($c != "success" and $c != "skipped" and $c != "neutral"))]' <<<"$jobs_json")
-not_passed_count=$(jq 'length' <<<"$not_passed")
-passed_count=$((total_count - not_passed_count))
+passed_count=$(jq '[.jobs[]? | select(.conclusion == "success")] | length' <<<"$jobs_json")
+skipped_count=$(jq '[.jobs[]? | select(.conclusion == "skipped" or .conclusion == "neutral")] | length' <<<"$jobs_json")
+pending_count=$(jq '[.jobs[]? | select(.conclusion == null or .conclusion == "queued" or .conclusion == "in_progress" or .conclusion == "pending")] | length' <<<"$jobs_json")
+failed_count=$(jq '[.jobs[]? | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "stale")] | length' <<<"$jobs_json")
 
-failed_lines=$(jq -r '.[] | "- `\(.name)` — \(.conclusion // "pending")"' <<<"$not_passed")
+attention_lines=$(jq -r '.jobs[]?
+  | select(.conclusion == null or .conclusion == "queued" or .conclusion == "in_progress" or .conclusion == "pending" or .conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "stale")
+  | "- `\(.name)` — \(.conclusion // "pending")"' <<<"$jobs_json")
 
 # ---------------------------------------------------------------------------
 # 5. Pull request metadata.
@@ -137,7 +139,12 @@ failed_lines=$(jq -r '.[] | "- `\(.name)` — \(.conclusion // "pending")"' <<<"
 pr_json=$(gh api "${API}/pulls/${pr_number}") || fail "cannot read pull request #${pr_number}"
 is_draft=$(jq -r '.draft // false' <<<"$pr_json")
 pr_author=$(jq -r '.user.login // "unknown"' <<<"$pr_json")
+pr_title=$(jq -r '.title // "Untitled pull request"' <<<"$pr_json")
+base_branch=$(jq -r '.base.ref // "unknown"' <<<"$pr_json")
 pr_url=$(jq -r '.html_url // ""' <<<"$pr_json")
+changed_file_count=$(jq -r '.changed_files // 0' <<<"$pr_json")
+addition_count=$(jq -r '.additions // 0' <<<"$pr_json")
+deletion_count=$(jq -r '.deletions // 0' <<<"$pr_json")
 
 # ---------------------------------------------------------------------------
 # 6. Flag infrastructure files that always deserve maintainer scrutiny.
@@ -160,22 +167,31 @@ done <<<"$changed_files"
 # ---------------------------------------------------------------------------
 # 7. Compose the result summary.
 # ---------------------------------------------------------------------------
-if [[ "$not_passed_count" -eq 0 ]]; then
-  result_emoji="✅"
-  if [[ "$is_draft" == "true" ]]; then
-    result_title="All CI checks passed — draft PR, mark it ready for review when you are done"
-    status_state="pending"
-    status_desc="CI passed; pull request is still a draft"
-  else
-    result_title="All CI checks passed — ready for maintainer review"
-    status_state="success"
-    status_desc="All CI checks passed; awaiting human maintainer review"
-  fi
-else
-  result_emoji="❌"
-  result_title="${not_passed_count} of ${total_count} checks need attention — this PR is not ready to merge yet"
+if [[ "$total_count" -eq 0 ]]; then
+  result_emoji="⏳"
+  result_title="CI returned no jobs — waiting for a usable result"
+  status_state="pending"
+  status_desc="CI returned no jobs"
+elif [[ "$failed_count" -gt 0 ]]; then
+  result_emoji="🚦"
+  result_title="Action needed before this pull request can move forward"
   status_state="failure"
-  status_desc="${not_passed_count} of ${total_count} CI checks did not pass"
+  status_desc="${failed_count} CI check(s) need attention"
+elif [[ "$pending_count" -gt 0 ]]; then
+  result_emoji="⏳"
+  result_title="CI is still running — the final review signal is not ready"
+  status_state="pending"
+  status_desc="CI is still running"
+elif [[ "$is_draft" == "true" ]]; then
+  result_emoji="📝"
+  result_title="Automated checks passed — this draft is not yet ready for review"
+  status_state="pending"
+  status_desc="CI passed; pull request is still a draft"
+else
+  result_emoji="✅"
+  result_title="Automated checks passed — ready for maintainer review"
+  status_state="success"
+  status_desc="All CI checks passed; awaiting human maintainer review"
 fi
 
 short_sha="${head_sha:0:7}"
@@ -184,24 +200,31 @@ trap 'rm -f "$body_file"' EXIT
 
 {
   printf '%s\n' "$MARKER"
-  printf '## %s ForgeBot — CI status\n\n' "$result_emoji"
-  printf '**%s**\n\n' "$result_title"
-  printf -- '- Run: [CI #%s](%s)\n' "$FORGEBOT_RUN_ID" "$run_url"
-  printf -- '- Commit: `%s`\n' "$short_sha"
-  printf -- '- Checks: %s/%s passed\n' "$passed_count" "$total_count"
-  printf -- '- Author: @%s\n\n' "$pr_author"
+  printf '## %s ForgeBot — review brief\n\n' "$result_emoji"
+  printf '> **%s**\n\n' "$result_title"
+  printf '**Pull request:** [%s](%s)\n\n' "$pr_title" "$pr_url"
+
+  printf '### At a glance\n\n'
+  printf '| Signal | Result |\n| --- | --- |\n'
+  printf '| CI run | [#%s](%s) |\n' "$FORGEBOT_RUN_ID" "$run_url"
+  printf '| Commit | `%s` |\n' "$short_sha"
+  printf '| Target | `%s` |\n' "$base_branch"
+  printf '| Author | @%s |\n' "$pr_author"
+  printf '| Scope | %s file(s), +%s / -%s lines |\n' "$changed_file_count" "$addition_count" "$deletion_count"
+  printf '| Checks | %s passed · %s skipped · %s pending · %s needing attention |\n\n' \
+    "$passed_count" "$skipped_count" "$pending_count" "$failed_count"
 
   if [[ "$is_draft" == "true" ]]; then
     printf 'This pull request is currently a **draft**, so it is not yet queued for maintainer review.\n\n'
   fi
 
-  if [[ "$not_passed_count" -gt 0 ]]; then
-    printf '### Checks that need attention\n\n%s\n\n' "$failed_lines"
+  if [[ "$failed_count" -gt 0 ]]; then
+    printf '### Checks that need attention\n\n%s\n\n' "$attention_lines"
     cat <<'EOF'
-### Next steps
+### Recommended next step
 
-Fix or re-run the failing checks above, then push to the same branch. ForgeBot
-**updates this comment in place** — it does not post a new one on every push.
+Resolve the checks listed above, then push to the same branch. ForgeBot
+will refresh this brief in place when the next CI run completes.
 
 Reproduce the required checks locally before pushing again:
 
@@ -221,14 +244,16 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and
 including the WASM size budget and the provenance manifest check.
 
 EOF
+  elif [[ "$pending_count" -gt 0 || "$total_count" -eq 0 ]]; then
+    printf '### Current state\n\n'
+    printf 'CI has not reached a final result yet. ForgeBot will refresh this brief when the run completes.\n\n'
   else
     cat <<'EOF'
-### What happens next
+### Recommended next step
 
-- All automated checks in the existing CI workflow passed.
-- This pull request is now **eligible for human maintainer/CODEOWNER review**.
-- ForgeBot does **not** approve and does **not** merge. A required approval from
-  a human maintainer is still needed before this PR can be merged.
+All automated checks in the existing CI workflow passed. This pull request is
+now **eligible for human maintainer/CODEOWNER review**. ForgeBot does **not**
+approve and does **not** merge; a human approval is still required.
 
 EOF
   fi

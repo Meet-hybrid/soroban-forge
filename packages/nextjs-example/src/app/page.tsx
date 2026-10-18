@@ -3,6 +3,10 @@
 import { useCallback, useMemo, useState } from "react";
 import { Header } from "../components/Header";
 import { ContractSelector } from "../components/ContractSelector";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Networks } from "@stellar/stellar-sdk";
+import { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit/sdk";
+import { defaultModules } from "@creit.tech/stellar-wallets-kit/modules/utils";
 import {
   TransactionLifecycle,
   type TransactionLifecycleState,
@@ -39,6 +43,29 @@ declare global {
 let logCounter = 1;
 
 export default function DeveloperConsolePage() {
+const RPC_URL = "https://soroban-testnet.stellar.org";
+const NETWORK_PASSPHRASE = networks.testnet.networkPassphrase;
+const CONTRACT_ID = networks.testnet.contractId;
+
+// 7-decimal demo token (SAC "credit" asset) used by the repo's own testnet demo
+// (see the README proof table at the repository root).
+const DEFAULT_TOKEN =
+  "CBJQ53EOHB5MWSS7CETN523WILLNVS7NQAQQAQIS5QAYTPRCZSGKL23O";
+
+// 1 unit = 10^7 stroops (SEP-41 default for 7-decimal tokens such as XLM)
+const DECIMALS = BigInt(7);
+const SCALE = BigInt(10) ** DECIMALS;
+
+type LogEntry = { id: number; time: string; text: string; kind: "info" | "ok" | "err" };
+
+let logId = 0;
+
+function ts(): string {
+  return new Date().toLocaleTimeString();
+}
+
+export default function Home() {
+  const [mounted, setMounted] = useState(false);
   const [account, setAccount] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -80,6 +107,111 @@ export default function DeveloperConsolePage() {
       const pubkey = await window.freighterApi.getPublicKey();
       setAccount(pubkey);
       pushLog(`Connected wallet: ${pubkey.slice(0, 6)}...${pubkey.slice(-4)} (Stellar Testnet)`, "ok");
+  const [log, setLog] = useState<LogEntry[]>([]);
+  const [friendbotBusy, setFriendbotBusy] = useState(false);
+
+  // Create-escrow form
+  const [buyer, setBuyer] = useState("");
+  const [seller, setSeller] = useState("");
+  const [arbiter, setArbiter] = useState("");
+  const [token, setToken] = useState(DEFAULT_TOKEN);
+  const [amount, setAmount] = useState("10000000"); // stroops
+  const [timeoutSecs, setTimeoutSecs] = useState("3600");
+  const [creating, setCreating] = useState(false);
+  const [createdId, setCreatedId] = useState<string | null>(null);
+
+  // Actions panel
+  const [actionEscrowId, setActionEscrowId] = useState("");
+  const [actionInFlight, setActionInFlight] = useState<string | null>(null);
+  const [resolveFavor, setResolveFavor] = useState<"seller" | "buyer">(
+    "seller"
+  );
+
+  // Read panel
+  const [readEscrowId, setReadEscrowId] = useState("");
+  const [escrow, setEscrow] = useState<EscrowData | null>(null);
+  const [readBusy, setReadBusy] = useState(false);
+
+  // List panel
+  const [myIds, setMyIds] = useState<Array<bigint>>([]);
+  const [listTotal, setListTotal] = useState<number | null>(null);
+  const [listBusy, setListBusy] = useState(false);
+
+  const pushLog = useCallback(
+    (text: string, kind: LogEntry["kind"] = "info") => {
+      setLog((prev) => [{ id: logId++, time: ts(), text, kind }, ...prev]);
+    },
+    []
+  );
+
+  useEffect(() => {
+    // Wallet modules require browser APIs, so initialize them after hydration.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMounted(true);
+    StellarWalletsKit.init({ modules: defaultModules() });
+    StellarWalletsKit.setNetwork(Networks.TESTNET);
+  }, []);
+
+  const listMine = useCallback(
+    async (c: Client, addr: string) => {
+      setListBusy(true);
+      try {
+        const { result } = await c.escrows_for_participant({
+          participant: addr,
+          cursor: 0,
+          limit: 10,
+        });
+        setMyIds(result.ids);
+        setListTotal(result.total);
+        pushLog(
+          `escrows_for_participant(${addr.slice(0, 6)}…): ${result.ids.length} ids (total ${result.total})`,
+          "ok"
+        );
+      } catch (e) {
+        pushLog(`List escrows failed: ${(e as Error).message}`, "err");
+      } finally {
+        setListBusy(false);
+      }
+    },
+    [pushLog]
+  );
+
+  const connect = useCallback(async () => {
+    setBusy(true);
+    try {
+      if (!mounted) {
+        throw new Error("Wallet connectors are still loading; try again shortly.");
+      }
+
+      const { address: pubkey } = await StellarWalletsKit.authModal();
+      setAccount(pubkey);
+      // Keep the visible buyer value and the transaction payload in sync.
+      setBuyer((current) => current || pubkey);
+      const c = new Client({
+        rpcUrl: RPC_URL,
+        networkPassphrase: NETWORK_PASSPHRASE,
+        contractId: CONTRACT_ID,
+        publicKey: pubkey,
+        signTransaction: async (
+          xdr: string,
+          opts?: { networkPassphrase?: string; address?: string }
+        ) => {
+          const result = await StellarWalletsKit.signTransaction(xdr, {
+            networkPassphrase: opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
+            address: opts?.address ?? pubkey,
+          });
+          if (!result.signedTxXdr) {
+            throw new Error("The selected wallet did not return a signed transaction.");
+          }
+          return { signedTxXdr: result.signedTxXdr };
+        },
+      });
+      setClient(c);
+      pushLog(
+        `Connected to ${pubkey.slice(0, 6)}…${pubkey.slice(-4)} (testnet)`,
+        "ok"
+      );
+      void listMine(c, pubkey);
     } catch (e) {
       pushLog(`Wallet connection error: ${(e as Error).message}`, "err");
     } finally {
@@ -88,6 +220,10 @@ export default function DeveloperConsolePage() {
   }, [pushLog]);
 
   const handleDisconnect = useCallback(() => {
+  }, [listMine, mounted, pushLog]);
+
+  const disconnect = useCallback(() => {
+    void StellarWalletsKit.disconnect();
     setAccount(null);
     pushLog("Wallet disconnected. Session cleared.", "info");
   }, [pushLog]);
@@ -122,11 +258,78 @@ export default function DeveloperConsolePage() {
             }
           : undefined,
       });
+      const amountBig = BigInt(amount || "0");
+      if (amountBig <= BigInt(0)) {
+        pushLog("Amount must be a positive integer number of stroops.", "err");
+        return;
+      }
+      const timeoutBig = BigInt(timeoutSecs || "0");
+      const buyerAddress = buyer.trim() || account?.trim() || "";
+      const sellerAddress = seller.trim();
+      const arbiterAddress = arbiter.trim();
+      const tokenAddress = token.trim();
+      if (!buyerAddress || !sellerAddress || !arbiterAddress || !tokenAddress) {
+        pushLog(
+          "Enter complete buyer, seller, arbiter, and token addresses before creating the escrow.",
+          "err"
+        );
+        return;
+      }
+      const tx = await client.create_escrow(
+        {
+          buyer: buyerAddress,
+          seller: sellerAddress,
+          arbiter: arbiterAddress,
+          token: tokenAddress,
+          amount: amountBig,
+          timeout: timeoutBig,
+        },
+        { timeoutInSeconds: 60 }
+      );
+      pushLog("create_escrow simulated — requesting signature…", "info");
+      const sent = await tx.signAndSend();
+      if (sent.sendTransactionResponse) {
+        pushLog(
+          `Submitted — tx hash ${sent.sendTransactionResponse.hash}`,
+          "ok"
+        );
+      }
+      const escrowId = sent.result.unwrap();
+      setCreatedId(escrowId.toString());
+      setActionEscrowId(escrowId.toString());
+      setReadEscrowId(escrowId.toString());
+      pushLog(`Escrow created — id ${escrowId.toString()} (Pending)`, "ok");
     } catch (e) {
       console.error(`Failed to initialize client for ${selectedContract}:`, e);
       return null;
     }
   }, [selectedContract, contractIds, account]);
+  }, [
+    account,
+    client,
+    buyer,
+    seller,
+    arbiter,
+    token,
+    amount,
+    timeoutSecs,
+    pushLog,
+  ]);
+
+  const sendAction = useCallback(
+    async (name: string, invoke: () => Promise<void>) => {
+      setActionInFlight(name);
+      try {
+        pushLog(`${name} — simulating…`, "info");
+        await invoke();
+      } catch (e) {
+        pushLog(`${name} failed: ${(e as Error).message}`, "err");
+      } finally {
+        setActionInFlight(null);
+      }
+    },
+    [pushLog]
+  );
 
   // Robust Transaction Execution Pipeline:
   // Validation -> Simulation -> Signing -> Submission -> Receipt / Event Decoding
@@ -321,6 +524,56 @@ export default function DeveloperConsolePage() {
             onLog={pushLog}
             runWriteFlow={runWriteFlow}
           />
+    <main className="mx-auto max-w-5xl p-6">
+      <div className="mb-3 flex items-center justify-between gap-4">
+        <h1 className="text-3xl font-bold">Soroban Forge — Escrow Testnet Demo</h1>
+        <a href="/issues" className="shrink-0 rounded border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
+          Issue board
+        </a>
+      </div>
+      <p className="text-sm text-gray-500 mb-6">
+        Contract{" "}
+        <code className="break-all">{CONTRACT_ID}</code> ·{" "}
+        {NETWORK_PASSPHRASE}
+      </p>
+
+      {/* Wallet */}
+      <section className="rounded-xl border border-gray-300 p-4 mb-6">
+        <h2 className="text-lg font-semibold mb-2">1 · Wallet</h2>
+        {account ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="font-mono text-sm break-all">{account}</span>
+            <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-800">
+              connected
+            </span>
+            <button
+              onClick={fundFriendbot}
+              disabled={friendbotBusy}
+              className="rounded bg-yellow-500 px-3 py-1.5 text-sm text-white hover:bg-yellow-600 disabled:opacity-50"
+            >
+              {friendbotBusy ? "Funding…" : "Fund with Friendbot (testnet XLM)"}
+            </button>
+            <button
+              onClick={disconnect}
+              className="rounded bg-gray-200 px-3 py-1.5 text-sm hover:bg-gray-300"
+            >
+              Disconnect
+            </button>
+          </div>
+        ) : (
+          <div>
+            <button
+              {...(mounted ? connectProps : { disabled: true })}
+              className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {busy ? "Connecting…" : "Connect wallet"}
+            </button>
+            {!mounted && (
+              <p className="mt-2 text-sm text-amber-700">
+                Loading Stellar wallet connectors…
+              </p>
+            )}
+          </div>
         )}
       </div>
 
@@ -328,4 +581,11 @@ export default function DeveloperConsolePage() {
       <LogFeed logs={logs} onClear={() => setLogs([])} />
     </main>
   );
+}
+}
+
+function formatAmount(stroops: bigint): string {
+  const whole = stroops / SCALE;
+  const frac = (stroops % SCALE).toString().padStart(Number(DECIMALS), "0");
+  return `${whole.toString()}.${frac}`;
 }
