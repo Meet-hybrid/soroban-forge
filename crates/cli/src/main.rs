@@ -18,7 +18,7 @@ mod commands;
 use clap::{Parser, Subcommand};
 use cli::{
     BuildArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs,
-    ScaffoldValidateArgs, TestArgs, VerifyArgs,
+    ScaffoldValidateArgs, TestArgs, ValidatePlanArgs, VerifyArgs,
 };
 
 #[derive(Parser, Debug)]
@@ -46,6 +46,9 @@ pub enum Commands {
     Events(EventsArgs),
     Inspect(InspectArgs),
     Doctor(DoctorArgs),
+    /// Validate a transaction plan and emit a structured text or JSON report.
+    #[command(visible_alias = "plan")]
+    ValidatePlan(ValidatePlanArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -64,6 +67,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,
         Commands::Doctor(args) => commands::doctor::run(args)?,
+        Commands::ValidatePlan(args) => commands::plan::run(args)?,
     }
 
     Ok(())
@@ -167,5 +171,46 @@ mod tests {
             args.path,
             std::path::PathBuf::from("crates/example-contract")
         );
+    }
+
+    #[test]
+    fn validate_plan_flags_and_alias_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "validate-plan",
+            "--plan",
+            "fixtures/plans/valid-escrow-create.json",
+            "--expected-network",
+            "testnet",
+            "--json",
+        ])
+        .unwrap();
+
+        let Commands::ValidatePlan(args) = cli.command else {
+            panic!("expected validate-plan command");
+        };
+        assert_eq!(
+            args.plan.as_deref(),
+            Some(std::path::Path::new(
+                "fixtures/plans/valid-escrow-create.json"
+            ))
+        );
+        assert_eq!(args.expected_network.as_deref(), Some("testnet"));
+        assert!(args.json);
+
+        let alias_cli = Cli::try_parse_from([
+            "soroban-forge",
+            "plan",
+            "--network",
+            "testnet",
+            "--contract",
+            "escrow",
+            "--method",
+            "deposit",
+            "--arg",
+            "escrow_id=u64:1",
+        ])
+        .unwrap();
+        assert!(matches!(alias_cli.command, Commands::ValidatePlan(_)));
     }
 }
