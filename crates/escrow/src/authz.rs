@@ -265,6 +265,42 @@ fn deposit_accepts_full_buyer_authorization_chain() {
     assert_eq!(client.get_status(&id), EscrowStatus::Funded);
 }
 
+fn assert_escrow_state_preserved(before: &crate::EscrowData, after: &crate::EscrowData) {
+    assert_eq!(after.escrow_id, before.escrow_id);
+    assert_eq!(after.buyer, before.buyer);
+    assert_eq!(after.seller, before.seller);
+    assert_eq!(after.arbiter, before.arbiter);
+    assert_eq!(after.token, before.token);
+    assert_eq!(after.amount, before.amount);
+    assert_eq!(after.released, before.released);
+    assert_eq!(after.remaining(), before.remaining());
+    assert_eq!(after.timeout, before.timeout);
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.created_at, before.created_at);
+}
+
+fn assert_basket_state_preserved(
+    before: &crate::BasketEscrowData,
+    after: &crate::BasketEscrowData,
+) {
+    assert_eq!(after.escrow_id, before.escrow_id);
+    assert_eq!(after.buyer, before.buyer);
+    assert_eq!(after.seller, before.seller);
+    assert_eq!(after.arbiter, before.arbiter);
+    assert_eq!(after.timeout, before.timeout);
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.created_at, before.created_at);
+    assert_eq!(after.assets.len(), before.assets.len());
+    for i in 0..before.assets.len() {
+        let b = before.assets.get_unchecked(i);
+        let a = after.assets.get_unchecked(i);
+        assert_eq!(a.token, b.token);
+        assert_eq!(a.amount, b.amount);
+        assert_eq!(a.released, b.released);
+        assert_eq!(a.remaining(), b.remaining());
+    }
+}
+
 #[test]
 fn deposit_rejects_entrypoint_signature_without_token_authorization() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
@@ -272,6 +308,7 @@ fn deposit_rejects_entrypoint_signature_without_token_authorization() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let before = client.get_escrow(&id);
 
     // Only the entrypoint frame is armed; the nested SAC transfer pull has
     // no authorization. Funds must not move on an entrypoint signature
@@ -292,7 +329,7 @@ fn deposit_rejects_entrypoint_signature_without_token_authorization() {
     assert!(matches!(res, Err(Ok(ForgeError::TokenTransferFailed))),);
     assert_eq!(tc.balance(buyer), AMOUNT);
     assert_eq!(tc.balance(&contract_id), 0);
-    assert_eq!(client.get_status(&id), EscrowStatus::Pending);
+    assert_escrow_state_preserved(&before, &client.get_escrow(&id));
 }
 
 #[test]
@@ -302,6 +339,7 @@ fn deposit_rejects_token_authorization_over_a_different_amount() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let before = client.get_escrow(&id);
 
     // The nested token authorization names a different amount than the
     // escrow pulls — the host must reject the mismatch.
@@ -322,8 +360,42 @@ fn deposit_rejects_token_authorization_over_a_different_amount() {
 
     let res = client.try_deposit(&id);
     assert!(matches!(res, Err(Ok(ForgeError::TokenTransferFailed))),);
+    assert_eq!(tc.balance(buyer), AMOUNT);
     assert_eq!(tc.balance(&contract_id), 0);
-    assert_eq!(client.get_status(&id), EscrowStatus::Pending);
+    assert_escrow_state_preserved(&before, &client.get_escrow(&id));
+}
+
+#[test]
+fn deposit_rejects_token_authorization_for_wrong_recipient() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let before = client.get_escrow(&id);
+
+    // Sub-invocation authorizes transfer to seller instead of escrow contract.
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit",
+            args: (id,).into_val(&env),
+            sub_invokes: &[MockAuthInvoke {
+                contract: &token,
+                fn_name: "transfer",
+                args: transfer_args(&env, buyer, seller, AMOUNT),
+                sub_invokes: &[],
+            }],
+        },
+    }]);
+
+    let res = client.try_deposit(&id);
+    assert!(matches!(res, Err(Ok(ForgeError::TokenTransferFailed))));
+    assert_eq!(tc.balance(buyer), AMOUNT);
+    assert_eq!(tc.balance(seller), 0);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_escrow_state_preserved(&before, &client.get_escrow(&id));
 }
 
 // -----------------------------------------------------------------------
@@ -1077,6 +1149,7 @@ fn deposit_basket_rejects_missing_leg_authorization_without_partial_custody() {
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
     let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let before = client.get_basket(&id);
 
     env.mock_auths(&[MockAuth {
         address: buyer,
@@ -1102,7 +1175,50 @@ fn deposit_basket_rejects_missing_leg_authorization_without_partial_custody() {
     assert_eq!(tc_b.balance(&contract_id), 0, "leg B must never land");
     assert_eq!(tc_a.balance(buyer), AMOUNT, "buyer's token A untouched");
     assert_eq!(tc_b.balance(buyer), AMOUNT, "buyer's token B untouched");
-    assert_eq!(client.get_status(&id), EscrowStatus::Pending);
+    assert_basket_state_preserved(&before, &client.get_basket(&id));
+}
+
+#[test]
+fn deposit_basket_rejects_insufficient_leg_authorization_without_partial_custody() {
+    let (env, token_a, token_b, tc_a, tc_b, contract_id, client, accounts) = setup_basket!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let assets = basket_assets(&env, &token_a, &token_b);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let before = client.get_basket(&id);
+
+    // Leg A is fully authorized, but leg B authorizes AMOUNT - 1 instead of AMOUNT.
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "deposit_basket",
+            args: (id,).into_val(&env),
+            sub_invokes: &[
+                MockAuthInvoke {
+                    contract: &token_a,
+                    fn_name: "transfer",
+                    args: transfer_args(&env, buyer, &contract_id, AMOUNT),
+                    sub_invokes: &[],
+                },
+                MockAuthInvoke {
+                    contract: &token_b,
+                    fn_name: "transfer",
+                    args: transfer_args(&env, buyer, &contract_id, AMOUNT - 1),
+                    sub_invokes: &[],
+                },
+            ],
+        },
+    }]);
+
+    let res = client.try_deposit_basket(&id);
+    assert!(matches!(res, Err(Ok(ForgeError::TokenTransferFailed))));
+    assert_eq!(tc_a.balance(&contract_id), 0);
+    assert_eq!(tc_b.balance(&contract_id), 0);
+    assert_eq!(tc_a.balance(buyer), AMOUNT);
+    assert_eq!(tc_b.balance(buyer), AMOUNT);
+    assert_basket_state_preserved(&before, &client.get_basket(&id));
 }
 
 #[test]
