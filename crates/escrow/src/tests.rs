@@ -19,11 +19,14 @@
 //! signature testing needs `set_auths` fixtures and is tracked in the
 //! security-invariant backlog.
 
-use crate::{Escrow, EscrowData, EscrowStatus, SorobanForgeEscrowClient};
-use soroban_forge_shared_utils::ForgeError;
+use crate::{DataKey, Escrow, EscrowData, EscrowDataV1, EscrowStatus, SorobanForgeEscrowClient};
+use soroban_forge_shared_utils::{xdr_round_trip, ForgeError};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{
+    xdr::{FromXdr, ToXdr},
+    Address, Env,
+};
 
 const START: u64 = 1_000_000;
 const TIMEOUT: u64 = 1_000;
@@ -76,6 +79,24 @@ fn parties(
     (&accounts.user1, &accounts.user2, &accounts.arbiter)
 }
 
+fn legacy_escrow_fixture(
+    env: &Env,
+    token: &Address,
+    accounts: &soroban_forge_test_utils::TestAccounts,
+) -> EscrowDataV1 {
+    EscrowDataV1 {
+        escrow_id: 7,
+        buyer: accounts.user1.clone(),
+        seller: accounts.user2.clone(),
+        arbiter: accounts.arbiter.clone(),
+        token: token.clone(),
+        amount: AMOUNT,
+        timeout: TIMEOUT,
+        status: EscrowStatus::Funded,
+        created_at: env.ledger().timestamp(),
+    }
+}
+
 /// Assert that a full (non-paged) read of a participant's index equals
 /// `expected`, exactly in creation order, with a complete list (no next
 /// cursor).
@@ -98,6 +119,52 @@ fn assert_full_index(client: &SorobanForgeEscrowClient<'_>, party: &Address, exp
 // -----------------------------------------------------------------------
 // Creation
 // -----------------------------------------------------------------------
+
+#[test]
+fn legacy_record_fixture_decodes_and_round_trips_through_current_schema() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let legacy = legacy_escrow_fixture(&env, &token, &accounts);
+    let legacy_bytes = legacy.clone().to_xdr(&env);
+    let decoded = EscrowDataV1::from_xdr(&env, &legacy_bytes).expect("legacy fixture decodes");
+    let migrated = EscrowData::from(decoded);
+
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(&DataKey::Escrow(7), &legacy);
+    });
+
+    let loaded = client.get_escrow(&7);
+    assert_eq!(loaded.escrow_id, migrated.escrow_id);
+    assert_eq!(loaded.buyer, migrated.buyer);
+    assert_eq!(loaded.seller, migrated.seller);
+    assert_eq!(loaded.arbiter, migrated.arbiter);
+    assert_eq!(loaded.token, migrated.token);
+    assert_eq!(loaded.amount, migrated.amount);
+    assert_eq!(loaded.released, 0);
+    assert_eq!(loaded.timeout, migrated.timeout);
+    assert_eq!(loaded.status, migrated.status);
+    assert_eq!(loaded.created_at, migrated.created_at);
+
+    let round_tripped = xdr_round_trip(&env, migrated).expect("current record round-trips");
+    assert_eq!(round_tripped.released, 0);
+    assert_eq!(round_tripped.remaining(), AMOUNT);
+}
+
+#[test]
+fn escrow_error_surface_keeps_validation_and_token_failures_distinct() {
+    let (env, token, _tc, _contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+
+    let validation = client.try_release(&id).unwrap_err().unwrap();
+    assert_eq!(validation, ForgeError::InvalidInput);
+
+    let invalid_token = Address::generate(&env);
+    let invalid_token_id =
+        client.create_escrow(buyer, seller, arbiter, &invalid_token, &AMOUNT, &TIMEOUT);
+    let transfer_failure = client.try_deposit(&invalid_token_id).unwrap_err().unwrap();
+    assert_eq!(transfer_failure, ForgeError::TokenTransferFailed);
+    assert_ne!(transfer_failure, validation);
+}
 
 #[test]
 fn create_escrow_records_parties_and_stays_pending() {

@@ -5,7 +5,7 @@
 [![Test](https://github.com/Meet-hybrid/soroban-forge/actions/workflows/ci.yml/badge.svg?job=test)](https://github.com/Meet-hybrid/soroban-forge/actions)
 [![Clippy](https://github.com/Meet-hybrid/soroban-forge/actions/workflows/ci.yml/badge.svg?job=clippy)](https://github.com/Meet-hybrid/soroban-forge/actions)
 [![Audit](https://github.com/Meet-hybrid/soroban-forge/actions/workflows/ci.yml/badge.svg?job=audit)](https://github.com/Meet-hybrid/soroban-forge/actions)
-[![Rust](https://img.shields.io/badge/Rust-1.96.0-orange)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange)](https://www.rust-lang.org)
 [![WASM](https://img.shields.io/badge/WASM-32--bit-654FF0)](https://github.com/Meet-hybrid/soroban-forge/blob/main/.github/workflows/ci.yml)
 
 **Soroban Forge** is a library of reusable Soroban smart-contract foundations
@@ -24,7 +24,7 @@ step below was executed live; run `bash scripts/demo-testnet.sh` to reproduce
 | Network          | Stellar Testnet (`Test SDF Network ; September 2015`)                       |
 | Escrow contract  | `CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB`                  |
 | WASM sha256      | `ccbb6603cce6d194407b822df110c91324939cea92ba21937a6d9f1e2c9e48b9`          |
-| soroban-sdk      | 27.0.6 · stable Rust · `wasm32v1-none` · 18,054 bytes                       |
+| soroban-sdk      | 28.0.0 · macros 27.0.6 · stable Rust · `wasm32v1-none` · 18,054 bytes      |
 | Demo token (SAC) | `CBJQ53EOHB5MWSS7CETN523WILLNVS7NQAQQAQIS5QAYTPRCZSGKL23O` (`credit` asset) |
 | Roles            | buyer `GCTEIX…VSGF` · seller `GCGPZ3…4SFS` · arbiter `GCR7CB…GJTQ`          |
 
@@ -90,22 +90,16 @@ well-documented foundation, audit it for your use case, and ship.
 | **Escrow**                | Three-party escrow for real SEP-41 tokens: `create` → `deposit` → `release_partial` / `release` / `refund` / `dispute` → `resolve` / `cancel`; partial-release accounting, arbiter dispute flow, lifecycle events, persistent storage and TTL | ✅ **Flagship** · 85 tests · conservation property verified |
 | **Vesting**               | Time-locked token release with cliff and linear release (`create_schedule → claim / claimable`) — `claim` settles through a real SEP-41 transfer                                                                   | ✅ Settlement · 27 tests                                    |
 | **Multi-Sig Wallet**      | Multi-owner wallet with threshold-gated opaque and typed calls, optional transaction expiry, withdrawals with rolling limits, and owner/threshold governance; transaction records in persistent storage with TTL | ✅ State machine · 155 tests |
-| **DAO Governance**        | On-chain proposals with weighted voting and deadlines; SEP-41 bonds are pulled at `propose` and refunded or forfeited at terminal transitions; approved actions dispatch on-chain; proposer cooldown limits concurrent proposals | ✅ **Bond settlement** · 81 tests                          |
-| **Multi-Sig Wallet**      | Multi-owner wallet with configurable approval thresholds + rejection (`initialize → submit/confirm/reject → execute`) — threshold-gated cross-contract invocations and token withdrawals; transactions in persistent storage with TTL keeper | ✅ State machine · 109 tests |
-| **DAO Governance**        | On-chain proposals, one-vote-per-voter voting, deadline enforcement, and finalization — SEP-41 proposal bonds pulled at `propose` and refunded/forfeited on settlement; dispatches approved actions on-chain | ✅ **Bond settlement** · 60 tests                          |
-| **Subscription Payments** | Recurring payment plans with periodic billing (`subscribe → charge / cancel`) — charges nothing                                                                                                                    | ✅ State machine · 12 tests                                 |
-| **Marketplace Royalties** | Configurable royalty splits with real SEP-41 settlement: `settle_sale` pays the seller and recipient, and `settle_sales` atomically batches up to 20 sales | ✅ **Royalty settlement** · 49 tests |
-| **Escrow**                | Three-party escrow for real SEP-41 tokens: `create` → `deposit` → `release_partial` / `release` / `refund` / `dispute` → `resolve` / `cancel`; partial-release accounting, arbiter dispute flow, lifecycle events, persistent storage and TTL | ✅ **Flagship** · conservation property verified |
-| **Vesting**               | Time-locked token release with cliff and linear release (`create_schedule → claim / claimable`) — `claim` settles through a real SEP-41 transfer                                                                   | ✅ Settlement |
-| **Multi-Sig Wallet**      | Multi-owner wallet with threshold-gated opaque and typed calls, optional transaction expiry, withdrawals with rolling limits, and owner/threshold governance; transaction records in persistent storage with TTL | ✅ Settlement · 155 tests |
-| **DAO Governance**        | On-chain proposals with weighted voting and deadlines; SEP-41 bonds are pulled at `propose` and refunded or forfeited at terminal transitions; approved actions dispatch on-chain; proposer cooldown limits concurrent proposals | ✅ **Bond settlement** · 81 tests |
-| **Multi-Sig Wallet**      | Multi-owner wallet with configurable approval thresholds (`initialize → submit → confirm → execute`), typed withdrawals, rolling limits, and threshold-gated owner-set/threshold governance (`add_owner` / `remove_owner` / `set_threshold`) | ✅ Settlement · 100 tests |
-| **DAO Governance**        | On-chain proposals, one-vote-per-voter voting, deadline enforcement, and finalization — SEP-41 proposal bonds pulled at `propose` and refunded/forfeited on settlement; dispatches approved actions on-chain | ✅ **Bond settlement** · 60 tests |
+| **DAO Governance**        | On-chain proposals with weighted voting and deadlines; SEP-41 bonds are pulled at `propose` and refunded or forfeited at terminal transitions; approved actions dispatch on-chain; proposer cooldown limits concurrent proposals | ✅ **Bond settlement** · 85+ tests                         |
 | **Subscription Payments** | Recurring billing with provider opt-in (`subscribe` / `subscribe_on_behalf_of` → `charge` / `pause` / `resume` / `cancel`) — `charge` executes a real subscriber → provider SEP-41 transfer with past-due retry and auto-cancel | ✅ Settlement · 57 tests |
 | **Marketplace Royalties** | Configurable royalty splits with real SEP-41 settlement: `settle_sale` pays the seller and recipient, and `settle_sales` atomically batches up to 20 sales | ✅ Settlement |
 
 Implementation work is tracked as scoped, labeled
 [issues](https://github.com/Meet-hybrid/soroban-forge/issues).
+
+The Next.js example can be deployed to Vercel directly from this repository;
+see the [Vercel deployment guide](docs/VERCEL-DEPLOYMENT.md). The local SDK
+is built as part of the deployment, so npm publication is optional.
 
 ## Architecture
 
@@ -122,7 +116,7 @@ flowchart LR
 
     shared[shared-utils<br/>errors · types · storage patterns]
     testutils[test-utils<br/>Env harness · mock accounts]
-    sdk[soroban-sdk 21.5.1]
+    sdk[soroban-sdk 28.0.0 / macros 27.0.6]
     cli[cli<br/>build · lint · test · deploy · new · verify · invoke · events]
     ts[typescript-sdk]
     net[(Stellar network)]
@@ -191,7 +185,7 @@ run through `cargo test --workspace`.
 ### 1. Prerequisites
 
 The workspace pins **stable Rust** and builds contracts for the
-`wasm32v1-none` target required by soroban-sdk 27.x.
+`wasm32v1-none` target required by soroban-sdk 28.x.
 
 ```bash
 rustup target add wasm32v1-none          # needed to build contracts to WASM
@@ -222,6 +216,7 @@ cargo build --release --target wasm32v1-none -p soroban-forge-escrow
 cargo run -p soroban-forge-cli -- --help
 cargo run -p soroban-forge-cli -- build --release
 cargo run -p soroban-forge-cli -- test --package soroban-forge-escrow
+cargo run -p soroban-forge-cli -- scaffold-validate crates/my-contract
 
 # New commands for contract interaction
 cargo run -p soroban-forge-cli -- invoke --contract <CONTRACT_ID> --function balance --network testnet

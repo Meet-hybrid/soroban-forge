@@ -521,7 +521,7 @@ fn reject_accepts_owner_signature_below_threshold() {
         .expect("contract ok");
     let tx = client.get_tx(&tx_id);
     assert_eq!(tx.rejections.len(), 1);
-    assert_eq!(tx.status, TxStatus::Pending);
+    assert_eq!(tx.status, TxStatus::Rejected);
 }
 
 #[test]
@@ -577,7 +577,9 @@ fn reject_twice_by_same_owner_is_invalid() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, soroban_forge_shared_utils::ForgeError::InvalidInput);
-    assert_eq!(client.get_tx(&tx_id).rejections.len(), 1);
+    let tx = client.get_tx(&tx_id);
+    assert_eq!(tx.rejections.len(), 1);
+    assert_eq!(tx.status, TxStatus::Rejected);
 }
 
 #[test]
@@ -1422,4 +1424,23 @@ fn get_tx_preview_is_callable_without_authorization() {
     let remaining = client.get_required_confirmations(&tx_id);
     assert_eq!(remaining, 2);
     assert_eq!(env.auths().len(), 0);
+fn governance_entrypoints_require_the_declared_submitter_and_preserve_state() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let count_before = client.get_tx_count();
+    let new_owner = Address::generate(&env);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.deployer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_owner",
+            args: (&accounts.user1, &new_owner).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_add_owner(&accounts.user1, &new_owner));
+    assert_eq!(client.get_tx_count(), count_before);
+    assert!(!client.is_owner(&new_owner));
 }

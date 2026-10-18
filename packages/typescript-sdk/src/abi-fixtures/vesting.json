@@ -1,0 +1,490 @@
+{
+  "schema": "soroban-forge/contract-abi@1",
+  "contract": "soroban-forge-vesting",
+  "functions": [
+    {
+      "name": "claim",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "claim_for",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "beneficiary",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "claimable",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "claimable_for",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "beneficiary",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "create_schedule",
+      "inputs": [
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "total_amount",
+          "type": "i128"
+        },
+        {
+          "name": "cliff",
+          "type": "u64"
+        },
+        {
+          "name": "duration",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "create_tranche_schedule",
+      "inputs": [
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "tranches",
+          "type": "vec<udt:Tranche>"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_schedule",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:VestingSchedule,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_status",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:VestingStatus,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_tranche_schedule",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:TrancheSchedule,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "reassign_beneficiary",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "new_beneficiary",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "revoke",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "BeneficiaryReassignedFrom",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "new_beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "vested_unclaimed",
+          "type": "i128"
+        },
+        {
+          "name": "reassignment_count",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "BeneficiaryReassignedTo",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "old_beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "vested_unclaimed",
+          "type": "i128"
+        },
+        {
+          "name": "reassignment_count",
+          "type": "u32"
+        }
+      ]
+    }
+  ],
+  "types": [
+    {
+      "kind": "error-enum",
+      "name": "ForgeError",
+      "variants": [
+        {
+          "name": "Unauthorized",
+          "value": 1
+        },
+        {
+          "name": "NotFound",
+          "value": 2
+        },
+        {
+          "name": "InvalidInput",
+          "value": 3
+        },
+        {
+          "name": "InsufficientFunds",
+          "value": 4
+        },
+        {
+          "name": "AlreadyInitialized",
+          "value": 5
+        },
+        {
+          "name": "NotInitialized",
+          "value": 6
+        },
+        {
+          "name": "DeadlineReached",
+          "value": 7
+        },
+        {
+          "name": "InsufficientAllowance",
+          "value": 8
+        },
+        {
+          "name": "ArithmeticOverflow",
+          "value": 9
+        },
+        {
+          "name": "Custom",
+          "value": 10
+        },
+        {
+          "name": "TokenTransferFailed",
+          "value": 11
+        },
+        {
+          "name": "ContractInvocationFailed",
+          "value": 12
+        },
+        {
+          "name": "WithdrawalLimitExceeded",
+          "value": 13
+        },
+        {
+          "name": "SubscriptionPastDue",
+          "value": 14
+        },
+        {
+          "name": "ProposerCooldown",
+          "value": 15
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Tranche",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "unlock_at",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "TrancheSchedule",
+      "fields": [
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "claimed",
+          "type": "i128"
+        },
+        {
+          "name": "start",
+          "type": "u64"
+        },
+        {
+          "name": "status",
+          "type": "udt:VestingStatus"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "total_amount",
+          "type": "i128"
+        },
+        {
+          "name": "tranches",
+          "type": "vec<udt:Tranche>"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "VestingSchedule",
+      "fields": [
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "beneficiary_claimed",
+          "type": "i128"
+        },
+        {
+          "name": "claimed",
+          "type": "i128"
+        },
+        {
+          "name": "cliff",
+          "type": "u64"
+        },
+        {
+          "name": "duration",
+          "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "reassignment_count",
+          "type": "u32"
+        },
+        {
+          "name": "reassignment_vested",
+          "type": "i128"
+        },
+        {
+          "name": "revoked_vested",
+          "type": "option<i128>"
+        },
+        {
+          "name": "start",
+          "type": "u64"
+        },
+        {
+          "name": "status",
+          "type": "udt:VestingStatus"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "total_amount",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "VestingStatus",
+      "variants": [
+        {
+          "name": "Locked",
+          "types": []
+        },
+        {
+          "name": "Vesting",
+          "types": []
+        },
+        {
+          "name": "Completed",
+          "types": []
+        },
+        {
+          "name": "Revoked",
+          "types": []
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "name": "Unauthorized",
+      "code": 1
+    },
+    {
+      "name": "NotFound",
+      "code": 2
+    },
+    {
+      "name": "InvalidInput",
+      "code": 3
+    },
+    {
+      "name": "InsufficientFunds",
+      "code": 4
+    },
+    {
+      "name": "AlreadyInitialized",
+      "code": 5
+    },
+    {
+      "name": "NotInitialized",
+      "code": 6
+    },
+    {
+      "name": "DeadlineReached",
+      "code": 7
+    },
+    {
+      "name": "InsufficientAllowance",
+      "code": 8
+    },
+    {
+      "name": "ArithmeticOverflow",
+      "code": 9
+    },
+    {
+      "name": "Custom",
+      "code": 10
+    },
+    {
+      "name": "TokenTransferFailed",
+      "code": 11
+    },
+    {
+      "name": "ContractInvocationFailed",
+      "code": 12
+    },
+    {
+      "name": "WithdrawalLimitExceeded",
+      "code": 13
+    },
+    {
+      "name": "SubscriptionPastDue",
+      "code": 14
+    },
+    {
+      "name": "ProposerCooldown",
+      "code": 15
+    }
+  ]
+}

@@ -56,6 +56,7 @@ fn generate() -> Value {
     let subscriber = Address::generate(&env);
     let provider = Address::generate(&env);
     token_admin.mint(&subscriber, &10_000_i128);
+    token_admin.mint(&provider, &0_i128);
     let id = client.subscribe(&subscriber, &provider, &token, &AMOUNT, &PERIOD);
 
     let mut events = Vec::new();

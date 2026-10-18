@@ -24,6 +24,8 @@ import type {
 export * from "@stellar/stellar-sdk";
 export * as contract from "@stellar/stellar-sdk/contract";
 export * as rpc from "@stellar/stellar-sdk/rpc";
+export * from "./clients/index.js";
+export * from "./indexer.js";
 
 if (typeof window !== "undefined") {
   //@ts-ignore Buffer exists
@@ -34,129 +36,123 @@ export const networks = {
   testnet: {
     networkPassphrase: "Test SDF Network ; September 2015",
     contractId: "CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB",
-  }
-} as const
-
+  },
+} as const;
 
 /**
  * A single three-party escrow record.
  */
 export interface EscrowData {
   /**
- * Amount of `token` held in custody.
- */
-amount: i128;
+   * Amount of `token` held in custody.
+   */
+  amount: i128;
   /**
- * Neutral party deciding disputes. Recorded at creation; authorizes
- * only `resolve`.
- */
-arbiter: string;
+   * Neutral party deciding disputes. Recorded at creation; authorizes
+   * only `resolve`.
+   */
+  arbiter: string;
   /**
- * Party funding the escrow and the default refund recipient.
- */
-buyer: string;
+   * Party funding the escrow and the default refund recipient.
+   */
+  buyer: string;
   /**
- * Unix timestamp of creation.
- */
-created_at: u64;
+   * Unix timestamp of creation.
+   */
+  created_at: u64;
   /**
- * Stable id, never reused.
- */
-escrow_id: u64;
+   * Stable id, never reused.
+   */
+  escrow_id: u64;
   /**
- * Party paid on release.
- */
-seller: string;
+   * Party paid on release.
+   */
+  seller: string;
   /**
- * Current lifecycle state.
- */
-status: EscrowStatus;
+   * Current lifecycle state.
+   */
+  status: EscrowStatus;
   /**
- * Seconds after `created_at` at which the buyer may self-refund.
- */
-timeout: u64;
+   * Seconds after `created_at` at which the buyer may self-refund.
+   */
+  timeout: u64;
   /**
- * SEP-41 token contract custodied by this escrow.
- */
-token: string;
+   * SEP-41 token contract custodied by this escrow.
+   */
+  token: string;
 }
 
 /**
  * Lifecycle state of an escrow.
  */
-export type EscrowStatus = {tag: "Pending", values: void} | {tag: "Funded", values: void} | {tag: "Completed", values: void} | {tag: "Refunded", values: void} | {tag: "Disputed", values: void} | {tag: "Cancelled", values: void};
-
+export type EscrowStatus =
+  | { tag: "Pending"; values: void }
+  | { tag: "Funded"; values: void }
+  | { tag: "Completed"; values: void }
+  | { tag: "Refunded"; values: void }
+  | { tag: "Disputed"; values: void }
+  | { tag: "Cancelled"; values: void };
 
 /**
  * A page of escrow ids involving a participant.
- * 
+ *
  * Returned by [`SorobanForgeEscrow::escrows_for_participant`]; powered by
  * the per-party persistent index written at creation.
  */
 export interface ParticipantEscrowsPage {
   /**
- * Escrow ids on this page, in creation order.
- */
-ids: Array<u64>;
+   * Escrow ids on this page, in creation order.
+   */
+  ids: Array<u64>;
   /**
- * Offset for the next page, or `None` when `ids` ends the participant's
- * list. Replay it until `None` to iterate the whole list.
- */
-next_cursor: Option<u32>;
+   * Offset for the next page, or `None` when `ids` ends the participant's
+   * list. Replay it until `None` to iterate the whole list.
+   */
+  next_cursor: Option<u32>;
   /**
- * Total escrows involving the participant across all pages.
- */
-total: u32;
+   * Total escrows involving the participant across all pages.
+   */
+  total: u32;
 }
-
-
-
-
-
-
-
-
 
 /**
  * A participant in a multi-party flow (escrow, governance, ...).
  */
 export interface Party {
   /**
- * On-chain address of the participant.
- */
-address: string;
+   * On-chain address of the participant.
+   */
+  address: string;
   /**
- * Whether this party has granted approval for the current action.
- */
-approved: boolean;
+   * Whether this party has granted approval for the current action.
+   */
+  approved: boolean;
   /**
- * Human-readable role label, e.g. `"buyer"` or `"arbiter"`.
- */
-role: string;
+   * Human-readable role label, e.g. `"buyer"` or `"arbiter"`.
+   */
+  role: string;
 }
-
 
 /**
  * Inclusive time window expressed as Unix timestamps (seconds).
- * 
+ *
  * Stored as plain `u64` because `soroban_sdk` models time as `u64`; a
  * dedicated newtype would add conversions without benefit.
  */
 export interface TimeBounds {
   /**
- * Latest moment (inclusive) at which the window is active.
- */
-end: u64;
+   * Latest moment (inclusive) at which the window is active.
+   */
+  end: u64;
   /**
- * Earliest moment (inclusive) at which the window is active.
- */
-start: u64;
+   * Earliest moment (inclusive) at which the window is active.
+   */
+  start: u64;
 }
-
 
 /**
  * A page of results plus the cursor needed to fetch the next page.
- * 
+ *
  * Items are stored as serialized `Bytes` so the helper is agnostic to the
  * concrete value type a contract paginates. Callers decode each item into
  * their domain type. `Debug` is omitted because the SDK collection does not
@@ -164,85 +160,84 @@ start: u64;
  */
 export interface PaginatedResult {
   /**
- * Cursor describing the next page (offset advanced by `limit`).
- */
-cursor: PaginationCursor;
+   * Cursor describing the next page (offset advanced by `limit`).
+   */
+  cursor: PaginationCursor;
   /**
- * Items on this page.
- */
-items: Array<Buffer>;
+   * Items on this page.
+   */
+  items: Array<Buffer>;
   /**
- * Total number of items across all pages.
- */
-total: u32;
+   * Total number of items across all pages.
+   */
+  total: u32;
 }
-
 
 /**
  * Offset/limit pair for paginated reads.
  */
 export interface PaginationCursor {
   /**
- * Maximum number of items to return.
- */
-limit: u32;
+   * Maximum number of items to return.
+   */
+  limit: u32;
   /**
- * Number of items to skip from the start of the full result set.
- */
-offset: u32;
+   * Number of items to skip from the start of the full result set.
+   */
+  offset: u32;
 }
 
 /**
  * Shared error type used across all Soroban Forge contracts.
- * 
+ *
  * Defining a single error enum in `shared-utils` keeps the on-chain error
  * space consistent and intelligible to SDK consumers, and avoids every
  * contract re-declaring the same failure modes. Contract crates may expose
  * their own domain-specific errors, but should prefer these where they fit.
- * 
+ *
  * Error codes start at 1; code 0 is reserved by the Soroban host.
  */
 export const ForgeError = {
   /**
    * The caller is not permitted to perform this action.
    */
-  1: {message:"Unauthorized"},
+  1: { message: "Unauthorized" },
   /**
    * The requested entity (escrow, proposal, subscription, ...) does not exist.
    */
-  2: {message:"NotFound"},
+  2: { message: "NotFound" },
   /**
    * One or more arguments failed validation (e.g. zero amount, bad address).
    */
-  3: {message:"InvalidInput"},
+  3: { message: "InvalidInput" },
   /**
    * The contract does not hold enough balance to satisfy the operation.
    */
-  4: {message:"InsufficientFunds"},
+  4: { message: "InsufficientFunds" },
   /**
    * The entity was already initialised; re-initialisation is rejected.
    */
-  5: {message:"AlreadyInitialized"},
+  5: { message: "AlreadyInitialized" },
   /**
    * The entity was expected to be initialised but was not.
    */
-  6: {message:"NotInitialized"},
+  6: { message: "NotInitialized" },
   /**
    * An operation was attempted after its deadline elapsed.
    */
-  7: {message:"DeadlineReached"},
+  7: { message: "DeadlineReached" },
   /**
    * A required token allowance was lower than the amount being spent.
    */
-  8: {message:"InsufficientAllowance"},
+  8: { message: "InsufficientAllowance" },
   /**
    * An arithmetic operation overflowed.
    */
-  9: {message:"ArithmeticOverflow"},
+  9: { message: "ArithmeticOverflow" },
   /**
    * Contract-specific error that does not map to the categories above.
    */
-  10: {message:"Custom"},
+  10: { message: "Custom" },
   /**
    * A SEP-41 token invocation failed (insufficient balance, missing or
    * deauthorized trustline, undeployed token contract, or token-logic
@@ -251,14 +246,14 @@ export const ForgeError = {
    * code, so it is bucketed; the root cause remains visible in the
    * transaction's diagnostic events.
    */
-  11: {message:"TokenTransferFailed"},
+  11: { message: "TokenTransferFailed" },
   /**
    * A cross-contract invocation failed (target reverted or host
    * abort). The target reverts are surfaced here so the caller can
    * distinguish them from token-transfer failures, and the invoking
    * transaction is left un-executed.
    */
-  12: {message:"ContractInvocationFailed"},
+  12: { message: "ContractInvocationFailed" },
   /**
    * The requested withdrawal would push a token's rolling-window total
    * past its configured withdrawal limit. Kept distinct from
@@ -266,7 +261,7 @@ export const ForgeError = {
    * (a valid withdrawal that is too large right now) from a malformed
    * argument.
    */
-  13: {message:"WithdrawalLimitExceeded"},
+  13: { message: "WithdrawalLimitExceeded" },
   /**
    * A subscription is in the `PastDue` lapsed state and the requested
    * operation cannot be performed until a catch-up charge restores it to
@@ -274,18 +269,17 @@ export const ForgeError = {
    * can tell a lapsed billing state from an argument that was merely
    * too early.
    */
-  14: {message:"SubscriptionPastDue"},
+  14: { message: "SubscriptionPastDue" },
   /**
    * A proposer has reached the maximum allowed concurrent active proposals
    * or is within the proposer cooldown window.
    */
-  15: {message:"ProposerCooldown"}
-}
-
+  15: { message: "ProposerCooldown" },
+};
 
 /**
  * Audit metadata attached to a persisted value.
- * 
+ *
  * Contracts store domain data in Soroban instance storage; wrapping it with
  * this record lets callers (and off-chain indexers) see when a value was last
  * written. The payload is stored as opaque serialized bytes so the record is
@@ -294,13 +288,13 @@ export const ForgeError = {
  */
 export interface StorageEntry {
   /**
- * Unix timestamp (seconds) at which the entry was last written.
- */
-updated_at: u64;
+   * Unix timestamp (seconds) at which the entry was last written.
+   */
+  updated_at: u64;
   /**
- * The stored payload, serialized as opaque Soroban bytes.
- */
-value: Buffer;
+   * The stored payload, serialized as opaque Soroban bytes.
+   */
+  value: Buffer;
 }
 
 export interface Client {
@@ -309,46 +303,67 @@ export interface Client {
    * Cancel a `Pending` escrow. Requires the buyer. Nothing has moved,
    * so no token transfer occurs.
    */
-  cancel: ({escrow_id}: {escrow_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  cancel: (
+    { escrow_id }: { escrow_id: u64 },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
 
   /**
    * Construct and simulate a refund transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Refund the buyer.
-   * 
+   *
    * Pre-deadline: seller authorizes (voluntary refund). Post-deadline:
    * buyer authorizes (reclaim of unfulfilled funds).
    */
-  refund: ({escrow_id}: {escrow_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  refund: (
+    { escrow_id }: { escrow_id: u64 },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
 
   /**
    * Construct and simulate a deposit transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Fund the escrow, pulling tokens from the buyer into this contract.
-   * 
+   *
    * Ordering: transfer **first**, state write **second** — see the
    * module docs for why the inverse would be a fund-safety bug.
    */
-  deposit: ({escrow_id}: {escrow_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  deposit: (
+    { escrow_id }: { escrow_id: u64 },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
 
   /**
    * Construct and simulate a dispute transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Raise a dispute: the claimant (buyer or seller) authorizes, while
    * `Funded`. Freezes all payout paths until the arbiter resolves.
    */
-  dispute: ({escrow_id, claimant}: {escrow_id: u64, claimant: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  dispute: (
+    { escrow_id, claimant }: { escrow_id: u64; claimant: string },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
 
   /**
    * Construct and simulate a release transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Release funds to the seller. Seller-authorized: delivery
    * confirmation by the paid party, not the paying one.
    */
-  release: ({escrow_id}: {escrow_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  release: (
+    { escrow_id }: { escrow_id: u64 },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
 
   /**
    * Construct and simulate a resolve transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Resolve a dispute: arbiter only, final. Pays the full amount to the
    * seller (`true`) or refunds the buyer (`false`).
    */
-  resolve: ({escrow_id, in_favor_of_seller}: {escrow_id: u64, in_favor_of_seller: boolean}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  resolve: (
+    {
+      escrow_id,
+      in_favor_of_seller,
+    }: { escrow_id: u64; in_favor_of_seller: boolean },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
 
   /**
    * Construct and simulate a touch_ttl transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -357,29 +372,55 @@ export interface Client {
    * id must fail loudly so a keeper can distinguish "extended" from
    * "no such escrow".
    */
-  touch_ttl: ({escrow_id}: {escrow_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+  touch_ttl: (
+    { escrow_id }: { escrow_id: u64 },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<void>>>;
 
   /**
    * Construct and simulate a get_escrow transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Read the full escrow record.
    */
-  get_escrow: ({escrow_id}: {escrow_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<EscrowData>>>
+  get_escrow: (
+    { escrow_id }: { escrow_id: u64 },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<EscrowData>>>;
 
   /**
    * Construct and simulate a get_status transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Read the current lifecycle status.
    */
-  get_status: ({escrow_id}: {escrow_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<EscrowStatus>>>
+  get_status: (
+    { escrow_id }: { escrow_id: u64 },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<EscrowStatus>>>;
 
   /**
    * Construct and simulate a create_escrow transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Create a new escrow and return its stable id.
-   * 
+   *
    * Only the buyer authorizes at creation. The arbiter does not
    * authorize either: they must be able to `resolve` later even if
    * they never participated in creation.
    */
-  create_escrow: ({buyer, seller, arbiter, token, amount, timeout}: {buyer: string, seller: string, arbiter: string, token: string, amount: i128, timeout: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+  create_escrow: (
+    {
+      buyer,
+      seller,
+      arbiter,
+      token,
+      amount,
+      timeout,
+    }: {
+      buyer: string;
+      seller: string;
+      arbiter: string;
+      token: string;
+      amount: i128;
+      timeout: u64;
+    },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<Result<u64>>>;
 
   /**
    * Construct and simulate a escrows_for_participant transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -387,8 +428,14 @@ export interface Client {
    * participant. Read-only: never mutates storage and never errors — an
    * unknown address or one with no escrows simply yields an empty page.
    */
-  escrows_for_participant: ({participant, cursor, limit}: {participant: string, cursor: u32, limit: u32}, options?: MethodOptions) => Promise<AssembledTransaction<ParticipantEscrowsPage>>
-
+  escrows_for_participant: (
+    {
+      participant,
+      cursor,
+      limit,
+    }: { participant: string; cursor: u32; limit: u32 },
+    options?: MethodOptions,
+  ) => Promise<AssembledTransaction<ParticipantEscrowsPage>>;
 }
 export class Client extends ContractClient {
   static async deploy<T = Client>(
@@ -401,13 +448,14 @@ export class Client extends ContractClient {
         salt?: Buffer | Uint8Array;
         /** The format used to decode `wasmHash`, if it's provided as a string. */
         format?: "hex" | "base64";
-      }
+      },
   ): Promise<AssembledTransaction<T>> {
-    return ContractClient.deploy(null, options)
+    return ContractClient.deploy(null, options);
   }
   constructor(public readonly options: ContractClientOptions) {
     super(
-      new ContractSpec([ "AAAAAAAAAF5DYW5jZWwgYSBgUGVuZGluZ2AgZXNjcm93LiBSZXF1aXJlcyB0aGUgYnV5ZXIuIE5vdGhpbmcgaGFzIG1vdmVkLApzbyBubyB0b2tlbiB0cmFuc2ZlciBvY2N1cnMuAAAAAAAGY2FuY2VsAAAAAAABAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAQAAA+kAAAACAAAH0AAAAApGb3JnZUVycm9yAAA=",
+      new ContractSpec([
+        "AAAAAAAAAF5DYW5jZWwgYSBgUGVuZGluZ2AgZXNjcm93LiBSZXF1aXJlcyB0aGUgYnV5ZXIuIE5vdGhpbmcgaGFzIG1vdmVkLApzbyBubyB0b2tlbiB0cmFuc2ZlciBvY2N1cnMuAAAAAAAGY2FuY2VsAAAAAAABAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAQAAA+kAAAACAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAAIZSZWZ1bmQgdGhlIGJ1eWVyLgoKUHJlLWRlYWRsaW5lOiBzZWxsZXIgYXV0aG9yaXplcyAodm9sdW50YXJ5IHJlZnVuZCkuIFBvc3QtZGVhZGxpbmU6CmJ1eWVyIGF1dGhvcml6ZXMgKHJlY2xhaW0gb2YgdW5mdWxmaWxsZWQgZnVuZHMpLgAAAAAABnJlZnVuZAAAAAAAAQAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAEAAAPpAAAAAgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAAAAAMBGdW5kIHRoZSBlc2Nyb3csIHB1bGxpbmcgdG9rZW5zIGZyb20gdGhlIGJ1eWVyIGludG8gdGhpcyBjb250cmFjdC4KCk9yZGVyaW5nOiB0cmFuc2ZlciAqKmZpcnN0KiosIHN0YXRlIHdyaXRlICoqc2Vjb25kKiog4oCUIHNlZSB0aGUKbW9kdWxlIGRvY3MgZm9yIHdoeSB0aGUgaW52ZXJzZSB3b3VsZCBiZSBhIGZ1bmQtc2FmZXR5IGJ1Zy4AAAAHZGVwb3NpdAAAAAABAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAQAAA+kAAAACAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAAIBSYWlzZSBhIGRpc3B1dGU6IHRoZSBjbGFpbWFudCAoYnV5ZXIgb3Igc2VsbGVyKSBhdXRob3JpemVzLCB3aGlsZQpgRnVuZGVkYC4gRnJlZXplcyBhbGwgcGF5b3V0IHBhdGhzIHVudGlsIHRoZSBhcmJpdGVyIHJlc29sdmVzLgAAAAdkaXNwdXRlAAAAAAIAAAAAAAAACWVzY3Jvd19pZAAAAAAAAAYAAAAAAAAACGNsYWltYW50AAAAEwAAAAEAAAPpAAAAAgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
@@ -433,21 +481,22 @@ export class Client extends ContractClient {
         "AAAAAQAAAUBBIHBhZ2Ugb2YgcmVzdWx0cyBwbHVzIHRoZSBjdXJzb3IgbmVlZGVkIHRvIGZldGNoIHRoZSBuZXh0IHBhZ2UuCgpJdGVtcyBhcmUgc3RvcmVkIGFzIHNlcmlhbGl6ZWQgYEJ5dGVzYCBzbyB0aGUgaGVscGVyIGlzIGFnbm9zdGljIHRvIHRoZQpjb25jcmV0ZSB2YWx1ZSB0eXBlIGEgY29udHJhY3QgcGFnaW5hdGVzLiBDYWxsZXJzIGRlY29kZSBlYWNoIGl0ZW0gaW50bwp0aGVpciBkb21haW4gdHlwZS4gYERlYnVnYCBpcyBvbWl0dGVkIGJlY2F1c2UgdGhlIFNESyBjb2xsZWN0aW9uIGRvZXMgbm90CmltcGxlbWVudCBpdCBmb3IgdGhpcyBjb250cmFjdCB0eXBlLgAAAAAAAAAPUGFnaW5hdGVkUmVzdWx0AAAAAAMAAAA9Q3Vyc29yIGRlc2NyaWJpbmcgdGhlIG5leHQgcGFnZSAob2Zmc2V0IGFkdmFuY2VkIGJ5IGBsaW1pdGApLgAAAAAAAAZjdXJzb3IAAAAAB9AAAAAQUGFnaW5hdGlvbkN1cnNvcgAAABNJdGVtcyBvbiB0aGlzIHBhZ2UuAAAAAAVpdGVtcwAAAAAAA+oAAAAOAAAAJ1RvdGFsIG51bWJlciBvZiBpdGVtcyBhY3Jvc3MgYWxsIHBhZ2VzLgAAAAAFdG90YWwAAAAAAAAE",
         "AAAAAQAAACZPZmZzZXQvbGltaXQgcGFpciBmb3IgcGFnaW5hdGVkIHJlYWRzLgAAAAAAAAAAABBQYWdpbmF0aW9uQ3Vyc29yAAAAAgAAACJNYXhpbXVtIG51bWJlciBvZiBpdGVtcyB0byByZXR1cm4uAAAAAAAFbGltaXQAAAAAAAAEAAAAPk51bWJlciBvZiBpdGVtcyB0byBza2lwIGZyb20gdGhlIHN0YXJ0IG9mIHRoZSBmdWxsIHJlc3VsdCBzZXQuAAAAAAAGb2Zmc2V0AAAAAAAE",
         "AAAABAAAAZxTaGFyZWQgZXJyb3IgdHlwZSB1c2VkIGFjcm9zcyBhbGwgU29yb2JhbiBGb3JnZSBjb250cmFjdHMuCgpEZWZpbmluZyBhIHNpbmdsZSBlcnJvciBlbnVtIGluIGBzaGFyZWQtdXRpbHNgIGtlZXBzIHRoZSBvbi1jaGFpbiBlcnJvcgpzcGFjZSBjb25zaXN0ZW50IGFuZCBpbnRlbGxpZ2libGUgdG8gU0RLIGNvbnN1bWVycywgYW5kIGF2b2lkcyBldmVyeQpjb250cmFjdCByZS1kZWNsYXJpbmcgdGhlIHNhbWUgZmFpbHVyZSBtb2Rlcy4gQ29udHJhY3QgY3JhdGVzIG1heSBleHBvc2UKdGhlaXIgb3duIGRvbWFpbi1zcGVjaWZpYyBlcnJvcnMsIGJ1dCBzaG91bGQgcHJlZmVyIHRoZXNlIHdoZXJlIHRoZXkgZml0LgoKRXJyb3IgY29kZXMgc3RhcnQgYXQgMTsgY29kZSAwIGlzIHJlc2VydmVkIGJ5IHRoZSBTb3JvYmFuIGhvc3QuAAAAAAAAAApGb3JnZUVycm9yAAAAAAANAAAAM1RoZSBjYWxsZXIgaXMgbm90IHBlcm1pdHRlZCB0byBwZXJmb3JtIHRoaXMgYWN0aW9uLgAAAAAMVW5hdXRob3JpemVkAAAAAQAAAEpUaGUgcmVxdWVzdGVkIGVudGl0eSAoZXNjcm93LCBwcm9wb3NhbCwgc3Vic2NyaXB0aW9uLCAuLi4pIGRvZXMgbm90IGV4aXN0LgAAAAAACE5vdEZvdW5kAAAAAgAAAEhPbmUgb3IgbW9yZSBhcmd1bWVudHMgZmFpbGVkIHZhbGlkYXRpb24gKGUuZy4gemVybyBhbW91bnQsIGJhZCBhZGRyZXNzKS4AAAAMSW52YWxpZElucHV0AAAAAwAAAENUaGUgY29udHJhY3QgZG9lcyBub3QgaG9sZCBlbm91Z2ggYmFsYW5jZSB0byBzYXRpc2Z5IHRoZSBvcGVyYXRpb24uAAAAABFJbnN1ZmZpY2llbnRGdW5kcwAAAAAAAAQAAABCVGhlIGVudGl0eSB3YXMgYWxyZWFkeSBpbml0aWFsaXNlZDsgcmUtaW5pdGlhbGlzYXRpb24gaXMgcmVqZWN0ZWQuAAAAAAASQWxyZWFkeUluaXRpYWxpemVkAAAAAAAFAAAANlRoZSBlbnRpdHkgd2FzIGV4cGVjdGVkIHRvIGJlIGluaXRpYWxpc2VkIGJ1dCB3YXMgbm90LgAAAAAADk5vdEluaXRpYWxpemVkAAAAAAAGAAAANkFuIG9wZXJhdGlvbiB3YXMgYXR0ZW1wdGVkIGFmdGVyIGl0cyBkZWFkbGluZSBlbGFwc2VkLgAAAAAAD0RlYWRsaW5lUmVhY2hlZAAAAAAHAAAAQUEgcmVxdWlyZWQgdG9rZW4gYWxsb3dhbmNlIHdhcyBsb3dlciB0aGFuIHRoZSBhbW91bnQgYmVpbmcgc3BlbnQuAAAAAAAAFUluc3VmZmljaWVudEFsbG93YW5jZQAAAAAAAAgAAAAjQW4gYXJpdGhtZXRpYyBvcGVyYXRpb24gb3ZlcmZsb3dlZC4AAAAAEkFyaXRobWV0aWNPdmVyZmxvdwAAAAAACQAAAEJDb250cmFjdC1zcGVjaWZpYyBlcnJvciB0aGF0IGRvZXMgbm90IG1hcCB0byB0aGUgY2F0ZWdvcmllcyBhYm92ZS4AAAAAAAZDdXN0b20AAAAAAAoAAAFsQSBTRVAtNDEgdG9rZW4gaW52b2NhdGlvbiBmYWlsZWQgKGluc3VmZmljaWVudCBiYWxhbmNlLCBtaXNzaW5nIG9yCmRlYXV0aG9yaXplZCB0cnVzdGxpbmUsIHVuZGVwbG95ZWQgdG9rZW4gY29udHJhY3QsIG9yIHRva2VuLWxvZ2ljCnJlamVjdGlvbikuIFRoZSByYXcgdG9rZW4gZXJyb3IgZGlzY3JpbWluYW50IGlzIGludGVudGlvbmFsbHkgbm90CmZvcndhcmRlZCDigJQgY2FsbGVycyBjYW5ub3QgdGVsbCB3aGljaCBjb250cmFjdCBwcm9kdWNlZCBhIGZvcndhcmRlZApjb2RlLCBzbyBpdCBpcyBidWNrZXRlZDsgdGhlIHJvb3QgY2F1c2UgcmVtYWlucyB2aXNpYmxlIGluIHRoZQp0cmFuc2FjdGlvbidzIGRpYWdub3N0aWMgZXZlbnRzLgAAABNUb2tlblRyYW5zZmVyRmFpbGVkAAAAAAsAAADbQSBjcm9zcy1jb250cmFjdCBpbnZvY2F0aW9uIGZhaWxlZCAodGFyZ2V0IHJldmVydGVkIG9yIGhvc3QKYWJvcnQpLiBUaGUgdGFyZ2V0IHJldmVydHMgYXJlIHN1cmZhY2VkIGhlcmUgc28gdGhlIGNhbGxlciBjYW4KZGlzdGluZ3Vpc2ggdGhlbSBmcm9tIHRva2VuLXRyYW5zZmVyIGZhaWx1cmVzLCBhbmQgdGhlIGludm9raW5nCnRyYW5zYWN0aW9uIGlzIGxlZnQgdW4tZXhlY3V0ZWQuAAAAABhDb250cmFjdEludm9jYXRpb25GYWlsZWQAAAAMAAABDFRoZSByZXF1ZXN0ZWQgd2l0aGRyYXdhbCB3b3VsZCBwdXNoIGEgdG9rZW4ncyByb2xsaW5nLXdpbmRvdyB0b3RhbApwYXN0IGl0cyBjb25maWd1cmVkIHdpdGhkcmF3YWwgbGltaXQuIEtlcHQgZGlzdGluY3QgZnJvbQpbYEZvcmdlRXJyb3I6OkludmFsaWRJbnB1dGBdIHNvIGEgY2FsbGVyIGNhbiB0ZWxsIGEgcG9saWN5IHJlamVjdGlvbgooYSB2YWxpZCB3aXRoZHJhd2FsIHRoYXQgaXMgdG9vIGxhcmdlIHJpZ2h0IG5vdykgZnJvbSBhIG1hbGZvcm1lZAphcmd1bWVudC4AAAAXV2l0aGRyYXdhbExpbWl0RXhjZWVkZWQAAAAADQ==",
-        "AAAAAQAAAWBBdWRpdCBtZXRhZGF0YSBhdHRhY2hlZCB0byBhIHBlcnNpc3RlZCB2YWx1ZS4KCkNvbnRyYWN0cyBzdG9yZSBkb21haW4gZGF0YSBpbiBTb3JvYmFuIGluc3RhbmNlIHN0b3JhZ2U7IHdyYXBwaW5nIGl0IHdpdGgKdGhpcyByZWNvcmQgbGV0cyBjYWxsZXJzIChhbmQgb2ZmLWNoYWluIGluZGV4ZXJzKSBzZWUgd2hlbiBhIHZhbHVlIHdhcyBsYXN0CndyaXR0ZW4uIFRoZSBwYXlsb2FkIGlzIHN0b3JlZCBhcyBvcGFxdWUgc2VyaWFsaXplZCBieXRlcyBzbyB0aGUgcmVjb3JkIGlzCnZhbGlkIGFzIGEgU29yb2JhbiBjb250cmFjdCB0eXBlIHdpdGhvdXQgY291cGxpbmcgaXQgdG8gYSBjb25jcmV0ZSBkb21haW4KdmFsdWUuAAAAAAAAAAxTdG9yYWdlRW50cnkAAAACAAAAPVVuaXggdGltZXN0YW1wIChzZWNvbmRzKSBhdCB3aGljaCB0aGUgZW50cnkgd2FzIGxhc3Qgd3JpdHRlbi4AAAAAAAAKdXBkYXRlZF9hdAAAAAAABgAAADdUaGUgc3RvcmVkIHBheWxvYWQsIHNlcmlhbGl6ZWQgYXMgb3BhcXVlIFNvcm9iYW4gYnl0ZXMuAAAAAAV2YWx1ZQAAAAAAAA4=" ]),
-      options
-    )
+        "AAAAAQAAAWBBdWRpdCBtZXRhZGF0YSBhdHRhY2hlZCB0byBhIHBlcnNpc3RlZCB2YWx1ZS4KCkNvbnRyYWN0cyBzdG9yZSBkb21haW4gZGF0YSBpbiBTb3JvYmFuIGluc3RhbmNlIHN0b3JhZ2U7IHdyYXBwaW5nIGl0IHdpdGgKdGhpcyByZWNvcmQgbGV0cyBjYWxsZXJzIChhbmQgb2ZmLWNoYWluIGluZGV4ZXJzKSBzZWUgd2hlbiBhIHZhbHVlIHdhcyBsYXN0CndyaXR0ZW4uIFRoZSBwYXlsb2FkIGlzIHN0b3JlZCBhcyBvcGFxdWUgc2VyaWFsaXplZCBieXRlcyBzbyB0aGUgcmVjb3JkIGlzCnZhbGlkIGFzIGEgU29yb2JhbiBjb250cmFjdCB0eXBlIHdpdGhvdXQgY291cGxpbmcgaXQgdG8gYSBjb25jcmV0ZSBkb21haW4KdmFsdWUuAAAAAAAAAAxTdG9yYWdlRW50cnkAAAACAAAAPVVuaXggdGltZXN0YW1wIChzZWNvbmRzKSBhdCB3aGljaCB0aGUgZW50cnkgd2FzIGxhc3Qgd3JpdHRlbi4AAAAAAAAKdXBkYXRlZF9hdAAAAAAABgAAADdUaGUgc3RvcmVkIHBheWxvYWQsIHNlcmlhbGl6ZWQgYXMgb3BhcXVlIFNvcm9iYW4gYnl0ZXMuAAAAAAV2YWx1ZQAAAAAAAA4=",
+      ]),
+      options,
+    );
   }
   public readonly fromJSON = {
     cancel: this.txFromJSON<Result<void>>,
-        refund: this.txFromJSON<Result<void>>,
-        deposit: this.txFromJSON<Result<void>>,
-        dispute: this.txFromJSON<Result<void>>,
-        release: this.txFromJSON<Result<void>>,
-        resolve: this.txFromJSON<Result<void>>,
-        touch_ttl: this.txFromJSON<Result<void>>,
-        get_escrow: this.txFromJSON<Result<EscrowData>>,
-        get_status: this.txFromJSON<Result<EscrowStatus>>,
-        create_escrow: this.txFromJSON<Result<u64>>,
-        escrows_for_participant: this.txFromJSON<ParticipantEscrowsPage>
-  }
+    refund: this.txFromJSON<Result<void>>,
+    deposit: this.txFromJSON<Result<void>>,
+    dispute: this.txFromJSON<Result<void>>,
+    release: this.txFromJSON<Result<void>>,
+    resolve: this.txFromJSON<Result<void>>,
+    touch_ttl: this.txFromJSON<Result<void>>,
+    get_escrow: this.txFromJSON<Result<EscrowData>>,
+    get_status: this.txFromJSON<Result<EscrowStatus>>,
+    create_escrow: this.txFromJSON<Result<u64>>,
+    escrows_for_participant: this.txFromJSON<ParticipantEscrowsPage>,
+  };
 }

@@ -4,31 +4,29 @@ This document states, without marketing, what the Soroban Forge contracts
 **do not do** today. Everything here is a deliberate, tracked scoping
 decision — not an oversight.
 
-**Last verified against:** the SDK 27 migration (workspace v0.2.0).
+**Last verified against:** the current workspace pins (`soroban-sdk 28.0.0`,
+`soroban-sdk-macros 27.0.6`, workspace v0.2.0).
 
 ---
 
-## Resolved in the SDK 27 / Phase 1 migration
+## Resolved in the SDK 28 / Phase 1 migration
 
-These were the headline gaps in v0.1.0; SEP-41 settlement now covers escrow,
-royalties, vesting, DAO bonds, and both subscription payment modes:
+These were the headline gaps in v0.1.0. They are now resolved for the
+contracts listed below:
 
-1. **No token settlement** — escrow now performs real SEP-41 transfers
-   (`deposit` pulls from the buyer, `release`/`refund`/`resolve` pay out)
-   with transfer-before-state ordering so a failed transfer leaves no
-   partial state. Marketplace royalties, vesting, and DAO governance
-   (proposal bonds) have since gained settlement the same way — including
-   `distribute`'s real royalty payout — and multi-sig `execute` performs
-   real cross-contract invocations; subscriptions transfer pull-mode charges
-   directly from subscriber to provider and custody prepaid deposits for exact
-   period debits and refunds.
-2. **Instance-only storage** — escrow, multi-sig wallet, DAO governance, and marketplace royalties now use **persistent** entries with TTL bumps on every write and permissionless `touch_ttl` keeper entrypoints. Vesting and subscriptions still use instance storage.
-3. **No events** — escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit lifecycle events; only vesting remains silent.
+1. **No token settlement** — escrow, vesting, DAO bonds, marketplace
+   royalties, multi-sig withdrawals, and subscription billing now use real
+   SEP-41 transfers with transfer-before-state ordering.
+2. **Instance-only storage** — escrow, multi-sig wallet, DAO governance,
+   marketplace royalties, and subscription records use persistent entries with
+   TTL maintenance; vesting remains instance-backed and is listed below.
+3. **No events** — escrow, multi-sig wallet, DAO governance, subscription
+   payments, marketplace royalties, and vesting emit lifecycle events.
 4. **Arbiter stored but unreachable** — `dispute` (claimant-authorized)
    and `resolve` (arbiter-only, final) make the third party live.
    `Disputed` is a real state, verified by tests.
 5. **Toolchain pin** — the workspace now builds on **stable** Rust with
-   soroban-sdk **27.0.6** and the `wasm32v1-none` target. The old
+   soroban-sdk **28.0.0** (macros **27.0.6**) and the `wasm32v1-none` target. The old
    Rust 1.96.0 / SDK 21.5.1 pin is gone.
 
 ## Still open
@@ -55,11 +53,19 @@ while a proposal is open, changing the influence represented by those
 accounts. This is a simple stake-weighted foundation, not a manipulation-
 resistant snapshot or delegation system.
 
-### 3. Instance-only storage outside escrow, multi-sig wallet, DAO governance, and marketplace royalties
+### 3. Instance-only storage outside escrow, multi-sig wallet, DAO governance, marketplace royalties, and subscriptions
 
-Vesting and subscriptions keep state in `env.storage().instance()`.
-Long-lived records there still face the byte budget and TTL-expiry
-bricking problem. (Escrow, multi-sig wallet, DAO governance, and marketplace royalties migrated per-record data to persistent storage with `touch_ttl`/`touch_tx_ttl` keeper entrypoints.)
+Vesting schedule records remain in `env.storage().instance()` and face the
+byte-budget and TTL-expiry bricking problem. Subscription records moved to
+persistent storage with `touch_ttl`; their small counter and enumeration
+indexes remain in instance storage. Escrow, multi-sig wallet, DAO governance,
+and marketplace royalties also use persistent records with keeper entrypoints.
+Vesting keeps schedule records in `env.storage().instance()` and therefore
+still faces the byte-budget and TTL-expiry bricking problem. Subscription
+records use persistent storage; only their small counter and enumeration
+indexes remain in instance storage. Escrow, multi-sig wallet, DAO governance,
+and marketplace royalties migrated per-record data to persistent storage with
+`touch_ttl`/`touch_tx_ttl` keeper entrypoints.
 
 Persistent entries have their own TTL cost: a multi-sig transaction or DAO
 proposal that sits below threshold / waiting for votes still needs its TTL
@@ -71,12 +77,29 @@ to `Expired`, self-cleaning stale pending proposals without external keepers, an
 DAO governance limits concurrent proposals to at most 5 active proposals per
 proposer.)
 
-### 4. No events in vesting contract
+Escrow's permissionless `refund_expired` does not remove the persistent-entry
+expiry trap: it can settle an expired-in-time escrow only while its record is
+still present. `touch_ttl` can extend an existing entry, but cannot recover
+one after storage expiry (tracked separately by issue #93).
 
-Vesting remains without an event module. Escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit typed on-chain events.
+### 4. Escrow persistent-entry expiry still traps the record
+
+An escrow whose persistent entry expires becomes inaccessible to contract
+calls until the entry is restored. Keepers can monitor its remaining TTL with
+`ttl_info` and call `touch_ttl` before expiry; `NotFound` from either means
+the id never existed or the entry is already archived. Archived entries need
+a transaction-level `RestoreFootprintOp` (or protocol auto-restoration from a
+simulated invocation) before contract access can resume. The token balance
+remains held by the escrow contract while the record is archived.
+
+### 5. Events coverage
+
+Vesting, escrow, multi-sig wallet, DAO governance, subscription payments, and
+marketplace royalties emit typed lifecycle events. No additional contract
+crate is currently outside this six-contract scope.
 
 
-### 5. Negative authorization coverage outside escrow, vesting, and DAO governance
+### 6. Negative authorization coverage outside escrow, vesting, and DAO governance
 
 **Closed for escrow, vesting, and DAO governance** (was the open item here): dedicated
 negative-auth suites (`crates/escrow/src/authz.rs`, `crates/vesting/src/authz.rs`,
@@ -95,7 +118,7 @@ Still open: other contract entrypoints are proven at call-graph level only.
 Subscription `deposit` and `withdraw_balance` are subscriber-authorized; the
 existing provider-authorized `charge` moves due payments to the provider.
 
-### 6. Vesting rounding residue
+### 7. Vesting rounding residue
 
 Vesting claims use floor division; per-claim residue (at most one stroop
 × number of claims) stays in the contract until the final claim, where it
@@ -103,7 +126,7 @@ is paid out in full (settlement landed: residue is claimable, never lost,
 asserted by `floor_division_residue_stays_claimable_until_final_claim`).
 No dust-sweep entrypoint — revisit only as a convenience.
 
-### 7. Testnet only — no mainnet deployment
+### 8. Testnet only — no mainnet deployment
 
 The escrow contract **is deployed on testnet** with a verified receipt
 round (see the README proof table and `scripts/demo-testnet.sh`). There
@@ -127,15 +150,15 @@ with insufficient balance. A mainnet escrow receipt, once it exists,
 will be added to the README proof table with its own explorer links.
 Total one-time cost to finish: ~18–19 XLM on the issuer account.
 
-### 8. `packages/` are minimal
+### 9. `packages/` are minimal
 
-The TypeScript SDK is now a **generated client from the deployed escrow
-contract's ABI** (`@soroban-forge/escrow-client`, contract ID embedded) —
-replacing the v0.1.0 console-log placeholder. It has no dedicated test
-suite of its own yet, and the Next.js example remains a static landing
-page (stale `teachlink` links fixed; a real demo UI is future work).
+The TypeScript SDK is now generated from the contract ABIs, with six clients
+for escrow, vesting, multi-sig, subscriptions, marketplace royalties, and DAO
+governance. The Next.js example is a live testnet escrow UI with Freighter
+connection and contract actions; dedicated SDK test suites remain follow-up
+work.
 
-### 9. Single maintainer
+### 10. Single maintainer
 
 All commits are by one person. Contributor-facing process exists — scoped
 issues with acceptance criteria, fork-first workflow — but no external
@@ -166,6 +189,7 @@ contributions have landed yet.
 ## Out of scope for the flagship phase (deliberate)
 
 - Plan management, multi-recipient royalties
+- Weighted voting, plan management, multi-recipient royalties
 - Formal verification, external audit (planned before any mainnet use)
 
 ## Subscription record compatibility

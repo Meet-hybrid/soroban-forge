@@ -13,15 +13,9 @@ to the proposer or forfeited to the treasury at a terminal transition.
 Multi-sig wallet transactions live in persistent storage with a
 permissionless TTL keeper, alongside its threshold-and-confirmation state
 machine.
-its splits the same way via `settle_sale`; vesting settles its claims via
-`claim`; subscriptions bill each due period with a real subscriber →
-provider transfer in pull mode or prepaid contract-balance debit, with retry
-and refund behavior; DAO governance now
-dispatches approved opaque actions on-chain and settles a SEP-41 proposal
-bond — pulled at `propose`, refunded to the proposer or forfeited to the
-treasury at a terminal transition.
 
-**Last verified against:** the SDK 27 migration (workspace v0.2.0).
+**Last verified against:** the current workspace pins (`soroban-sdk 28.0.0`,
+`soroban-sdk-macros 27.0.6`, workspace v0.2.0).
 
 ---
 
@@ -31,6 +25,9 @@ treasury at a terminal transition.
 | :--- | :---: | :--- |
 | `create_escrow` | ✅ Implemented | Validates amount/timeout, buyer+seller auth, takes the SEP-41 token address |
 | `deposit` | ✅ Implemented | **Real token transfer** buyer → contract, before any state write |
+| `release` | ✅ Implemented | Seller-authorized; **real token transfer** contract → seller |
+| `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** |
+| `refund_expired` | ✅ Implemented | Permissionless strictly after timeout; `Funded` only, disputed escrows frozen |
 | `release` | ✅ Implemented | Seller-authorized; **real token transfer** contract → seller (full remaining balance) |
 | `release_partial` | ✅ Implemented | Seller-authorized; **real token transfer** of a partial amount contract → seller; `released` accounting tracked; final partial transitions to `Completed`; `refund`/`resolve` operate on remaining balance |
 | `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** of remaining balance |
@@ -39,6 +36,9 @@ treasury at a terminal transition.
 | `cancel` | ✅ Implemented | Buyer, `Pending` only; removes id from each distinct participant index after validation/auth |
 | `get_status` / `get_escrow` / `escrows_for_participant` | ✅ Implemented | Read-only views; participant index excludes cancelled ids but retains other terminal records; live offset pagination, restart at cursor 0 after cancellation |
 | `touch_ttl` | ✅ Implemented | Permissionless TTL keeper for the escrow's persistent entry |
+| Events | ✅ Implemented | Includes distinct `RefundExpired` keeper event; escrow id as topic |
+| Storage | ✅ Persistent + TTL | Per-id persistent entries; instance storage only for the id counter |
+| Tests | ✅ 55 | Full lifecycle, dispute paths, expiry-refund boundary and event coverage, failure ordering, conservation property, **randomized property suite** (proptest), and **negative-auth suite** (`authz.rs`) |
 | Events | ✅ Implemented | `EscrowCreated`, `Deposited`, `Released`, `PartiallyReleased`, `Refunded`, `Disputed`, `Resolved`, `Cancelled`; id as topic |
 | Storage | ✅ Persistent + TTL | Per-id persistent entries; instance storage only for the id counter; **backward-compatible schema migration** via `EscrowDataV1` fallback decode (old records default `released = 0`) |
 | Tests | ✅ 85 | Full lifecycle, dispute paths, cancellation index maintenance and live-pagination interleaving, failure ordering, conservation property, partial-release (valid/multi/final/zero/negative/over-remaining/non-Funded/after-completion/→refund/→dispute→resolve, storage compat, conservation), **randomized property suite** (proptest): conservation over random paths + partial-release sequences, tamper-resilient pool conservation, fund safety over arbitrary call sequences (now includes `release_partial`), multi-party create/cancel participant-index consistency; **negative-auth suite** (`authz.rs`): per-entrypoint wrong-signer rejection, `release_partial` seller-only auth + mutation test, signature/args replay rejection, `env.auths()` authorization-tree assertions |
@@ -52,7 +52,13 @@ treasury at a terminal transition.
 | `claimable`                   | ✅ Implemented     | Read-only                                                                                                                                                                                                                            |
 | `get_status`                  | ✅ Implemented     | Read-only; derived from ledger time + claimed amount, so it is current between claims                                                                                                                                                |
 | `get_schedule`                | ✅ Implemented     | Read-only record view of the linear schedule (issue #125), mirroring `get_tranche_schedule` and the other crates' record views; `NotFound` for unknown ids and tranche ids; no auth, no state change; `claimed` reflects completed claims |
-| Revocation                    | ❌ Not implemented | `Revoked` status reserved                                                                                                                                                                                                            |
+| `reassign_beneficiary`        | ✅ Implemented     | Funder-only; snapshots vested value at the reassignment ledger, preserves the old beneficiary's vested-but-unclaimed balance, and leaves the original start/cliff/duration/total unchanged; unlimited and counted |
+| `claim_for` / `claimable_for` | ✅ Implemented     | Explicit beneficiary-scoped access for former assignments; frozen balances are keyed per schedule and beneficiary, while `claim` / `claimable` address the current beneficiary |
+| Revocation                    | ✅ Implemented     | Funder-only; freezes vesting at the revoke timestamp; reassignment is rejected after revocation, and prior frozen balances remain claimable if revocation follows reassignment |
+| Events                        | ✅ Implemented     | `BeneficiaryReassignedFrom` and `BeneficiaryReassignedTo` identify both parties and include vested-unclaimed amount and reassignment count |
+| Reassignment count            | ✅ Implemented     | Exposed in `VestingSchedule.reassignment_count` through `get_schedule` |
+| Storage                       | ✅ Instance-only   | Schedule-scoped former-beneficiary balances; linear schema additions are storage-breaking; no migration to persistent storage |
+| Tests                         | ✅ Implemented     | Exact same-ledger split, token settlement, schedule isolation, timeline invariants, auth rejection, event count, and revoke interaction |
 | `VestingSchedule.token` field | ✅ Wired           | Read by `claim` for the SEP-41 payout                                                                                                                                                                                                |
 
 ## Multi-Sig Wallet (`crates/multi-sig-wallet`)
@@ -80,16 +86,16 @@ treasury at a terminal transition.
 |---|---|---|
 | `initialize` | ✅ Implemented | One-time permissionless configuration of the SEP-41 governance token used to weight votes |
 | `configure_bond` | ✅ Implemented | One-time permissionless config (token, amount, treasury); first caller wins; `propose` is rejected with `NotInitialized` while unconfigured |
-| `propose` | ✅ Implemented | Stores the target contract, opaque action payload, and voting deadline; enforces proposer cooldown limit (`DEFAULT_MAX_ACTIVE_PROPOSALS = 5`, returning `ForgeError::ProposerCooldown`); **real token transfer** proposer → contract for the bond, before any state write |
+| `propose` | ✅ Implemented | Stores target, action, deadline, `requires` and one optional `conflicts_with`; validates dependencies and cycles; enforces the proposer active-proposal limit of 5; bond transfer before writes |
 | `vote` | ✅ Implemented | One-vote-per-voter; adds the voter's current governance-token balance to the selected tally; zero-balance votes rejected |
-| `execute` | ✅ Implemented | Permissionless majority finalization, then `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Succeeded`; on terminal transitions the bond is **refunded** to the proposer (`Executed`) or **forfeited** to the treasury (`Defeated`) in the same frame; decrements proposer active count |
-| `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; **real token transfer** refund of the bond; decrements proposer active count |
-| `get_proposal` / `get_proposal_count` / `get_proposals` / `has_voted` / `get_active_proposal_count` | ✅ Implemented | Read-only views; pagination with bounds clamping; proposer active proposal count tracking |
+| `execute` | ✅ Implemented | Permissionless majority finalisation and dependency-gated dispatch; unmet requirements return `DeadlineReached`, executed conflicts return `InvalidInput`, and cancelled/defeated requirements permanently strand dependents in `Succeeded`; target failure remains retryable; terminal transitions decrement proposer active count |
+| `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; bond refund; decrements proposer active count |
+| `get_proposal` / `get_dependencies` / `get_proposal_count` / `get_proposals` / `has_voted` / `get_active_proposal_count` | ✅ Implemented | Read-only proposal and dependency-edge views; pagination with bounds clamping and proposer active count |
 | `get_bond_config` | ✅ Implemented | Read-only; `NotInitialized` when no bond is configured |
 | `touch_ttl` | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a proposal; `NotFound` for unknown ids |
-| Events | ✅ Implemented | `Proposed`, `VoteCast` (includes weight), `Finalised`, `BondPosted`, `BondReleased` (`proposal_id` as topic) |
-| Storage | ✅ Persistent + TTL | `DataKey::Proposal` records in persistent storage with 30-day TTL maintenance; count, bond config, governance-token config, custody total, vote markers, and proposer active counts in instance storage |
-| Tests | ✅ 81 | Bond custody lifecycle (post/refund/forfeit/conservation), proposer cooldown limit and decrements, weighted voting and arithmetic boundary tests, rollback-on-failure ordering, cross-contract dispatch + retry, introspection/pagination views, plus a **negative-auth suite** (`authz.rs`): wrong-signer and args-replay rejection, the nested token authorization frame for the bond pull, `env.auths()` authorization-tree assertions |
+| Events | ✅ Implemented | `Proposed` data includes dependency edges; event names/topics otherwise stable; `VoteCast`, `Finalised`, `BondPosted`, `BondReleased` |
+| Storage | ✅ Persistent + TTL | Dependencies live on persistent proposal records; no new top-level keys; count, config, custody, vote markers, and proposer active counts remain in instance storage |
+| Tests | ✅ 85+ | Bond custody, weighted voting and cooldown coverage; dependency ordering/conflicts/cancellation, malformed graph validation, dependency view/events, randomized execution-order mirror property; negative-auth suite retained |
 | Weighted voting | ✅ Implemented | Balance-weighted voting powered by immutable SEP-41 governance token configured at `initialize` |
 
 ## Subscription Payments (`crates/subscription-payments`)
@@ -134,25 +140,16 @@ treasury at a terminal transition.
 | Concern | Status | Notes |
 |---|---|---|
 | Checked arithmetic | ✅ Workspace-wide | Overflow-safe; vesting guards documented |
-| `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, DAO governance, and marketplace royalties proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other two: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
-| Events | ✅ Escrow + Multi-Sig + DAO + Marketplace | Full lifecycle events on escrow, multi-sig wallet, DAO governance, and marketplace royalties |
-| Persistent storage + TTL | ✅ Escrow + Royalties + Multi-Sig + DAO | Per-record persistent entries with `touch_ttl`/`touch_tx_ttl` keepers on escrow, marketplace royalties (royalty + summary), multi-sig (transactions), and DAO (proposals); vesting and subscriptions remain instance-only. TTL policy constants + `bump_entry` helper consolidated in shared-utils (issue #127) and consumed by all four |
-| SEP-41 token settlement | ✅ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Transfers use transfer-before-state ordering; subscription pull-mode charges pay subscriber → provider, while opt-in prepaid subscriptions custody deposits and pay exact debits/refunds |
-| Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
-| Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
-| TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
-| Provenance + verification | ✅ CLI | `soroban-forge verify` checks a WASM artifact / expected hash against a deterministic rebuild using `provenance-manifest.json` | 
-| `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, and DAO governance proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other three: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
-| Events | ⚠️ Escrow + Multi-Sig + DAO | Full lifecycle events on escrow, multi-sig wallet, and DAO governance |
-| Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
-| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Real transfers with transfer-before-state ordering on escrow, vesting, marketplace, DAO, and subscriptions; prepaid subscriptions add contract custody, exact balance debits, and cancellation refunds |
-| Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
-| Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
-| TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
-| CLI | ✅ Implemented | Developer CLI with `build`, `test`, `lint`, `deploy`, `invoke`, and `events` commands |
-| ForgeError registry | ✅ Generated | Machine-readable error registry from Rust source; generates `errors.json` and TypeScript module |
-| TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` from the deployed escrow ABI + five generated clients (`vesting`, `multi-sig-wallet`, `subscription-payments`, `marketplace-royalties`, `dao-governance`) via `scripts/generate-clients.sh`; all six build with `npm run build` (no own test suites yet) |
-| Next.js demo | ✅ Example | `packages/nextjs-example` — testnet escrow demo UI (Freighter connect, friendbot funding, create/deposit/release/refund/dispute/resolve, read, participant list) |
-| CI (fmt/clippy/test/audit/WASM size/provenance) | ✅ Enforced | `--locked`, `-D warnings`, stable toolchain, `wasm32v1-none`, size budget, **provenance manifest job** (SHA-256 of all six WASM artifacts from a clean rebuild) |
-| External audit | ❌ Not performed | Planned as a grant-funded tranche deliverable before any mainnet value custody |
-| Soroban SDK version | ✅ 27.0.6 | Stable Rust; `wasm32v1-none` target |
+| `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, DAO governance, and marketplace royalties have dedicated negative-auth suites; the remaining contracts are covered at call-graph level (see [Known Limitations](KNOWN-LIMITATIONS.md)) |
+| Events | ✅ Implemented | Escrow, multi-sig, DAO, marketplace, subscription, and vesting lifecycle events are covered |
+| Persistent storage + TTL | ✅ Most records | Escrow, royalties, multi-sig, DAO, and subscriptions use persistent records with keeper entrypoints; vesting schedules remain instance-backed |
+| SEP-41 token settlement | ✅ All six contracts | Transfers use transfer-before-state ordering; prepaid subscriptions custody deposits and issue exact debits/refunds |
+| Testnet deployment | ✅ Escrow deployed | Contract ID, WASM hash, and receipt rounds are in the README proof table; the other five contracts are not deployed |
+| Mainnet deployment | ⚠️ Not deployed | Mainnet smoke SAC is live; escrow deployment remains deferred pending funding; no production contract is claimed |
+| TypeScript SDK | ✅ Generated | Six generated clients build from the contract ABIs; dedicated SDK test suites remain follow-up work |
+| CLI | ✅ Implemented | Developer CLI includes `build`, `test`, `lint`, `deploy`, `invoke`, and `events` commands |
+| ForgeError registry | ✅ Generated | Machine-readable error registry and TypeScript module are generated from Rust sources |
+| Next.js demo | ✅ Example | `packages/nextjs-example` provides a testnet escrow UI with Freighter connection and live contract actions |
+| CI | ✅ Enforced | fmt, clippy, workspace tests, audit, WASM size, and provenance checks run with locked dependencies |
+| External audit | ❌ Not performed | Planned before any mainnet value custody |
+| Soroban SDK version | ✅ 28.0.0 | Stable Rust, `wasm32v1-none`; macros package remains pinned to 27.0.6 |

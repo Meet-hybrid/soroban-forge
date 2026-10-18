@@ -10,7 +10,7 @@ Build and run the developer CLI:
 
 ```bash
 # Build CLI binary
-cargo build -p soroban-forge-cli
+cargo build --locked -p soroban-forge-cli
 
 # Scaffold a new Soroban contract crate
 cargo run -p soroban-forge-cli -- new my-token
@@ -81,13 +81,13 @@ cargo metadata --locked --no-deps --format-version 1 > /dev/null
 
 ```bash
 make build
-# or: cargo build --workspace --all-targets
+# or: cargo build --workspace --all-targets --locked
 ```
 
 ### Release Build (WASM Artifacts)
 
 ```bash
-cargo build --release --target wasm32v1-none -p soroban-forge-escrow
+cargo build --locked --release --target wasm32v1-none -p soroban-forge-escrow
 # Builds: target/wasm32v1-none/release/soroban_forge_escrow.wasm
 ```
 
@@ -172,6 +172,32 @@ All comparisons are exact; any mismatch (or a rebuild that fails) exits
 non-zero. `--package` selects a single package; without it, artifacts are
 matched by name inference.
 
+### Decode Failed Invocations
+
+The `decode-failure` helper explains raw Stellar CLI/RPC errors or decodes a
+base64 `TransactionResult` receipt. Include the receipt's optional
+`DiagnosticEvents` XDR to reveal Soroban contract or host error details:
+
+```bash
+# Explain the error text printed by stellar contract invoke
+cargo run -p soroban-forge-cli -- decode-failure \
+  --error 'HostError: Error(Contract, #3)'
+# Soroban contract error #3: ForgeError::InvalidInput. Check the contract's preconditions and authorization requirements.
+
+# Decode a failed transaction result and its diagnostic events
+cargo run -p soroban-forge-cli -- decode-failure \
+  --result-xdr '<base64-transaction-result-xdr>' \
+  --diagnostic-events-xdr '<base64-diagnostic-events-xdr>'
+```
+
+Contract codes 1–15 are named using the shared `ForgeError` registry; unknown
+contract codes are reported without guessing their meaning. Host traps without
+diagnostic events are identified as host aborts, but cannot be attributed to a
+specific contract error. Recognizable connection and RPC failures are reported
+as transport issues. Unrecognized error text and malformed XDR produce a clear
+diagnostic rather than being treated as a successful decode. The helper does
+not retry the invocation or change the behavior of `invoke`.
+
 ## Test Commands
 
 ### Full Test Suite
@@ -185,22 +211,22 @@ make test
 
 ```bash
 # Escrow
-cargo test --workspace --package soroban-forge-escrow
+cargo test --workspace --package soroban-forge-escrow --locked
 
 # Vesting
-cargo test --workspace --package soroban-forge-vesting
+cargo test --workspace --package soroban-forge-vesting --locked
 
 # Multi-Sig Wallet
-cargo test --workspace --package soroban-forge-multi-sig-wallet
+cargo test --workspace --package soroban-forge-multi-sig-wallet --locked
 
 # DAO Governance
-cargo test --workspace --package soroban-forge-dao-governance
+cargo test --workspace --package soroban-forge-dao-governance --locked
 
 # Subscription Payments
-cargo test --workspace --package soroban-forge-subscription-payments
+cargo test --workspace --package soroban-forge-subscription-payments --locked
 
 # Marketplace Royalties
-cargo test --workspace --package soroban-forge-marketplace-royalties
+cargo test --workspace --package soroban-forge-marketplace-royalties --locked
 ```
 
 ## Lint and Format
@@ -223,7 +249,7 @@ make format-check
 
 ```bash
 make lint
-# or: cargo clippy --workspace --all-targets -- -D warnings
+# or: cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 ### Security Audit
@@ -297,6 +323,46 @@ The mapping of contract → package directory lives in
 
 ## Contract Testing Notes
 
+### Contract resource regression reports
+
+The CI resource-report workflow runs one deterministic, storage-writing
+entrypoint scenario for each contract and uploads a machine-readable report.
+For pull requests, it compares each metric with the baseline on the PR's base
+branch and lists deltas by entrypoint in the workflow summary. On the initial
+rollout, when the base branch has no report baseline, CI bootstraps from the
+current measured report; the uploaded report can then be committed as the
+checked-in baseline for future base-branch comparisons.
+
+The report includes host-estimated ledger entry accesses (read and write
+counts), CPU instructions, metered memory, and an estimated transaction fee.
+`footprint_entries` is the sum of the host-reported read and write entry
+counts; this native test-host approximation is not the exact XDR footprint.
+Soroban SDK's native test host undercounts WASM VM costs and the fee estimate
+does not model transaction size or RPC simulation. These reports are for
+relative regression detection only; they are not wall-clock benchmarks or
+mainnet cost guarantees.
+
+Any individual metric increase greater than **20%** fails comparison. Missing,
+malformed, or duplicated scenario metrics fail report generation rather than
+passing silently. To reproduce the checked-in baseline from a clean checkout,
+run:
+
+```bash
+python3 scripts/contract-resource-report.py update-baseline
+```
+
+Review the resulting `reports/contract-resource-baseline.json` diff and commit
+it only when the measured resource change is expected. To produce a report
+without changing the baseline, run:
+
+```bash
+python3 scripts/contract-resource-report.py generate --output contract-resource-report.json
+```
+
+If the local machine cannot link native Rust tests, run the
+**Contract Resource Report** workflow manually and use
+`contract-resource-report.json` from its artifact as the measured baseline.
+
 - Tests use Soroban SDK's `Env` test harness
 - Mock authentication (`mock_all_auths`) for positive tests
 - Integration tests use Stellar Asset Contract (SAC) fixtures
@@ -315,12 +381,40 @@ an existing entry while it remains present in persistent storage.
 An active escrow with no state-changing activity can eventually reach expiry.
 Once the persistent escrow entry has expired, `touch_ttl` cannot recover it:
 the current implementation calls `load_escrow` before attempting the TTL
-extension, and a missing entry is reported as `NotFound`. The expired record
-is therefore inaccessible through the current contract interface. Expiration
-of the record does not remove the token balance; the funds remain in the token
-contract at the escrow contract's address. Long-lived active escrows therefore
-require a keeper to call `touch_ttl` before expiry. Anyone may perform this
-keeper action because `touch_ttl` is permissionless.
+extension, and a missing entry is reported as `NotFound` (the id never
+existed, or its persistent entry was archived). `ttl_info(escrow_id)` is a
+read-only keeper view of the remaining ledgers; poll it and call
+`touch_ttl` while the escrow is still present and its TTL approaches the
+29-day bump threshold. SDK 27 does not expose host TTL introspection to
+contracts, so the contract mirrors each escrow expiration ledger in a
+companion persistent key and updates it alongside the escrow's 30-day TTL
+bumps. The test-only `get_ttl` host helper checks this mirror in tests.
+
+If `ttl_info` or `touch_ttl` returns `NotFound`, determine whether the id
+never existed or its escrow entry was archived. A keeper cannot restore an
+archived entry through a contract call. Prepare a transaction whose Soroban
+footprint includes the escrow data key in `readWrite`, simulate it to populate
+resource and fee data, and submit a standalone `RestoreFootprintOp`; after
+restoration confirms, invoke the contract again to read the record and
+continue the recovery flow. On Protocol 23 and later, a simulated invocation
+may include archived entries in its restore list and restore them
+automatically; the standalone operation is useful when restoration fees
+should be paid separately. Restoring the record does not move escrow funds:
+they remain at the escrow contract's address in the token contract, and any
+payout still requires a successful contract invocation against restored
+state. Keeper calls are permissionless.
+
+### Subscription records
+
+`subscription-payments` stores each `DataKey::Subscription(id)` record in
+persistent storage and extends it to 30 days whenever subscribe, charge,
+charge catch-up, pause, resume, or cancel writes the record. The threshold is
+29 days, following the same extend-to pattern as escrow. The `Count` counter
+and the subscriber/provider enumeration indexes remain in instance storage.
+Any account may call `touch_ttl(subscription_id)` to extend a present record;
+it returns `NotFound` when the id is absent. Keepers should touch long-lived
+subscriptions before their TTL approaches expiry. This storage cutover
+assumes no deployed mainnet instance contains live subscription records.
 
 ### Token trust model
 

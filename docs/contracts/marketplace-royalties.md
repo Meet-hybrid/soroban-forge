@@ -9,6 +9,9 @@ and settled atomically in real SEP-41 tokens by `settle_sale` (one sale) or
 
 ```rust
 fn set_royalty(collection, recipient, bps) -> Result<(), ForgeError>
+fn disable_royalty(collection) -> Result<(), ForgeError>
+fn enable_royalty(collection) -> Result<(), ForgeError>
+fn distribute(collection, seller, amount) -> Result<i128, ForgeError>
 fn distribute(collection, token, payer, seller, amount) -> Result<i128, ForgeError>
 fn settle_sale(collection, token, payer, seller, amount) -> Result<Settlement, ForgeError>
 fn settle_sales(collection, token, payer, sales: Vec<(seller, amount)>) -> Result<Vec<Settlement>, ForgeError>
@@ -138,4 +141,13 @@ A permissionless public keeper entrypoint `touch_ttl(collection)` allows anyone 
 The contract emits typed on-chain lifecycle events for indexers and off-chain monitoring:
 
 - `RoyaltyConfigured` (topic: `collection: Address`) — emitted when a royalty configuration is registered or updated via `set_royalty`. Contains `recipient` and `bps`.
-- `SaleSettled` (topic: `collection: Address`) — emitted once per settled sale via `settle_sale` or normal-size `settle_sales` batches (including zero-share and disabled-royalty sales). A batch larger than ten sales emits one aggregate event to remain within Soroban's event-size budget; its `seller` is the collection sentinel and its amount fields are batch totals, while the return value retains per-sale details. A failed batch emits no contract events because the invocation rolls back. Contains `token`, `payer`, `seller`, `royalty_recipient`, `gross_amount`, `seller_net`, and `royalty_share`.
+- `SaleSettled` (topic: `collection: Address`) — emitted on sale settlement via `settle_sale` or `settle_sales`. Contains `token`, `payer`, `seller`, `royalty_recipient`, `gross_amount`, `seller_net`, and `royalty_share`.
+
+## Per-Sale Split Override
+
+`settle_sale_with_split` accepts an optional `SplitOverride { recipient, bps }`.
+When present, it applies to this sale only and does not change the collection's
+stored configuration. Rates from 0 through 10,000 basis points are valid;
+larger rates fail before any transfer. The existing split helper, summary
+accounting, and `SaleSettled` event are shared with `settle_sale`. Passing
+`None` preserves existing configured behavior.

@@ -1,7 +1,7 @@
 {
   "version": "0.2.0",
   "name": "@soroban-forge/escrow-client",
-  "description": "Generated TypeScript client for the Soroban Forge escrow contract (deployed on Stellar testnet: CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB)",
+  "description": "Unified TypeScript SDK with generated clients for all six Soroban Forge contracts",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
@@ -14,9 +14,12 @@
     "dist"
   ],
   "scripts": {
+    "generate": "node scripts/generate.mjs && node scripts/generate-abi-fixtures.mjs",
+    "generate:clients": "npm run generate",
+    "verify:generated": "npm run generate && node scripts/verify-generated.mjs",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && tsc --project tsconfig.test.json && node --test dist-test/tests/escrow-client.test.js",
+    "test": "tsc && tsc --project tsconfig.test.json && node --test dist-test/tests/escrow-client.test.js dist-test/tests/abi-compatibility.test.js dist-test/tests/vesting-client.test.js",
     "verify:testnet": "npm run build && tsc --project tsconfig.scripts.json && node dist-scripts/verify-testnet.js"
   },
   "dependencies": {
