@@ -46,6 +46,32 @@ export type RevocationPolicy = {tag: "FullClawback", values: void} | {tag: "Keep
  */
 export type VestingStatus = {tag: "Locked", values: void} | {tag: "Vesting", values: void} | {tag: "Completed", values: void} | {tag: "Revoked", values: void};
 
+/**
+ * Status and claimable progress view of a vesting schedule.
+ */
+export interface ScheduleStatusView {
+  /**
+   * Current derived lifecycle state.
+   */
+  status: VestingStatus;
+  /**
+   * Total amount allocated to the schedule.
+   */
+  total_amount: i128;
+  /**
+   * Amount unlocked as of current ledger time.
+   */
+  unlocked_amount: i128;
+  /**
+   * Cumulative amount claimed.
+   */
+  claimed_amount: i128;
+  /**
+   * Amount claimable by the current beneficiary right now.
+   */
+  claimable_amount: i128;
+}
+
 
 /**
  * A single token-vesting schedule.
@@ -291,6 +317,12 @@ export interface Client {
    * than the stored field, so it is always current between claims.
    */
   get_status: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<VestingStatus>>>
+
+  /**
+   * Construct and simulate a get_schedule_status transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Read comprehensive schedule status and claimable amount (read-only view).
+   */
+  get_schedule_status: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<ScheduleStatusView>>>
 
   /**
    * Construct and simulate a revoke transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.

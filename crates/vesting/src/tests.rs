@@ -1136,3 +1136,223 @@ fn reassignment_rejects_unknown_tranche_and_completed_schedules() {
         .unwrap();
     assert_eq!(err, ForgeError::InvalidInput);
 }
+
+#[test]
+fn test_get_schedule_status_comprehensive() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+
+    // 1. Non-existent schedule returns NotFound
+    assert_eq!(
+        client.try_get_schedule_status(&999).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+
+    // 2. Linear schedule
+    let id = create(&client, &token, &accounts);
+
+    // 2a. Before cliff / before start
+    env.ledger().set_timestamp(START);
+    let s_start = client.get_schedule_status(&id);
+    assert_eq!(
+        s_start,
+        ScheduleStatusView {
+            status: VestingStatus::Locked,
+            total_amount: TOTAL,
+            unlocked_amount: 0,
+            claimed_amount: 0,
+            claimable_amount: 0,
+        }
+    );
+
+    env.ledger().set_timestamp(START + CLIFF - 1);
+    let s_locked = client.get_schedule_status(&id);
+    assert_eq!(
+        s_locked,
+        ScheduleStatusView {
+            status: VestingStatus::Locked,
+            total_amount: TOTAL,
+            unlocked_amount: 0,
+            claimed_amount: 0,
+            claimable_amount: 0,
+        }
+    );
+
+    // 2b. Partially unlocked (midway between cliff and duration)
+    // CLIFF = 1,000, DURATION = 4,000, TOTAL = 10,000
+    // Ramp duration = 3,000. At START + 2,500, elapsed = 1,500. Vested = 10,000 * 1,500 / 3,000 = 5,000
+    env.ledger().set_timestamp(START + 2_500);
+    let s_mid = client.get_schedule_status(&id);
+    assert_eq!(
+        s_mid,
+        ScheduleStatusView {
+            status: VestingStatus::Vesting,
+            total_amount: TOTAL,
+            unlocked_amount: 5_000,
+            claimed_amount: 0,
+            claimable_amount: 5_000,
+        }
+    );
+
+    // Partial claim
+    let claimed_first = client.claim(&id);
+    assert_eq!(claimed_first, 5_000);
+    let s_after_claim = client.get_schedule_status(&id);
+    assert_eq!(
+        s_after_claim,
+        ScheduleStatusView {
+            status: VestingStatus::Vesting,
+            total_amount: TOTAL,
+            unlocked_amount: 5_000,
+            claimed_amount: 5_000,
+            claimable_amount: 0,
+        }
+    );
+
+    // 2c. Fully unlocked
+    env.ledger().set_timestamp(START + DURATION);
+    let s_full = client.get_schedule_status(&id);
+    assert_eq!(
+        s_full,
+        ScheduleStatusView {
+            status: VestingStatus::Vesting, // still Vesting until full amount claimed
+            total_amount: TOTAL,
+            unlocked_amount: TOTAL,
+            claimed_amount: 5_000,
+            claimable_amount: 5_000,
+        }
+    );
+
+    // Claim remainder -> Completed
+    let claimed_second = client.claim(&id);
+    assert_eq!(claimed_second, 5_000);
+    let s_completed = client.get_schedule_status(&id);
+    assert_eq!(
+        s_completed,
+        ScheduleStatusView {
+            status: VestingStatus::Completed,
+            total_amount: TOTAL,
+            unlocked_amount: TOTAL,
+            claimed_amount: TOTAL,
+            claimable_amount: 0,
+        }
+    );
+
+    // 2d. Revoked schedule
+    env.ledger().set_timestamp(START);
+    let id_rev = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user2,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+    // Mint tokens to back id_rev
+    let token_admin = StellarAssetClient::new(&env, &token);
+    token_admin.mint(&_cid, &TOTAL);
+
+    // Revoke at 25% through vesting ramp: START + 1,750 (elapsed = 750 / 3,000 = 25% -> 2,500 vested)
+    env.ledger().set_timestamp(START + 1_750);
+    client.revoke(&id_rev);
+
+    let s_revoked_before_claim = client.get_schedule_status(&id_rev);
+    assert_eq!(
+        s_revoked_before_claim,
+        ScheduleStatusView {
+            status: VestingStatus::Revoked,
+            total_amount: TOTAL,
+            unlocked_amount: 2_500,
+            claimed_amount: 0,
+            claimable_amount: 2_500,
+        }
+    );
+
+    // Claim the frozen amount
+    assert_eq!(client.claim(&id_rev), 2_500);
+
+    // Later timestamp still reports Revoked with frozen unlocked_amount and 0 claimable
+    env.ledger().set_timestamp(START + DURATION * 2);
+    let s_revoked_after_claim = client.get_schedule_status(&id_rev);
+    assert_eq!(
+        s_revoked_after_claim,
+        ScheduleStatusView {
+            status: VestingStatus::Revoked,
+            total_amount: TOTAL,
+            unlocked_amount: 2_500,
+            claimed_amount: 2_500,
+            claimable_amount: 0,
+        }
+    );
+
+    // 3. Tranche schedule status
+    env.ledger().set_timestamp(START);
+    let tranches = soroban_sdk::vec![
+        &env,
+        Tranche {
+            unlock_at: 1_000,
+            amount: 3_000,
+        },
+        Tranche {
+            unlock_at: 2_000,
+            amount: 7_000,
+        },
+    ];
+    let tranche_id = client.create_tranche_schedule(&accounts.user3, &token, &tranches);
+    token_admin.mint(&_cid, &TOTAL);
+
+    // Before first tranche
+    env.ledger().set_timestamp(START);
+    let t_start = client.get_schedule_status(&tranche_id);
+    assert_eq!(
+        t_start,
+        ScheduleStatusView {
+            status: VestingStatus::Locked,
+            total_amount: TOTAL,
+            unlocked_amount: 0,
+            claimed_amount: 0,
+            claimable_amount: 0,
+        }
+    );
+
+    // After first tranche (unlock_at = 1,000)
+    env.ledger().set_timestamp(START + 1_000);
+    let t_t1 = client.get_schedule_status(&tranche_id);
+    assert_eq!(
+        t_t1,
+        ScheduleStatusView {
+            status: VestingStatus::Vesting,
+            total_amount: TOTAL,
+            unlocked_amount: 3_000,
+            claimed_amount: 0,
+            claimable_amount: 3_000,
+        }
+    );
+
+    // After second tranche (unlock_at = 2,000)
+    env.ledger().set_timestamp(START + 2_000);
+    let t_t2 = client.get_schedule_status(&tranche_id);
+    assert_eq!(
+        t_t2,
+        ScheduleStatusView {
+            status: VestingStatus::Vesting,
+            total_amount: TOTAL,
+            unlocked_amount: 10_000,
+            claimed_amount: 0,
+            claimable_amount: 10_000,
+        }
+    );
+
+    // Full claim on tranche schedule -> Completed
+    assert_eq!(client.claim(&tranche_id), 10_000);
+    let t_completed = client.get_schedule_status(&tranche_id);
+    assert_eq!(
+        t_completed,
+        ScheduleStatusView {
+            status: VestingStatus::Completed,
+            total_amount: TOTAL,
+            unlocked_amount: 10_000,
+            claimed_amount: 10_000,
+            claimable_amount: 0,
+        }
+    );
+}

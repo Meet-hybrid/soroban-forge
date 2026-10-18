@@ -325,6 +325,19 @@ pub trait SorobanForgeVesting {
         env: Env,
         schedule_id: u64,
     ) -> Result<VestingStatus, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read comprehensive schedule status and claimable amount (read-only view).
+    ///
+    /// Returns schedule status, total amount, unlocked amount, claimed amount,
+    /// and claimable amount at current ledger time without mutating contract state.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — schedule does not exist.
+    fn get_schedule_status(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<ScheduleStatusView, soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Lifecycle state of a vesting schedule.
@@ -340,6 +353,22 @@ pub enum VestingStatus {
     /// Schedule was terminated by the funder before completion; the vested
     /// amount at the revocation timestamp is frozen.
     Revoked,
+}
+
+/// Status and claimable progress view of a vesting schedule.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleStatusView {
+    /// Current derived lifecycle state.
+    pub status: VestingStatus,
+    /// Total amount allocated to the schedule.
+    pub total_amount: i128,
+    /// Amount unlocked as of current ledger time.
+    pub unlocked_amount: i128,
+    /// Cumulative amount claimed.
+    pub claimed_amount: i128,
+    /// Amount claimable by the current beneficiary right now.
+    pub claimable_amount: i128,
 }
 
 /// A single token-vesting schedule.
@@ -755,6 +784,53 @@ impl Vesting {
         match Self::load(&env, schedule_id)? {
             Stored::Linear(schedule) => Self::current_status(&schedule, now),
             Stored::Tranche(schedule) => Self::tranche_status(&schedule, now),
+        }
+    }
+
+    /// Read comprehensive schedule status and claimable amount (read-only view).
+    ///
+    /// Distinguishes schedule kinds, reports current derived status, total,
+    /// unlocked, claimed, and claimable amounts at current ledger time.
+    pub fn get_schedule_status(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<ScheduleStatusView, ForgeError> {
+        let now = env.ledger().timestamp();
+        match Self::load(&env, schedule_id)? {
+            Stored::Linear(schedule) => {
+                let status = Self::current_status(&schedule, now)?;
+                let total_amount = schedule.total_amount;
+                let unlocked_amount = Self::vested_amount(&schedule, now)?;
+                let claimed_amount = schedule.claimed;
+                let claimable_amount = Self::linear_claimable_for(
+                    &env,
+                    schedule_id,
+                    &schedule,
+                    &schedule.beneficiary,
+                    now,
+                )?;
+                Ok(ScheduleStatusView {
+                    status,
+                    total_amount,
+                    unlocked_amount,
+                    claimed_amount,
+                    claimable_amount,
+                })
+            }
+            Stored::Tranche(schedule) => {
+                let status = Self::tranche_status(&schedule, now)?;
+                let total_amount = schedule.total_amount;
+                let unlocked_amount = Self::tranche_unlocked(&schedule, now)?;
+                let claimed_amount = schedule.claimed;
+                let claimable_amount = Self::tranche_claimable(&schedule, now)?;
+                Ok(ScheduleStatusView {
+                    status,
+                    total_amount,
+                    unlocked_amount,
+                    claimed_amount,
+                    claimable_amount,
+                })
+            }
         }
     }
 
