@@ -6,6 +6,7 @@ import {
   networks,
   type EscrowData,
 } from "@soroban-forge/escrow-client";
+import { DaoGovernanceSection } from "./DaoGovernanceSection";
 
 declare global {
   interface Window {
@@ -649,6 +650,15 @@ export default function Home() {
           )}
         </section>
       </div>
+
+      {/* DAO Governance Portal */}
+      <DaoGovernanceSection
+        account={account}
+        rpcUrl={RPC_URL}
+        networkPassphrase={NETWORK_PASSPHRASE}
+        defaultTargetAddress={CONTRACT_ID}
+        onLog={pushLog}
+      />
 
       {/* Log feed */}
       <section className="mt-6">
