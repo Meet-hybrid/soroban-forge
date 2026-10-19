@@ -102,24 +102,22 @@ remains held by the escrow contract while the record is archived.
 Vesting, escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit typed lifecycle events. Other contracts remain to be assessed for event coverage.
 
 
-### 5. Negative authorization coverage outside escrow, vesting, and DAO governance
+### 5. Negative authorization coverage across all contracts
 
-**Closed for escrow, vesting, and DAO governance** (was the open item here): dedicated
-negative-auth suites (`crates/escrow/src/authz.rs`, `crates/vesting/src/authz.rs`,
-`crates/dao-governance/src/authz.rs`) prove per entrypoint that a wrong signer is
-rejected by the host, that armed signatures cannot be replayed over different
-arguments or schedule IDs, and — via `env.auths()` tree assertions — pin the exact
-authorized-invocation tree every creation and payout path demands. The DAO suite
-additionally covers the bond-bearing paths: the proposer's signature must carry the
-nested token `transfer` authorization for the bond pull, and the outgoing
-refund/forfeit transfers are covered by contract self-authorization (blank envelope).
-They also document the verified mechanics: contract self-authorization is implicit
-(the host auto-approves `require_auth` from the executing contract), which is why
-a party signature alone legitimately completes a payout.
-
-Still open: other contract entrypoints are proven at call-graph level only.
-Subscription `deposit` and `withdraw_balance` are subscriber-authorized; the
-existing provider-authorized `charge` moves due payments to the provider.
+**Closed across all contracts**: dedicated negative-auth suites
+(`crates/escrow/src/authz.rs`, `crates/vesting/src/authz.rs`,
+`crates/multi-sig-wallet/src/authz.rs`, `crates/dao-governance/src/authz.rs`,
+`crates/subscription-payments/src/authz.rs`, and
+`crates/marketplace-royalties/src/authz.rs`) prove per entrypoint that a wrong
+signer is rejected by the host, that armed signatures cannot be replayed over
+different arguments, amounts, or resource IDs, and — via `env.auths()` tree
+assertions — pin the exact authorized-invocation tree every creation and payout path
+demands. Permissionless keeper entrypoints (`touch_ttl`, `touch_tx_ttl`) and
+read-only view entrypoints are proven to execute safely under blank envelopes
+(`env.set_auths(&[])` / `env.mock_auths(&[])`).
+The suites also document the verified host mechanics: contract self-authorization
+is implicit (the host auto-approves `require_auth` from the executing contract),
+which is why a party signature alone legitimately completes a payout.
 
 ### 6. Vesting rounding residue
 
