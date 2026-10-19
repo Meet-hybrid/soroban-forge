@@ -66,6 +66,7 @@ fn dao_dispatch_failure_rolls_back_and_retry_composes_successfully() {
         &VOTING_DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &soroban_forge_dao_governance::zero_metadata_hash(&env),
     );
     dao.vote(&proposal_id, &accounts.user2, &true);
     env.ledger().set_timestamp(START + VOTING_DURATION + 1);

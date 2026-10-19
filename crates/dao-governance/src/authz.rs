@@ -146,6 +146,7 @@ fn propose_accepts_the_proposer_signature_with_the_bond_pull() {
                 DURATION,
                 soroban_sdk::Vec::<u64>::new(&env),
                 Option::<u64>::None,
+                crate::zero_metadata_hash(&env),
             )
                 .into_val(&env),
             sub_invokes: &[MockAuthInvoke {
@@ -165,6 +166,7 @@ fn propose_accepts_the_proposer_signature_with_the_bond_pull() {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &crate::zero_metadata_hash(&env),
         )
         .expect("outer ok")
         .expect("contract ok");
@@ -186,6 +188,7 @@ fn propose_authorization_tree_is_proposer_over_bond_transfer() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
 
     // The tree is the proposer's entrypoint frame with the bond pull as its
@@ -205,6 +208,7 @@ fn propose_authorization_tree_is_proposer_over_bond_transfer() {
                         DURATION,
                         soroban_sdk::Vec::<u64>::new(&env),
                         Option::<u64>::None,
+                        crate::zero_metadata_hash(&env),
                     )
                         .into_val(&env),
                 )),
@@ -239,6 +243,7 @@ fn propose_rejects_signature_from_a_non_proposer() {
                 DURATION,
                 soroban_sdk::Vec::<u64>::new(&env),
                 Option::<u64>::None,
+                crate::zero_metadata_hash(&env),
             )
                 .into_val(&env),
             sub_invokes: &[],
@@ -252,6 +257,7 @@ fn propose_rejects_signature_from_a_non_proposer() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
     assert_auth_abort!(res);
     assert_eq!(client.get_proposal_count(), 0);
@@ -271,7 +277,16 @@ fn propose_rejects_signature_over_different_args() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "propose",
-            args: (&accounts.user1, &target_id, payload(&env), DURATION + 1).into_val(&env),
+            args: (
+                &accounts.user1,
+                &target_id,
+                payload(&env),
+                DURATION + 1,
+                soroban_sdk::Vec::<u64>::new(&env),
+                Option::<u64>::None,
+                crate::zero_metadata_hash(&env),
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
@@ -283,6 +298,7 @@ fn propose_rejects_signature_over_different_args() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
     assert_auth_abort!(res);
     assert_eq!(client.get_proposal_count(), 0);
@@ -307,6 +323,7 @@ fn propose_without_nested_token_authorization_buckets_the_token_error() {
                 DURATION,
                 soroban_sdk::Vec::<u64>::new(&env),
                 Option::<u64>::None,
+                crate::zero_metadata_hash(&env),
             )
                 .into_val(&env),
             sub_invokes: &[],
@@ -320,6 +337,7 @@ fn propose_without_nested_token_authorization_buckets_the_token_error() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
     assert!(matches!(res, Err(Ok(ForgeError::TokenTransferFailed))));
     assert_eq!(client.get_proposal_count(), 0);
@@ -349,6 +367,7 @@ fn propose_rejects_token_authorization_over_a_different_bond_amount() {
                 DURATION,
                 soroban_sdk::Vec::<u64>::new(&env),
                 Option::<u64>::None,
+                crate::zero_metadata_hash(&env),
             )
                 .into_val(&env),
             sub_invokes: &[MockAuthInvoke {
@@ -367,6 +386,7 @@ fn propose_rejects_token_authorization_over_a_different_bond_amount() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
     assert!(matches!(res, Err(Ok(ForgeError::TokenTransferFailed))));
     assert_eq!(client.get_proposal_count(), 0);
@@ -389,6 +409,7 @@ fn blank_envelope_aborts_propose_and_writes_nothing() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
     assert_auth_abort!(res);
     // The id counter must not have advanced: the next proposal is id 1.
@@ -400,6 +421,7 @@ fn blank_envelope_aborts_propose_and_writes_nothing() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
     assert_eq!(id, 1);
 }
@@ -419,6 +441,7 @@ fn cancel_accepts_the_proposer_signature_and_pays_the_refund() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
     assert_eq!(tc.balance(&contract_id), BOND);
 
@@ -457,6 +480,7 @@ fn cancel_rejects_a_non_proposer_signature_even_when_armed() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
 
     // A third party signs a call whose `proposer` argument claims to be
@@ -494,6 +518,7 @@ fn cancel_authorization_tree_is_the_proposer_entrypoint_frame() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
 
     client.cancel_proposal(&id, proposer);
@@ -531,6 +556,7 @@ fn execute_refunds_the_bond_under_a_blank_envelope() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
     client.vote(&id, &accounts.user2, &true);
     env.ledger().set_timestamp(START + DURATION + 1);
@@ -561,6 +587,7 @@ fn execute_forfeits_the_bond_under_a_blank_envelope() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
     client.vote(&id, &accounts.user2, &false);
     env.ledger().set_timestamp(START + DURATION + 1);
@@ -591,6 +618,7 @@ fn vote_accepts_the_voter_signature() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
 
     // The voter's entrypoint signature alone completes the vote — no token
@@ -625,6 +653,7 @@ fn vote_rejects_signature_from_a_different_address() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
 
     // A stranger (user3) arms their own signature for a vote whose `voter`
@@ -659,6 +688,7 @@ fn vote_rejects_signature_over_different_args() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
 
     // Correct signer, but the armed authorization covers a *different
@@ -693,6 +723,7 @@ fn vote_authorization_tree_is_the_voter_entrypoint_frame() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
 
     // Under mock_all_auths, cast a vote and pin the recorded auth tree.
@@ -726,6 +757,7 @@ fn blank_envelope_aborts_vote_and_preserves_tally() {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
 
     // No authorization entries: every require_auth fails.

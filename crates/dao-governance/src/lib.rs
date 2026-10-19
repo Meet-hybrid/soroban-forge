@@ -125,8 +125,17 @@ extern crate std;
 use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Bytes,
-    Env, IntoVal, Map, Symbol, Val,
+    BytesN, Env, IntoVal, Map, Symbol, TryFromVal, Val,
 };
+
+/// Default 32-byte all-zero metadata hash used as a backward-compatibility fallback
+/// for legacy proposals created before `metadata_hash` was introduced.
+pub const ZERO_METADATA_HASH: [u8; 32] = [0u8; 32];
+
+/// Construct the canonical 32-byte zero metadata hash (`[0u8; 32]`).
+pub fn zero_metadata_hash(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &ZERO_METADATA_HASH)
+}
 
 /// Public interface for the Soroban Forge DAO governance contract.
 #[contractclient(name = "SorobanForgeDaoGovernanceClient")]
@@ -175,7 +184,8 @@ pub trait SorobanForgeDaoGovernance {
     ///   which case `propose` is rejected too.
     fn get_bond_config(env: Env) -> Result<BondConfig, soroban_forge_shared_utils::ForgeError>;
 
-    /// Create a new proposal with a target contract and encoded action payload.
+    /// Create a new proposal with a target contract, encoded action payload,
+    /// and an immutable 32-byte cryptographic specification `metadata_hash`.
     ///
     /// `duration` (seconds) defines how long voting stays open. Returns the
     /// stable proposal id.
@@ -197,6 +207,7 @@ pub trait SorobanForgeDaoGovernance {
     /// * [`ForgeError::NotFound`] — a dependency id does not exist.
     /// * [`ForgeError::InvalidInput`] — a self edge, duplicate edge, consumed
     ///   proposal reference, or dependency cycle is supplied.
+    #[allow(clippy::too_many_arguments)]
     fn propose(
         env: Env,
         proposer: Address,
@@ -205,6 +216,7 @@ pub trait SorobanForgeDaoGovernance {
         duration: u64,
         requires: soroban_sdk::Vec<u64>,
         conflicts_with: Option<u64>,
+        metadata_hash: BytesN<32>,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
     /// Read the execution-order and conflict edges for a proposal.
@@ -276,6 +288,19 @@ pub trait SorobanForgeDaoGovernance {
         env: Env,
         proposal_id: u64,
     ) -> Result<Proposal, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the immutable 32-byte metadata hash for a proposal (read-only view).
+    ///
+    /// Legacy proposals created before `metadata_hash` was introduced return a
+    /// 32-byte zero hash (`[0u8; 32]`).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no proposal with this id.
+    fn get_proposal_metadata(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<BytesN<32>, soroban_forge_shared_utils::ForgeError>;
 
     /// Return the total number of proposals created (read-only view).
     fn get_proposal_count(env: Env) -> u64;
@@ -388,6 +413,52 @@ pub struct Proposal {
     pub requires: soroban_sdk::Vec<u64>,
     /// Proposal whose execution blocks this one.
     pub conflicts_with: Option<u64>,
+    /// Immutable 32-byte cryptographic hash of the off-chain proposal specification.
+    pub metadata_hash: BytesN<32>,
+}
+
+/// Legacy proposal record written before `metadata_hash` was introduced.
+///
+/// Decoded by [`DaoGovernance::get_proposal_impl`] with a 32-byte zero-hash
+/// fallback (`[0u8; 32]`) to preserve backward compatibility for existing
+/// proposals in persistent storage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalV1 {
+    pub proposal_id: u64,
+    pub proposer: Address,
+    pub target: Address,
+    pub action: Bytes,
+    pub for_votes: i128,
+    pub against_votes: i128,
+    pub voting_ends: u64,
+    pub state: ProposalState,
+    pub bond_token: Address,
+    pub bond_amount: i128,
+    pub bond_state: BondState,
+    pub requires: soroban_sdk::Vec<u64>,
+    pub conflicts_with: Option<u64>,
+}
+
+impl ProposalV1 {
+    fn into_proposal(self, env: &Env) -> Proposal {
+        Proposal {
+            proposal_id: self.proposal_id,
+            proposer: self.proposer,
+            target: self.target,
+            action: self.action,
+            for_votes: self.for_votes,
+            against_votes: self.against_votes,
+            voting_ends: self.voting_ends,
+            state: self.state,
+            bond_token: self.bond_token,
+            bond_amount: self.bond_amount,
+            bond_state: self.bond_state,
+            requires: self.requires,
+            conflicts_with: self.conflicts_with,
+            metadata_hash: zero_metadata_hash(env),
+        }
+    }
 }
 
 /// Dependency edges exposed to indexers independently of the full proposal.
@@ -501,6 +572,7 @@ impl DaoGovernance {
     /// Ordering (load-bearing): the bond transfer runs **before** the id
     /// counter, the proposal record, and the custody total are written, so a
     /// failed transfer leaves no proposal record — see the module docs.
+    #[allow(clippy::too_many_arguments)]
     pub fn propose(
         env: Env,
         proposer: Address,
@@ -509,6 +581,7 @@ impl DaoGovernance {
         duration: u64,
         requires: soroban_sdk::Vec<u64>,
         conflicts_with: Option<u64>,
+        metadata_hash: BytesN<32>,
     ) -> Result<u64, ForgeError> {
         if duration == 0 {
             return Err(ForgeError::InvalidInput);
@@ -556,6 +629,7 @@ impl DaoGovernance {
             bond_state: BondState::Posted,
             requires,
             conflicts_with,
+            metadata_hash,
         };
         let key = DataKey::Proposal(proposal_id);
         env.storage().instance().set(&DataKey::Count, &proposal_id);
@@ -885,6 +959,15 @@ impl DaoGovernance {
         Self::get_proposal_impl(&env, proposal_id)
     }
 
+    /// Read the immutable 32-byte metadata hash for a stored proposal (read-only view).
+    ///
+    /// Preserves backward compatibility for legacy proposals stored without a
+    /// `metadata_hash` field via a 32-byte zero-hash fallback (`[0u8; 32]`).
+    pub fn get_proposal_metadata(env: Env, proposal_id: u64) -> Result<BytesN<32>, ForgeError> {
+        let proposal = Self::get_proposal_impl(&env, proposal_id)?;
+        Ok(proposal.metadata_hash)
+    }
+
     /// Return a proposal's dependency edges for indexers.
     pub fn get_dependencies(env: Env, proposal_id: u64) -> Result<DependencyView, ForgeError> {
         let proposal = Self::get_proposal_impl(&env, proposal_id)?;
@@ -966,10 +1049,19 @@ impl DaoGovernance {
     }
 
     fn get_proposal_impl(env: &Env, proposal_id: u64) -> Result<Proposal, ForgeError> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Proposal(proposal_id))
-            .ok_or(ForgeError::NotFound)
+        let key = DataKey::Proposal(proposal_id);
+        // Read the raw value first: a typed storage read panics when a legacy
+        // stored map has a different field count, which would prevent the
+        // zero-hash fallback from running.
+        if let Some(raw) = env.storage().persistent().get::<DataKey, Val>(&key) {
+            if let Ok(proposal) = Proposal::try_from_val(env, &raw) {
+                return Ok(proposal);
+            }
+            if let Ok(legacy) = ProposalV1::try_from_val(env, &raw) {
+                return Ok(legacy.into_proposal(env));
+            }
+        }
+        Err(ForgeError::NotFound)
     }
 
     /// Permissionless keeper: bump the proposal entry's TTL without changing
@@ -1081,6 +1173,7 @@ mod events {
         #[topic]
         pub proposal_id: u64,
         pub data: Proposal,
+        pub metadata_hash: BytesN<32>,
     }
 
     #[contractevent]
@@ -1126,6 +1219,7 @@ mod events {
         Proposed {
             proposal_id: proposal.proposal_id,
             data: proposal.clone(),
+            metadata_hash: proposal.metadata_hash.clone(),
         }
         .publish(env);
     }
@@ -1269,6 +1363,7 @@ mod tests {
                 &DURATION,
                 &soroban_sdk::Vec::new(&env),
                 &None,
+                &zero_metadata_hash(&env),
             );
             (env, client, accounts, proposal_id, target_id)
         }};
@@ -1471,6 +1566,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         let id3 = client.propose(
             &accounts.user3,
@@ -1479,6 +1575,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         assert_ne!(id2, id3);
     }
@@ -1494,6 +1591,7 @@ mod tests {
                 &0_u64,
                 &soroban_sdk::Vec::new(&env),
                 &None,
+                &zero_metadata_hash(&env),
             )
             .unwrap_err()
             .unwrap();
@@ -1512,7 +1610,8 @@ mod tests {
                     &payload(&env),
                     &DURATION,
                     &self_ref,
-                    &None
+                    &None,
+                    &zero_metadata_hash(&env),
                 )
                 .unwrap_err()
                 .unwrap(),
@@ -1527,7 +1626,8 @@ mod tests {
                     &payload(&env),
                     &DURATION,
                     &unknown,
-                    &None
+                    &None,
+                    &zero_metadata_hash(&env),
                 )
                 .unwrap_err()
                 .unwrap(),
@@ -1543,7 +1643,8 @@ mod tests {
                     &payload(&env),
                     &DURATION,
                     &consumed,
-                    &None
+                    &None,
+                    &zero_metadata_hash(&env),
                 )
                 .unwrap_err()
                 .unwrap(),
@@ -1557,6 +1658,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         client.vote(&executed, &accounts.user3, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -1571,7 +1673,8 @@ mod tests {
                     &payload(&env),
                     &DURATION,
                     &consumed,
-                    &None
+                    &None,
+                    &zero_metadata_hash(&env),
                 )
                 .unwrap_err()
                 .unwrap(),
@@ -1590,6 +1693,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         let second = client.propose(
             &accounts.user2,
@@ -1598,6 +1702,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         // Simulate malformed stored edges forming candidate -> #1 -> #2 ->
         // candidate. Normal calls cannot create forward edges because
@@ -1623,7 +1728,8 @@ mod tests {
                     &payload(&env),
                     &DURATION,
                     &edge,
-                    &None
+                    &None,
+                    &zero_metadata_hash(&env),
                 )
                 .unwrap_err()
                 .unwrap(),
@@ -1642,6 +1748,7 @@ mod tests {
             &DURATION,
             &requires,
             &None,
+            &zero_metadata_hash(&env),
         );
         assert_eq!(client.get_dependencies(&consumer).requires, requires);
         client.vote(&dependency, &accounts.user2, &true);
@@ -1680,6 +1787,7 @@ mod tests {
             &DURATION,
             &requires,
             &None,
+            &zero_metadata_hash(&env),
         );
         client.vote(&consumer, &accounts.user3, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -1709,6 +1817,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &Some(first),
+            &zero_metadata_hash(&env),
         );
         client.vote(&first, &accounts.user2, &true);
         client.vote(&consumer, &accounts.user3, &true);
@@ -1775,6 +1884,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         let err = client
             .try_vote(&proposal_id, &accounts.user2, &true)
@@ -1807,6 +1917,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         client.vote(&id, &accounts.user2, &true);
         client.vote(&id, &accounts.user3, &false);
@@ -1825,6 +1936,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&_env),
             &None,
+            &zero_metadata_hash(&_env),
         );
         let voter = Address::generate(&_env);
         assert_eq!(
@@ -1844,6 +1956,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         let mut proposal = client.get_proposal(&id);
         proposal.for_votes = i128::MAX;
@@ -1984,6 +2097,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         client.cancel_proposal(&fresh_id, &accounts.user3);
         assert_eq!(
@@ -2120,6 +2234,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
 
         client.vote(&proposal_id, &accounts.user2, &true);
@@ -2214,6 +2329,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -2262,6 +2378,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         assert_eq!(env.events().all().events().len(), 3); // transfer + 2
         assert_transfer_event(&env, &accounts.user1, &contract_id, BOND);
@@ -2388,6 +2505,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         client.vote(&proposal_id, &accounts.user2, &false);
 
@@ -2442,6 +2560,7 @@ mod tests {
                 &DURATION,
                 &soroban_sdk::Vec::new(&env),
                 &None,
+                &zero_metadata_hash(&env),
             );
         }
         assert_eq!(client.get_proposal_count(), 5);
@@ -2562,6 +2681,7 @@ mod tests {
                 &DURATION,
                 &soroban_sdk::Vec::new(&env),
                 &None,
+                &zero_metadata_hash(&env),
             )
             .unwrap_err()
             .unwrap();
@@ -2592,6 +2712,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
 
         assert_eq!(tc.balance(&accounts.user1), FUNDS - BOND);
@@ -2619,6 +2740,7 @@ mod tests {
                 &DURATION,
                 &soroban_sdk::Vec::new(&env),
                 &None,
+                &zero_metadata_hash(&env),
             )
             .unwrap_err()
             .unwrap();
@@ -2651,6 +2773,7 @@ mod tests {
                 &DURATION,
                 &soroban_sdk::Vec::new(&env),
                 &None,
+                &zero_metadata_hash(&env),
             )
             .unwrap_err()
             .unwrap();
@@ -2680,6 +2803,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         client.vote(&proposal_id, &accounts.user2, &true);
 
@@ -2713,6 +2837,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         assert_eq!(tc.balance(&contract_id), BOND);
 
@@ -2749,6 +2874,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         client.vote(&proposal_id, &accounts.user2, &false);
 
@@ -2783,6 +2909,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         let cancelled = client.propose(
             &accounts.user2,
@@ -2791,6 +2918,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         let defeated = client.propose(
             &accounts.user3,
@@ -2799,6 +2927,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         client.vote(&executed, &accounts.user2, &true);
         client.vote(&defeated, &accounts.user2, &false);
@@ -2855,6 +2984,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -2892,6 +3022,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         client.vote(&proposal_id, &accounts.user2, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
@@ -2930,6 +3061,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         assert_eq!(bond_held(&env, &contract_id), BOND);
 
@@ -2969,6 +3101,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
 
         client.cancel_proposal(&proposal_id, &accounts.user1);
@@ -3006,6 +3139,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         assert_eq!(client.touch_ttl(&proposal_id), ());
         let proposal = client.get_proposal(&proposal_id);
@@ -3033,6 +3167,7 @@ mod tests {
                 &DURATION,
                 &soroban_sdk::Vec::new(&env),
                 &None,
+                &zero_metadata_hash(&env),
             );
         }
         assert_eq!(
@@ -3049,6 +3184,7 @@ mod tests {
                 &DURATION,
                 &soroban_sdk::Vec::new(&env),
                 &None,
+                &zero_metadata_hash(&env),
             )
             .unwrap_err()
             .unwrap();
@@ -3063,6 +3199,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         assert_eq!(client.get_active_proposal_count(&accounts.user2), 1);
         assert!(id_u2 > 0);
@@ -3080,6 +3217,7 @@ mod tests {
                 &DURATION,
                 &soroban_sdk::Vec::new(&env),
                 &None,
+                &zero_metadata_hash(&env),
             ));
         }
         assert_eq!(
@@ -3102,6 +3240,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         assert_eq!(
             client.get_active_proposal_count(&accounts.user1),
@@ -3126,6 +3265,7 @@ mod tests {
             &DURATION,
             &soroban_sdk::Vec::new(&env),
             &None,
+            &zero_metadata_hash(&env),
         );
         assert_eq!(
             client.get_active_proposal_count(&accounts.user1),
@@ -3139,6 +3279,150 @@ mod tests {
             client.get_active_proposal_count(&accounts.user1),
             DEFAULT_MAX_ACTIVE_PROPOSALS - 1
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Proposal metadata hash & on-chain URI verification (Issue 514)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn propose_persists_metadata_hash_and_getter_retrieves_it() {
+        let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+
+        let metadata_bytes: [u8; 32] = [
+            0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+            0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+            0x19, 0x1a, 0x1b, 0x1c,
+        ];
+        let metadata_hash = BytesN::from_array(&env, &metadata_bytes);
+
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+            &metadata_hash,
+        );
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.metadata_hash, metadata_hash);
+        assert_eq!(client.get_proposal_metadata(&proposal_id), metadata_hash);
+
+        // Unknown proposal ID returns NotFound.
+        assert_eq!(
+            client.try_get_proposal_metadata(&999).unwrap_err().unwrap(),
+            ForgeError::NotFound
+        );
+
+        // Metadata hash remains immutable across voting and execution lifecycle.
+        client.vote(&proposal_id, &accounts.user2, &true);
+        assert_eq!(client.get_proposal_metadata(&proposal_id), metadata_hash);
+
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+        assert_eq!(client.get_proposal_metadata(&proposal_id), metadata_hash);
+
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Executed
+        );
+        assert_eq!(client.get_proposal_metadata(&proposal_id), metadata_hash);
+        assert_eq!(
+            client.get_proposal(&proposal_id).metadata_hash,
+            metadata_hash
+        );
+    }
+
+    #[test]
+    fn proposed_event_includes_metadata_hash_in_payload() {
+        use soroban_sdk::xdr::{self, ScVal};
+
+        let (env, _token, _tc, contract_id, client, accounts, target_id) = fresh_bond!();
+        let metadata_bytes = [0x42u8; 32];
+        let metadata_hash = BytesN::from_array(&env, &metadata_bytes);
+
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+            &metadata_hash,
+        );
+
+        let events = dao_events(&env, &contract_id);
+        assert_eq!(events.len(), 2);
+        let event = &events[0];
+        let xdr::ContractEventBody::V0(body) = &event.body;
+        assert_eq!(
+            body.topics.first().unwrap(),
+            &ScVal::Symbol("proposed".try_into().unwrap())
+        );
+        assert_eq!(body.topics.get(1).unwrap(), &ScVal::U64(proposal_id));
+
+        let ScVal::Map(Some(map)) = &body.data else {
+            panic!("Proposed event data must be a map");
+        };
+        let hash_val = map
+            .iter()
+            .find(|entry| entry.key == ScVal::Symbol("metadata_hash".try_into().unwrap()))
+            .map(|entry| entry.val.clone())
+            .expect("Proposed event payload must include metadata_hash");
+        assert_eq!(
+            hash_val,
+            ScVal::Bytes(metadata_bytes.to_vec().try_into().unwrap())
+        );
+    }
+
+    #[test]
+    fn legacy_proposal_without_metadata_hash_falls_back_to_zero_hash() {
+        let (env, token, _tc, contract_id, client, accounts, target_id) = fresh_bond!();
+
+        // Store a legacy ProposalV1 (pre-Issue 514 schema without `metadata_hash`)
+        // directly in persistent storage and verify backward compatibility.
+        let legacy_id: u64 = 1;
+        let legacy = ProposalV1 {
+            proposal_id: legacy_id,
+            proposer: accounts.user1.clone(),
+            target: target_id.clone(),
+            action: payload(&env),
+            for_votes: 0,
+            against_votes: 0,
+            voting_ends: START + DURATION,
+            state: ProposalState::Active,
+            bond_token: token.clone(),
+            bond_amount: BOND,
+            bond_state: BondState::Posted,
+            requires: soroban_sdk::Vec::new(&env),
+            conflicts_with: None,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Proposal(legacy_id), &legacy);
+            env.storage().instance().set(&DataKey::Count, &1u64);
+            env.storage().instance().set(&DataKey::BondHeld, &BOND);
+        });
+        // Fund contract custody so execution/refund succeeds cleanly.
+        StellarAssetClient::new(&env, &token).mint(&contract_id, &BOND);
+
+        let expected_zero = zero_metadata_hash(&env);
+        let loaded = client.get_proposal(&legacy_id);
+        assert_eq!(loaded.proposal_id, legacy_id);
+        assert_eq!(loaded.metadata_hash, expected_zero);
+        assert_eq!(client.get_proposal_metadata(&legacy_id), expected_zero);
+
+        let page = client.get_proposals(&0, &10);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.get(0).unwrap().metadata_hash, expected_zero);
+
+        // Voting and execution on the legacy proposal succeed and preserve the zero hash.
+        client.vote(&legacy_id, &accounts.user2, &true);
+        assert_eq!(client.get_proposal_metadata(&legacy_id), expected_zero);
     }
 }
 

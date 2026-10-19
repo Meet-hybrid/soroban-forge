@@ -139,6 +139,7 @@ impl World {
             &DURATION,
             &soroban_sdk::Vec::new(&self.env),
             &None,
+            &crate::zero_metadata_hash(&self.env),
         )
     }
 
@@ -181,7 +182,7 @@ proptest! {
             let requires: std::vec::Vec<usize> = (0..idx).filter(|parent| mask & (1 << parent) != 0).collect();
             let mut sdk_requires = soroban_sdk::Vec::new(&w.env);
             for parent in &requires { sdk_requires.push_back(ids[*parent]); }
-            let id = w.client().propose(&w.accounts.user1, &w.target, &w.payload(), &DURATION, &sdk_requires, &None);
+            let id = w.client().propose(&w.accounts.user1, &w.target, &w.payload(), &DURATION, &sdk_requires, &None, &crate::zero_metadata_hash(&w.env));
             w.client().vote(&id, &w.accounts.user1, &true);
             ids.push(id);
             edges.push(requires);

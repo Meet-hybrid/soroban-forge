@@ -70,6 +70,7 @@ fn generate() -> Value {
         &DURATION,
         &soroban_sdk::Vec::new(&env),
         &None,
+        &crate::zero_metadata_hash(&env),
     );
     let mut events = Vec::new();
     capture(&env, &contract, &mut events);
