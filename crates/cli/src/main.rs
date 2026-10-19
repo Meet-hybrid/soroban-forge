@@ -4,6 +4,8 @@
 //! soroban-forge build
 //! soroban-forge build --wasm --check-size
 //! soroban-forge test --package soroban-forge-escrow
+//! soroban-forge snapshot --check --package soroban-forge-escrow
+//! soroban-forge snapshot --update
 //! soroban-forge lint --fix
 //! soroban-forge deploy path/to/escrow.wasm --network testnet
 //! soroban-forge verify --wasm path/to/contract.wasm
@@ -18,7 +20,7 @@ mod commands;
 use clap::{Parser, Subcommand};
 use cli::{
     BuildArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs,
-    ScaffoldValidateArgs, TestArgs, VerifyArgs,
+    ScaffoldValidateArgs, SnapshotArgs, TestArgs, VerifyArgs,
 };
 
 #[derive(Parser, Debug)]
@@ -38,6 +40,7 @@ pub enum Commands {
     Build(BuildArgs),
     Lint(LintArgs),
     Test(TestArgs),
+    Snapshot(SnapshotArgs),
     Deploy(DeployArgs),
     New(NewArgs),
     ScaffoldValidate(ScaffoldValidateArgs),
@@ -56,6 +59,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Build(args) => commands::build::run(args)?,
         Commands::Lint(args) => commands::lint::run(args)?,
         Commands::Test(args) => commands::test::run(args)?,
+        Commands::Snapshot(args) => commands::snapshot::run(args)?,
         Commands::Deploy(args) => commands::deploy::run(args)?,
         Commands::New(args) => commands::new::run(args)?,
         Commands::ScaffoldValidate(args) => commands::scaffold_validate::run(args)?,
@@ -167,5 +171,46 @@ mod tests {
             args.path,
             std::path::PathBuf::from("crates/example-contract")
         );
+    }
+
+    #[test]
+    fn snapshot_flags_parse_and_conflict_when_both_check_and_update_are_passed() {
+        let check_cli = Cli::try_parse_from([
+            "soroban-forge",
+            "snapshot",
+            "--check",
+            "--package",
+            "soroban-forge-escrow",
+        ])
+        .unwrap();
+        let Commands::Snapshot(check_args) = check_cli.command else {
+            panic!("expected snapshot command");
+        };
+        assert!(check_args.check);
+        assert!(!check_args.update);
+        assert_eq!(check_args.package.as_deref(), Some("soroban-forge-escrow"));
+
+        let update_cli = Cli::try_parse_from(["soroban-forge", "snapshot", "--update"]).unwrap();
+        let Commands::Snapshot(update_args) = update_cli.command else {
+            panic!("expected snapshot command");
+        };
+        assert!(update_args.update);
+        assert!(!update_args.check);
+        assert!(update_args.package.is_none());
+
+        assert!(Cli::try_parse_from(["soroban-forge", "snapshot", "--check", "--update"]).is_err());
+    }
+
+    #[test]
+    fn snapshot_help_documents_package_check_and_update_flags() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("snapshot")
+            .expect("snapshot subcommand must exist")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--package"));
+        assert!(help.contains("--check"));
+        assert!(help.contains("--update"));
     }
 }

@@ -7,5 +7,6 @@ pub mod invoke;
 pub mod lint;
 pub mod new;
 pub mod scaffold_validate;
+pub mod snapshot;
 pub mod test;
 pub mod verify;

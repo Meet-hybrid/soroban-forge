@@ -31,6 +31,19 @@ pub struct TestArgs {
     pub package: Option<String>,
 }
 
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotArgs {
+    /// Crate to snapshot-test; checks the whole workspace when omitted.
+    #[arg(short, long)]
+    pub package: Option<String>,
+    /// Validate existing snapshots without modifying disk (exits non-zero on diffs).
+    #[arg(long, default_value_t = false, conflicts_with = "update")]
+    pub check: bool,
+    /// Update snapshot files when contract interfaces or trace behaviors change intentionally.
+    #[arg(long, default_value_t = false, conflicts_with = "check")]
+    pub update: bool,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct DeployArgs {
     pub wasm: String,

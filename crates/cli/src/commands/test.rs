@@ -11,7 +11,7 @@ pub fn run(args: TestArgs) -> Result<()> {
     Ok(())
 }
 
-fn exit_code_for_status(status: &std::process::ExitStatus) -> i32 {
+pub(crate) fn exit_code_for_status(status: &std::process::ExitStatus) -> i32 {
     if status.success() {
         0
     } else {
@@ -19,13 +19,22 @@ fn exit_code_for_status(status: &std::process::ExitStatus) -> i32 {
     }
 }
 
-fn test_args(package: Option<&str>) -> Vec<String> {
+pub(crate) fn test_args(package: Option<&str>) -> Vec<String> {
     let mut argv = vec!["test".to_owned()];
     match package {
         Some(pkg) => argv.extend(["--package".to_owned(), pkg.to_owned()]),
         None => argv.push("--workspace".to_owned()),
     }
     argv
+}
+
+pub(crate) fn format_summary_line(
+    label: &str,
+    passed: usize,
+    modified: usize,
+    failed: usize,
+) -> String {
+    format!("{label}: {passed} passing, {modified} modified, {failed} failed")
 }
 
 #[cfg(test)]
