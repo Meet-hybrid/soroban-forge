@@ -410,6 +410,48 @@ pub trait SorobanForgeSubscriptionPayments {
         offset: u32,
         limit: u32,
     ) -> Result<Vec<Subscription>, soroban_forge_shared_utils::ForgeError>;
+
+    /// Subscribe `subscriber` to `provider`'s service at `amount` per `period`
+    /// with a configurable overdue `grace_period` (in seconds).
+    fn subscribe_with_grace_period(
+        env: Env,
+        subscriber: Address,
+        provider: Address,
+        token: Address,
+        amount: i128,
+        period: u64,
+        grace_period: u64,
+    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+
+    /// Configure or update the overdue `grace_period` (duration in seconds) for
+    /// `subscription_id`.
+    ///
+    /// Requires the subscriber. Rejected if the subscription is `Cancelled` or
+    /// if computing the active grace deadline overflows `u64`.
+    fn set_grace_period(
+        env: Env,
+        subscription_id: u64,
+        grace_period: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Alias for [`Self::set_grace_period`]: configure the overdue `grace_period`
+    /// (in seconds) for `subscription_id`.
+    fn configure_grace_period(
+        env: Env,
+        subscription_id: u64,
+        grace_period: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read whether `subscription_id` is currently within its overdue grace
+    /// period (`now <= past_due_since + grace_period`).
+    fn is_in_grace_period(env: Env, subscription_id: u64) -> bool;
+
+    /// Read the active grace period deadline (`past_due_since + grace_period`)
+    /// for `subscription_id`, or `None` when not overdue.
+    fn get_grace_deadline(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<Option<u64>, soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Lifecycle state of a subscription.
@@ -455,6 +497,11 @@ pub struct Subscription {
     /// Set when a charge observes an elapsed due time without a successful
     /// payment; cleared on a successful charge.
     pub past_due_since: Option<u64>,
+    /// Configurable grace period duration in seconds (defaults to 0).
+    pub grace_period: u64,
+    /// Active grace period deadline (`past_due_since + grace_period`), or `None`
+    /// while the subscription is current or cancelled.
+    pub grace_deadline: Option<u64>,
     /// Per-metric usage quotas priced on top of `amount`.
     ///
     /// Empty is the flat flow: the period bills exactly `amount`. The list is
@@ -705,6 +752,8 @@ impl SubscriptionPayments {
             subscription.prepaid_balance = Some(remaining);
             subscription.last_charged = next_due;
             subscription.failed_attempts = 0;
+            subscription.past_due_since = None;
+            subscription.grace_deadline = None;
             subscription.status = SubscriptionStatus::Active;
             subscription.paused_at = None;
             Self::rollover_usage(&env, &subscription);
@@ -727,6 +776,8 @@ impl SubscriptionPayments {
             Ok(Ok(())) => {
                 subscription.last_charged = next_due;
                 subscription.failed_attempts = 0;
+                subscription.past_due_since = None;
+                subscription.grace_deadline = None;
                 subscription.status = SubscriptionStatus::Active;
                 subscription.paused_at = None;
                 // Period rollover: the meters go in the same frame that closes
@@ -746,6 +797,19 @@ impl SubscriptionPayments {
     }
 
     fn record_failed_charge(env: &Env, subscription: &mut Subscription) -> Result<(), ForgeError> {
+        let is_initial_failure = subscription.past_due_since.is_none();
+        let initial_grace = if is_initial_failure {
+            let now = env.ledger().timestamp();
+            let deadline = now
+                .checked_add(subscription.grace_period)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            subscription.past_due_since = Some(now);
+            subscription.grace_deadline = Some(deadline);
+            Some((now, deadline))
+        } else {
+            None
+        };
+
         let failed = subscription.failed_attempts.saturating_add(1);
         subscription.failed_attempts = failed;
         subscription.status = if failed >= MAX_RETRIES {
@@ -753,6 +817,9 @@ impl SubscriptionPayments {
         } else {
             SubscriptionStatus::PastDue
         };
+        if subscription.status == SubscriptionStatus::Cancelled {
+            subscription.grace_deadline = None;
+        }
         let refund = if subscription.status == SubscriptionStatus::Cancelled {
             if let Some(balance) = subscription.prepaid_balance {
                 if balance > 0 {
@@ -780,6 +847,15 @@ impl SubscriptionPayments {
             &DataKey::Subscription(subscription.subscription_id),
             subscription,
         );
+        if let Some((past_due_since, grace_deadline)) = initial_grace {
+            events::grace_period_entered(
+                env,
+                subscription.subscription_id,
+                past_due_since,
+                subscription.grace_period,
+                grace_deadline,
+            );
+        }
         if let Some(amount) = refund {
             events::balance_refunded(env, subscription.subscription_id, amount, 0);
         }
@@ -913,6 +989,8 @@ impl SubscriptionPayments {
 
         if periods > 0 {
             subscription.failed_attempts = 0;
+            subscription.past_due_since = None;
+            subscription.grace_deadline = None;
             subscription.status = SubscriptionStatus::Active;
             subscription.paused_at = None;
             env.storage()
@@ -1096,6 +1174,7 @@ impl SubscriptionPayments {
 
         subscription.status = SubscriptionStatus::Cancelled;
         subscription.paused_at = None;
+        subscription.grace_deadline = None;
         env.storage()
             .instance()
             .set(&DataKey::Subscription(subscription_id), &subscription);
@@ -1168,6 +1247,119 @@ impl SubscriptionPayments {
         Self::resolve_page(&env, &ids, offset, limit)
     }
 
+    /// Create a new subscription with a configurable `grace_period` (duration
+    /// in seconds).
+    pub fn subscribe_with_grace_period(
+        env: Env,
+        subscriber: Address,
+        provider: Address,
+        token: Address,
+        amount: i128,
+        period: u64,
+        grace_period: u64,
+    ) -> Result<u64, ForgeError> {
+        if amount <= 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        if period == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        subscriber.require_auth();
+
+        Self::create_subscription_with_grace(
+            &env,
+            subscriber,
+            provider,
+            token,
+            amount,
+            period,
+            grace_period,
+        )
+    }
+
+    /// Configure or update the overdue `grace_period` (in seconds) for
+    /// `subscription_id`.
+    ///
+    /// Requires the subscriber. Rejected if `subscription_id` is `Cancelled`.
+    /// If the subscription is currently `PastDue`, recomputes `grace_deadline`
+    /// using safe `checked_add`.
+    pub fn set_grace_period(
+        env: Env,
+        subscription_id: u64,
+        grace_period: u64,
+    ) -> Result<(), ForgeError> {
+        let mut subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        if subscription.status == SubscriptionStatus::Cancelled {
+            return Err(ForgeError::InvalidInput);
+        }
+        let updated_deadline = match subscription.past_due_since {
+            Some(since) => Some(
+                since
+                    .checked_add(grace_period)
+                    .ok_or(ForgeError::ArithmeticOverflow)?,
+            ),
+            None => None,
+        };
+        subscription.subscriber.require_auth();
+
+        subscription.grace_period = grace_period;
+        subscription.grace_deadline = updated_deadline;
+        env.storage()
+            .instance()
+            .set(&DataKey::Subscription(subscription_id), &subscription);
+        Ok(())
+    }
+
+    /// Alias for [`Self::set_grace_period`]: configure the overdue `grace_period`
+    /// (in seconds) for `subscription_id`.
+    pub fn configure_grace_period(
+        env: Env,
+        subscription_id: u64,
+        grace_period: u64,
+    ) -> Result<(), ForgeError> {
+        Self::set_grace_period(env, subscription_id, grace_period)
+    }
+
+    /// Read whether `subscription_id` is currently within its overdue grace
+    /// period (`now <= past_due_since + grace_period`).
+    ///
+    /// Returns `false` if the subscription does not exist, is not `PastDue`,
+    /// has no `past_due_since` timestamp, or `past_due_since + grace_period`
+    /// overflows `u64`.
+    pub fn is_in_grace_period(env: Env, subscription_id: u64) -> bool {
+        let Ok(subscription) = Self::get_subscription_impl(&env, subscription_id) else {
+            return false;
+        };
+        if subscription.status != SubscriptionStatus::PastDue {
+            return false;
+        }
+        let Some(past_due_since) = subscription.past_due_since else {
+            return false;
+        };
+        let Some(deadline) = past_due_since.checked_add(subscription.grace_period) else {
+            return false;
+        };
+        env.ledger().timestamp() <= deadline
+    }
+
+    /// Read the active grace period deadline (`past_due_since + grace_period`)
+    /// for `subscription_id`, or `None` when the subscription is not overdue.
+    pub fn get_grace_deadline(env: Env, subscription_id: u64) -> Result<Option<u64>, ForgeError> {
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        if subscription.status != SubscriptionStatus::PastDue {
+            return Ok(None);
+        }
+        match subscription.past_due_since {
+            Some(past_due_since) => {
+                let deadline = past_due_since
+                    .checked_add(subscription.grace_period)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+                Ok(Some(deadline))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Create a new subscription through the single shared creation path used
     /// by both `subscribe` and `subscribe_on_behalf_of`.
     ///
@@ -1186,6 +1378,18 @@ impl SubscriptionPayments {
         amount: i128,
         period: u64,
     ) -> Result<u64, ForgeError> {
+        Self::create_subscription_with_grace(env, subscriber, provider, token, amount, period, 0)
+    }
+
+    fn create_subscription_with_grace(
+        env: &Env,
+        subscriber: Address,
+        provider: Address,
+        token: Address,
+        amount: i128,
+        period: u64,
+        grace_period: u64,
+    ) -> Result<u64, ForgeError> {
         let subscription_id = Self::next_id(env)?;
         let subscription = Subscription {
             subscription_id,
@@ -1199,6 +1403,8 @@ impl SubscriptionPayments {
             paused_at: None,
             failed_attempts: 0,
             past_due_since: None,
+            grace_period,
+            grace_deadline: None,
             // Flat by default: a subscription is metered only when the
             // subscriber declares quotas (today via `set_quotas`, and later
             // copied from the plan it joins).
@@ -1528,6 +1734,31 @@ mod events {
         pub subscription_id: u64,
         pub amount: i128,
         pub balance_after: i128,
+    }
+
+    #[contractevent]
+    pub struct GracePeriodEntered {
+        #[topic]
+        pub subscription_id: u64,
+        pub past_due_since: u64,
+        pub grace_period: u64,
+        pub grace_deadline: u64,
+    }
+
+    pub fn grace_period_entered(
+        env: &Env,
+        subscription_id: u64,
+        past_due_since: u64,
+        grace_period: u64,
+        grace_deadline: u64,
+    ) {
+        GracePeriodEntered {
+            subscription_id,
+            past_due_since,
+            grace_period,
+            grace_deadline,
+        }
+        .publish(env);
     }
 
     pub fn deposited(env: &Env, subscription_id: u64, amount: i128, balance_after: i128) {
@@ -2537,5 +2768,194 @@ mod tests {
 
         let sub = client.get_subscription(&subscription_id);
         assert_eq!(sub.last_charged, START + PERIOD * 2);
+    }
+
+    // -------------------------------------------------------------------
+    // Grace period configuration for overdue charges (Issue 513)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn grace_period_expiration_boundaries_and_view_queries() {
+        let (env, token, _tc, _contract_id, client, accounts, _id) = setup!();
+        let broke_user = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&broke_user, &10_i128);
+
+        let grace: u64 = 259_200; // 3 days
+        let sub_id = client.subscribe_with_grace_period(
+            &broke_user,
+            &accounts.validator,
+            &token,
+            &AMOUNT,
+            &PERIOD,
+            &grace,
+        );
+
+        let initial = client.get_subscription(&sub_id);
+        assert_eq!(initial.grace_period, grace);
+        assert_eq!(initial.past_due_since, None);
+        assert_eq!(initial.grace_deadline, None);
+        assert!(!client.is_in_grace_period(&sub_id));
+        assert_eq!(client.get_grace_deadline(&sub_id), None);
+        assert!(!client.is_in_grace_period(&999));
+
+        let failure_time = START + PERIOD;
+        env.ledger().set_timestamp(failure_time);
+
+        // Initial charge fails -> enters PastDue and starts grace period
+        assert_eq!(client.charge(&sub_id), 0);
+
+        let expected_deadline = failure_time + grace;
+        let overdue = client.get_subscription(&sub_id);
+        assert_eq!(overdue.status, SubscriptionStatus::PastDue);
+        assert_eq!(overdue.failed_attempts, 1);
+        assert_eq!(overdue.past_due_since, Some(failure_time));
+        assert_eq!(overdue.grace_deadline, Some(expected_deadline));
+        assert_eq!(client.get_grace_deadline(&sub_id), Some(expected_deadline));
+
+        // Start of grace period: now == past_due_since
+        assert!(client.is_in_grace_period(&sub_id));
+
+        // Mid grace period
+        env.ledger().set_timestamp(failure_time + grace / 2);
+        assert!(client.is_in_grace_period(&sub_id));
+
+        // Exact boundary: now == past_due_since + grace_period -> true
+        env.ledger().set_timestamp(expected_deadline);
+        assert!(client.is_in_grace_period(&sub_id));
+
+        // One second past boundary: now > past_due_since + grace_period -> false
+        env.ledger().set_timestamp(expected_deadline + 1);
+        assert!(!client.is_in_grace_period(&sub_id));
+    }
+
+    #[test]
+    fn retry_charge_during_grace_clears_past_due_since_and_grace_status() {
+        let (env, token, tc, _contract_id, client, accounts, _id) = setup!();
+        let broke_user = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&broke_user, &10_i128);
+
+        let sub_id = client.subscribe(&broke_user, &accounts.validator, &token, &AMOUNT, &PERIOD);
+        let grace: u64 = 3_600;
+        client.set_grace_period(&sub_id, &grace);
+        assert_eq!(client.get_subscription(&sub_id).grace_period, grace);
+
+        let failure_time = START + PERIOD;
+        env.ledger().set_timestamp(failure_time);
+
+        // Attempt 1 fails -> PastDue, enters grace period
+        assert_eq!(client.charge(&sub_id), 0);
+        assert!(client.is_in_grace_period(&sub_id));
+        assert_eq!(
+            client.get_subscription(&sub_id).past_due_since,
+            Some(failure_time)
+        );
+        assert_eq!(
+            client.get_subscription(&sub_id).grace_deadline,
+            Some(failure_time + grace)
+        );
+
+        // Attempt 2 fails inside grace window -> past_due_since and grace_deadline stay anchored
+        env.ledger().set_timestamp(failure_time + 1_200);
+        assert_eq!(client.charge(&sub_id), 0);
+        let after_second_fail = client.get_subscription(&sub_id);
+        assert_eq!(after_second_fail.status, SubscriptionStatus::PastDue);
+        assert_eq!(after_second_fail.failed_attempts, 2);
+        assert_eq!(after_second_fail.past_due_since, Some(failure_time));
+        assert_eq!(after_second_fail.grace_deadline, Some(failure_time + grace));
+        assert!(client.is_in_grace_period(&sub_id));
+
+        // Fund subscriber and retry during grace period -> succeeds, clears arrears and grace status
+        StellarAssetClient::new(&env, &token).mint(&broke_user, &10_000_i128);
+        env.ledger().set_timestamp(failure_time + 2_400);
+        assert_eq!(client.charge(&sub_id), AMOUNT);
+
+        let recovered = client.get_subscription(&sub_id);
+        assert_eq!(recovered.status, SubscriptionStatus::Active);
+        assert_eq!(recovered.failed_attempts, 0);
+        assert_eq!(recovered.past_due_since, None);
+        assert_eq!(recovered.grace_deadline, None);
+        assert!(!client.is_in_grace_period(&sub_id));
+        assert_eq!(client.get_grace_deadline(&sub_id), None);
+        assert_eq!(tc.balance(&accounts.validator), AMOUNT);
+    }
+
+    #[test]
+    fn grace_period_entered_event_and_zero_grace_default_backward_compatibility() {
+        use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
+
+        let (env, token, _tc, contract_id, client, accounts, _id) = setup!();
+        let broke_user = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&broke_user, &10_i128);
+
+        // Default subscribe initializes grace_period to 0
+        let sub_id = client.subscribe(&broke_user, &accounts.validator, &token, &AMOUNT, &PERIOD);
+        let sub = client.get_subscription(&sub_id);
+        assert_eq!(sub.grace_period, 0);
+        assert_eq!(sub.past_due_since, None);
+        assert_eq!(sub.grace_deadline, None);
+
+        let failure_time = START + PERIOD;
+        env.ledger().set_timestamp(failure_time);
+
+        // Initial charge failure emits GracePeriodEntered once
+        assert_eq!(client.charge(&sub_id), 0);
+
+        let grace_topic = ScVal::Symbol(ScSymbol::try_from("grace_period_entered").unwrap());
+        let grace_events: std::vec::Vec<_> = env
+            .events()
+            .all()
+            .filter_by_contract(&contract_id)
+            .events()
+            .iter()
+            .filter(|event| {
+                let ContractEventBody::V0(body) = &event.body;
+                body.topics.first() == Some(&grace_topic)
+            })
+            .cloned()
+            .collect();
+        assert_eq!(grace_events.len(), 1);
+        let ContractEventBody::V0(body) = &grace_events[0].body;
+        assert_eq!(body.topics.get(1), Some(&ScVal::U64(sub_id)));
+        let ScVal::Map(Some(entries)) = &body.data else {
+            panic!("GracePeriodEntered data must be a map");
+        };
+        let find_u64 = |key: &str| -> u64 {
+            let k = ScVal::Symbol(ScSymbol::try_from(key).unwrap());
+            match entries.iter().find(|e| e.key == k).map(|e| &e.val) {
+                Some(ScVal::U64(v)) => *v,
+                other => panic!("unexpected field {key}: {other:?}"),
+            }
+        };
+        assert_eq!(find_u64("past_due_since"), failure_time);
+        assert_eq!(find_u64("grace_period"), 0);
+        assert_eq!(find_u64("grace_deadline"), failure_time);
+
+        // With 0 grace period: true at exact failure timestamp, false 1 second later
+        assert!(client.is_in_grace_period(&sub_id));
+        env.ledger().set_timestamp(failure_time + 1);
+        assert!(!client.is_in_grace_period(&sub_id));
+
+        // Second consecutive failed charge does NOT re-emit GracePeriodEntered
+        assert_eq!(client.charge(&sub_id), 0);
+        let second_events: std::vec::Vec<_> = env
+            .events()
+            .all()
+            .filter_by_contract(&contract_id)
+            .events()
+            .iter()
+            .filter(|event| {
+                let ContractEventBody::V0(body) = &event.body;
+                body.topics.first() == Some(&grace_topic)
+            })
+            .cloned()
+            .collect();
+        assert!(second_events.is_empty());
+
+        // Safe math checked_add overflow check on set_grace_period while PastDue
+        let overflow_err = client
+            .try_set_grace_period(&sub_id, &u64::MAX)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(overflow_err, ForgeError::ArithmeticOverflow);
     }
 }
