@@ -1396,3 +1396,25 @@ fn blank_envelope_aborts_remove_withdrawal_limit_and_preserves_policy_and_window
     assert_eq!(w_tx, 2);
     assert_eq!(client.get_window_usage(&token), 300);
 }
+
+#[test]
+fn governance_entrypoints_require_the_declared_submitter_and_preserve_state() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let count_before = client.get_tx_count();
+    let new_owner = Address::generate(&env);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.deployer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_owner",
+            args: (&accounts.user1, &new_owner).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_add_owner(&accounts.user1, &new_owner));
+    assert_eq!(client.get_tx_count(), count_before);
+    assert!(!client.is_owner(&new_owner));
+}

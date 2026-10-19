@@ -6,7 +6,7 @@
 //!   authorization covers the nested royalty transfer to the recipient).
 //! - `settle_sale` requires the collection and the payer.
 
-use crate::{MarketplaceRoyalties, SorobanForgeMarketplaceRoyaltiesClient};
+use crate::{MarketplaceRoyalties, RoyaltyShare, SorobanForgeMarketplaceRoyaltiesClient};
 use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::token::StellarAssetClient;
 use soroban_sdk::{Address, Env, IntoVal, InvokeError};
@@ -488,4 +488,28 @@ fn settle_sales_auth_failure_leaves_summary_and_balances_untouched() {
         client.try_get_settlement_summary(&collection),
         initial_summary
     );
+}
+
+#[test]
+fn set_royalty_splits_rejects_non_collection_signature_without_writing_config() {
+    let (env, _token, contract_id, client, collection, recipient, _seller, _payer) = setup!();
+    let splits = soroban_sdk::vec![
+        &env,
+        RoyaltyShare {
+            recipient: recipient.clone(),
+            bps: BPS,
+        },
+    ];
+    env.mock_auths(&[MockAuth {
+        address: &recipient,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_royalty_splits",
+            args: (&collection, splits.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_set_royalty_splits(&collection, &splits));
+    assert!(client.try_get_royalty(&collection).is_err());
 }

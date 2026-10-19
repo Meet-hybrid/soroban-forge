@@ -1,9 +1,10 @@
 //! Test-only contracts for cross-contract dispatch tests.
 //!
 //! Use [`MockTarget`] when a test needs a successful `execute(Bytes)` target,
-//! payload recording, or deterministic revert control. Use the mock token
-//! fixture for SEP-41 behavior; these targets intentionally do not model token
-//! balances or production authorization.
+//! payload recording, or deterministic revert control, including failure on a
+//! selected successful-call ordinal. Use a token fixture for SEP-41 behavior;
+//! these targets intentionally do not model token balances or production
+//! authorization.
 
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{contracttype, Address, Env, Vec};
@@ -67,12 +68,18 @@ pub enum MockTargetKey {
     Count,
     LastPayload,
     Revert,
+    FailAt,
 }
 
 #[soroban_sdk::contractimpl]
 impl MockTarget {
     /// Dispatched by contracts executing actions via cross-contract calls.
     pub fn execute(env: Env, payload: soroban_sdk::Bytes) {
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&MockTargetKey::Count)
+            .unwrap_or(0);
         if env
             .storage()
             .instance()
@@ -81,14 +88,18 @@ impl MockTarget {
         {
             panic!("mock target reverted");
         }
-        let count: u32 = env
+        let fail_at: u32 = env
             .storage()
             .instance()
-            .get(&MockTargetKey::Count)
+            .get(&MockTargetKey::FailAt)
             .unwrap_or(0);
+        let next_call = count.saturating_add(1);
+        if fail_at != 0 && fail_at == next_call {
+            panic!("mock target failed at configured call {fail_at}");
+        }
         env.storage()
             .instance()
-            .set(&MockTargetKey::Count, &(count + 1));
+            .set(&MockTargetKey::Count, &next_call);
         env.storage()
             .instance()
             .set(&MockTargetKey::LastPayload, &payload);
@@ -99,6 +110,16 @@ impl MockTarget {
         env.storage()
             .instance()
             .set(&MockTargetKey::Revert, &revert);
+    }
+
+    /// Fail when `execute` reaches the configured one-based successful-call
+    /// ordinal. Pass `0` to disable the failure point. Since a reverted call
+    /// does not advance the successful-call count, the failure remains armed
+    /// until it is cleared or moved.
+    pub fn set_fail_at(env: Env, call_number: u32) {
+        env.storage()
+            .instance()
+            .set(&MockTargetKey::FailAt, &call_number);
     }
 
     /// Read the number of times `execute` was called.
@@ -161,6 +182,30 @@ mod tests {
         client.set_revert(&false);
         client.execute(&Bytes::from_slice(&env, b"success"));
         assert_eq!(client.count(), 1);
+    }
+
+    #[test]
+    fn configured_failure_point_is_reproducible_and_can_be_cleared() {
+        let env = Env::default();
+        let target = env.register(MockTarget, ());
+        let client = MockTargetClient::new(&env, &target);
+        client.execute(&Bytes::from_slice(&env, b"first"));
+        client.execute(&Bytes::from_slice(&env, b"second"));
+        client.set_fail_at(&3);
+
+        let third = Bytes::from_slice(&env, b"third");
+        assert!(client.try_execute(&third).is_err());
+        assert!(client.try_execute(&third).is_err());
+        assert_eq!(client.count(), 2);
+        assert_eq!(
+            client.last_payload(),
+            Some(Bytes::from_slice(&env, b"second"))
+        );
+
+        client.set_fail_at(&0);
+        client.execute(&third);
+        assert_eq!(client.count(), 3);
+        assert_eq!(client.last_payload(), Some(third));
     }
 
     #[test]
