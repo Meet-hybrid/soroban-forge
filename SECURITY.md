@@ -46,7 +46,9 @@ plus an npm `preinstall` hook. To keep that from happening again,
 - npm lifecycle scripts (`preinstall`, `install`, `postinstall`, `prepare`, ...);
 - task settings that run without a prompt (`task.allowAutomaticTasks`, `"runOn": "folderOpen"`).
 
-All changes also require code-owner review. Reviewers: never open an untrusted
+All changes also require code-owner review, and [ForgeGuard](docs/FORGEGUARD.md)
+scans every open pull request for these and other malware patterns before it
+will merge anything. Reviewers: never open an untrusted
 branch in an editor with workspace trust enabled, and never run `npm install`
 on it without `--ignore-scripts`.
 
