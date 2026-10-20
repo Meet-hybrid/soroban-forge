@@ -25,6 +25,8 @@ Thumbs.db
 **/*.p12
 **/.idea/
 **/.vscode/
+**/.cursor/
+**/.devcontainer/
 **/*.swp
 **/*.swo
 coverage/

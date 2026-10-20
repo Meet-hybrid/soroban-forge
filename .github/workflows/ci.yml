@@ -6,7 +6,18 @@ on:
   pull_request:
     branches: [main, integration]
 
+permissions:
+  contents: read
+
 jobs:
+  repo-hygiene:
+    name: Repo Hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Block auto-run configs, binary payloads and npm lifecycle hooks
+        run: bash scripts/check-repo-hygiene.sh
+
   rustfmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -155,7 +166,7 @@ jobs:
           cache: "npm"
           cache-dependency-path: packages/typescript-sdk/package-lock.json
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
         working-directory: packages/typescript-sdk
       - name: Run offline tests
         run: npm test
