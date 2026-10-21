@@ -105,6 +105,9 @@ pub struct EventsArgs {
     /// Network to use
     #[arg(long, default_value = "testnet")]
     pub network: String,
+    /// Emit one JSON object per event (JSONL format) for machine processing
+    #[arg(long)]
+    pub jsonl: bool,
 }
 
 #[derive(Args, Debug, Clone)]
