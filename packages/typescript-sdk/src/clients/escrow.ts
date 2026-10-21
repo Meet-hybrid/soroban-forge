@@ -612,4 +612,51 @@ export class Client extends ContractClient {
         release_partial_basket: this.txFromJSON<Result<void>>,
         escrows_for_participant: this.txFromJSON<ParticipantEscrowsPage>
   }
+
+  /**
+   * Automatically paginates through all escrow IDs for a participant,
+   * preserving on-chain creation order and terminating without redundant requests.
+   */
+  async all_escrows_for_participant(
+    { participant, limit = 50 }: { participant: string; limit?: u32 },
+    options?: MethodOptions
+  ): Promise<Array<u64>> {
+    const ids: Array<u64> = [];
+    let cursor: u32 | undefined = 0;
+
+    while (cursor !== undefined && cursor !== null) {
+      const tx = await this.escrows_for_participant({ participant, cursor, limit }, options);
+      const page = tx.result;
+      ids.push(...page.ids);
+      if (page.next_cursor === null || page.next_cursor === undefined) {
+        break;
+      }
+      cursor = page.next_cursor;
+    }
+
+    return ids;
+  }
+}
+
+/**
+ * Automatically pages through participant escrows using a page provider function.
+ * Stops cleanly when next_cursor is null/undefined and preserves on-chain creation order.
+ */
+export async function paginateParticipantEscrows(
+  fetchPage: (cursor: u32, limit: u32) => Promise<ParticipantEscrowsPage>,
+  limit: u32 = 50
+): Promise<Array<u64>> {
+  const ids: Array<u64> = [];
+  let cursor: u32 | undefined = 0;
+
+  while (cursor !== undefined && cursor !== null) {
+    const page = await fetchPage(cursor, limit);
+    ids.push(...page.ids);
+    if (page.next_cursor === null || page.next_cursor === undefined) {
+      break;
+    }
+    cursor = page.next_cursor;
+  }
+
+  return ids;
 }
