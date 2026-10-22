@@ -6,7 +6,20 @@ on:
   pull_request:
     branches: [develop, main, integration]
 
+permissions:
+  contents: read
+
 jobs:
+  repo-hygiene:
+    name: Repo Hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Block auto-run configs, binary payloads and npm lifecycle hooks
+        run: bash scripts/check-repo-hygiene.sh
+      - name: ForgeGuard scanner regression tests
+        run: bash scripts/forgeguard/test-scan.sh
+
   rustfmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -167,7 +180,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/stellar" --version
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
         working-directory: packages/typescript-sdk
       - name: Verify generated clients and ABI fixtures
         run: npm run verify:generated

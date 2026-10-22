@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **ForgeGuard scan-then-merge bot** (`.github/workflows/forgeguard.yml`,
+  `scripts/forgeguard/`): scans every open pull request for supply-chain
+  malware patterns without checking out or executing PR code, publishes a
+  `ForgeGuard / malware-scan` status, and squash-merges a PR only once a
+  maintainer has approved the current head, CI is green and the scan is
+  clean. `check-repo-hygiene.sh` now also accepts a ref to check a commit
+  without checking it out. See `docs/FORGEGUARD.md`.
 - **Opt-in accrual / recoupment ledger for marketplace royalties** (`set_royalty`,
   `distribute`, `settle_sale`, `settle_sales`, `distribute_accrued`):
   collections can opt into accrual mode at configuration time; sales then
