@@ -320,7 +320,12 @@ export default function Home() {
 
   return (
     <main className="mx-auto max-w-5xl p-6">
-      <h1 className="text-3xl font-bold mb-1">Soroban Forge — Escrow Testnet Demo</h1>
+      <div className="mb-1 flex items-center justify-between gap-4">
+        <h1 className="text-3xl font-bold">Soroban Forge — Escrow Testnet Demo</h1>
+        <a href="/ui/index.html" className="shrink-0 rounded border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
+          Dashboard screens
+        </a>
+      </div>
       <p className="text-sm text-gray-500 mb-6">
         Contract{" "}
         <code className="break-all">{CONTRACT_ID}</code> ·{" "}
