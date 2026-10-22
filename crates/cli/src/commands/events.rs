@@ -8,8 +8,8 @@ pub fn parse_events_to_jsonl(raw: &str) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
 
-    let val: serde_json::Value = serde_json::from_str(trimmed)
-        .context("failed to parse upstream event output as JSON")?;
+    let val: serde_json::Value =
+        serde_json::from_str(trimmed).context("failed to parse upstream event output as JSON")?;
 
     match val {
         serde_json::Value::Array(items) => {
