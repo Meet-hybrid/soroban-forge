@@ -1,0 +1,26 @@
+# ForgeGuard Trigger — wakes ForgeGuard as soon as a maintainer approves.
+#
+# See docs/FORGEGUARD.md.
+#
+# A `pull_request_review` run only gets a read-only token on fork PRs, so it
+# cannot merge. This workflow therefore does nothing but finish; ForgeGuard
+# listens for it via `workflow_run` and does the real work from the default
+# branch with its own permissions. It has no permissions and runs no PR code.
+
+name: ForgeGuard Trigger
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions: {}
+
+jobs:
+  ping:
+    name: Approval received
+    if: github.event.review.state == 'approved'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Approval on PR #${PR}; ForgeGuard will sweep open pull requests."
+        env:
+          PR: ${{ github.event.pull_request.number }}

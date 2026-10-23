@@ -69,8 +69,14 @@ listing the findings, and updates it in place on later runs.
 ## How it runs
 
 `.github/workflows/forgeguard.yml` runs when CI completes on a pull request,
-every 30 minutes (to pick up approvals), and on demand from the Actions tab.
-The manual run takes an optional PR number and a dry-run switch.
+right after a maintainer approves one, every 30 minutes as a backstop, and on
+demand from the Actions tab. The manual run takes an optional PR number and a
+dry-run switch.
+
+Approvals reach ForgeGuard through `.github/workflows/forgeguard-trigger.yml`.
+A `pull_request_review` run only gets a read-only token on fork pull requests,
+so that workflow has no permissions and does nothing but finish; ForgeGuard
+picks it up via `workflow_run` and runs from the default branch as usual.
 
 The job checks out the **default branch** and runs the scanner from there. Pull
 request heads are fetched as git objects (`refs/pull/N/head`) and only read with
