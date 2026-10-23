@@ -105,12 +105,15 @@ pub struct EventsArgs {
     /// Network to use
     #[arg(long, default_value = "testnet")]
     pub network: String,
+    /// Emit one JSON object per event (JSONL format) for machine processing
+    #[arg(long)]
+    pub jsonl: bool,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct InspectArgs {
-    /// Contract address or alias.
-    pub contract: String,
+    /// Contract address or alias to inspect on-chain. Optional when using the local dry-run check.
+    pub contract: Option<String>,
     /// Specific DataKey entries to inspect (comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub keys: Vec<String>,
@@ -123,6 +126,15 @@ pub struct InspectArgs {
     /// Source account.
     #[arg(long)]
     pub source: Option<String>,
+    /// Local WASM artifact to inspect without network access or signing.
+    #[arg(long, value_name = "PATH")]
+    pub wasm: Option<std::path::PathBuf>,
+    /// Expected SHA-256 for a dry-run artifact comparison.
+    #[arg(long)]
+    pub expected: Option<String>,
+    /// Perform a credential-free local dry-run artifact inspection.
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone)]
