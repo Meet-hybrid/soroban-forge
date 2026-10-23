@@ -23,7 +23,7 @@
     "verify:testnet": "npm run build && tsc --project tsconfig.scripts.json && node dist-scripts/verify-testnet.js"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "^16.0.1",
+    "@stellar/stellar-sdk": "^16.4.1",
     "buffer": "6.0.3"
   },
   "devDependencies": {
