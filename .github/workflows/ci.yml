@@ -19,6 +19,8 @@ jobs:
         run: bash scripts/check-repo-hygiene.sh
       - name: ForgeGuard scanner regression tests
         run: bash scripts/forgeguard/test-scan.sh
+      - name: ForgeReview regression tests
+        run: bash scripts/forgereview/test-review.sh
 
   rustfmt:
     name: Rustfmt
