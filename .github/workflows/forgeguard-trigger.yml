@@ -21,6 +21,7 @@ jobs:
     if: github.event.review.state == 'approved'
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Approval on PR #${PR}; ForgeGuard will sweep open pull requests."
+      # Quoted so the "#" is not read as the start of a YAML comment.
+      - run: 'echo "Approval on PR #${PR}; ForgeGuard will sweep open pull requests."'
         env:
           PR: ${{ github.event.pull_request.number }}
