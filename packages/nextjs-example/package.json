@@ -12,7 +12,7 @@
     "@creit.tech/stellar-wallets-kit": "^2.7.1",
     "@soroban-forge/escrow-client": "file:../typescript-sdk",
     "@stellar/stellar-sdk": "^16.0.1",
-    "next": "^16.4.2",
+    "next": "^16.4.3",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
@@ -22,7 +22,7 @@
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
     "eslint": "^10.13.0",
-    "eslint-config-next": "16.4.2",
+    "eslint-config-next": "16.4.3",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.8.3"
   }
