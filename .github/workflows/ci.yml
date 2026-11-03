@@ -77,6 +77,8 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # See .cargo/audit.toml for why this advisory is ignored.
+          ignore: RUSTSEC-2026-0387
 
   dependency-policy:
     name: Dependency Policy
