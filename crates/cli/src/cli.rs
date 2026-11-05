@@ -10,7 +10,7 @@ pub struct BuildArgs {
     pub release: bool,
     #[arg(short, long, default_value_t = false)]
     pub all_targets: bool,
-    /// Build release WASM for Soroban contracts using wasm32v1-none.
+    /// Build release WASM for the contract crates with `stellar contract build` (stellar-cli v25.2.0+), as CI does.
     #[arg(long, default_value_t = false)]
     pub wasm: bool,
     /// Check built WASM artifacts against the 150,000-byte contract budget (implies --wasm).
