@@ -52,12 +52,14 @@ rustup component add rustfmt clippy
 rustup target add wasm32v1-none
 ```
 
-### Soroban CLI (Optional)
+### Stellar CLI
 
-For deployment and contract interaction:
+Required to build contracts to WASM (soroban-sdk 29 rejects plain
+`cargo build --target wasm32v1-none`), and for deployment and contract
+interaction. Use v25.2.0 or newer:
 
 ```bash
-cargo install soroban-cli
+cargo install --locked stellar-cli
 ```
 
 ### soroban-sdk Version
@@ -456,7 +458,7 @@ Soroban Forge enforces a dependency policy via [cargo-deny](https://embarkstudio
 - **Bans**: Multiple versions of the same crate are flagged; justified exceptions are documented in `deny.toml`.
 
 **Configuration:**
-The policy is defined in [deny.toml](../../deny.toml) at the workspace root. Each non-default choice is commented to explain the rationale.
+The policy is defined in [deny.toml](../deny.toml) at the workspace root. Each non-default choice is commented to explain the rationale.
 
 **Running checks locally:**
 
