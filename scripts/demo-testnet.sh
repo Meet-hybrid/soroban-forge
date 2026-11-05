@@ -2,24 +2,32 @@
 # ---------------------------------------------------------------------------
 # Soroban Forge - reproducible escrow smoke flow against Stellar TESTNET.
 #
-# Dry run (no credentials or network required):
+# Verify the deployed escrow (read-only, no credentials):
+#   bash scripts/demo-testnet.sh --verify-deployed
+#
+# Dry run (no credentials or network; prints the plan, verifies nothing):
 #   bash scripts/demo-testnet.sh --dry-run
 #
 # Live run requirements are deliberately explicit. Provide four existing
 # Stellar CLI identities and an existing escrow contract/token; this script
 # never creates, funds, prints, or commits keys.
+#
+# The WASM checked is the one deployed at ESCROW_ID, fetched from the network,
+# not a local build: the current source no longer builds the deployed bytes
+# (see "Reproduce the deployed artifact" in the README).
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-TARGET="wasm32v1-none"
-PACKAGE="soroban-forge-escrow"
-WASM="${WASM:-target/$TARGET/release/soroban_forge_escrow.wasm}"
+# The escrow deployed for the README's proof table.
+PROOF_ESCROW_ID="CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB"
+WASM="${WASM:-artifacts/deployed-escrow.wasm}"
 HASH_EVIDENCE="${HASH_EVIDENCE:-docs/testnet/escrow-wasm.sha256}"
 NETWORK="${NETWORK:-testnet}"
 RPC_URL="${RPC_URL:-https://soroban-testnet.stellar.org}"
+NETWORK_PASSPHRASE="${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}"
 AMOUNT="${AMOUNT:-500}"
 TIMEOUT="${TIMEOUT:-86400}"
 RECEIPT="${RECEIPT:-artifacts/escrow-smoke-receipt.json}"
@@ -35,11 +43,19 @@ UPDATE_EVIDENCE=0
 usage() {
   cat <<'USAGE'
 Usage:
+  bash scripts/demo-testnet.sh --verify-deployed [--receipt PATH]
   bash scripts/demo-testnet.sh --dry-run [--receipt PATH]
   bash scripts/demo-testnet.sh [--receipt PATH]
 
-Dry-run performs no network calls and needs no Stellar identities. Live mode
-requires caller-provided CLI identities and explicit ESCROW_ID/TOKEN_ID.
+--verify-deployed fetches the WASM deployed at ESCROW_ID (default: the README's
+proof contract) and checks its SHA-256 against the recorded evidence. Read-only:
+needs the Stellar CLI and network access, but no identities or funds.
+
+--dry-run performs no network calls, needs nothing, and verifies nothing: it
+prints the planned flow and writes a template receipt.
+
+Live mode runs the same deployed-WASM check, then create -> deposit -> release.
+It requires caller-provided CLI identities and explicit ESCROW_ID/TOKEN_ID.
 
 Environment configuration:
   ISSUER_IDENTITY   source identity used for the mint check
@@ -50,14 +66,15 @@ Environment configuration:
   TOKEN_ID          deployed SAC token id
   NETWORK           Stellar CLI network (default: testnet)
   RPC_URL           Soroban RPC endpoint
+  NETWORK_PASSPHRASE  network passphrase (default: the testnet passphrase)
   AMOUNT            smoke amount (default: 500)
   RECEIPT           JSON receipt path (default: artifacts/escrow-smoke-receipt.json)
 
-Maintainer-only evidence update:
-  MAINTAINER_UPDATE=1 bash scripts/demo-testnet.sh --update-evidence
+Maintainer-only evidence update (after a redeploy):
+  MAINTAINER_UPDATE=1 ESCROW_ID=C... bash scripts/demo-testnet.sh --update-evidence
 
-The evidence update writes the freshly built artifact hash and intentionally
-requires an explicit MAINTAINER_UPDATE=1 opt-in.
+The evidence update records the hash of the WASM deployed at ESCROW_ID and
+intentionally requires an explicit MAINTAINER_UPDATE=1 opt-in.
 USAGE
 }
 
@@ -122,7 +139,8 @@ dry_run() {
   json_receipt "dry_run"
   cat <<'OUTPUT'
 dry-run: no Stellar CLI, credentials, funding, or network calls were used
-planned flow: build -> sha256 verify -> create_escrow -> deposit -> release
+dry-run: nothing was fetched or verified; use --verify-deployed to check the deployed WASM
+planned flow: fetch deployed wasm -> sha256 verify -> create_escrow -> deposit -> release
 planned events: escrow_created, deposited, released
 OUTPUT
 }
@@ -131,26 +149,38 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required; install it and retry"
 }
 
-build_and_verify_wasm() {
-  step "Build and verify escrow WASM"
-  cargo build --locked --release --target "$TARGET" --package "$PACKAGE"
-  [ -f "$WASM" ] || fail "escrow WASM not found at $WASM"
+sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then
-    WASM_SHA256="$(sha256sum "$WASM" | awk '{print $1}')"
+    sha256sum "$1" | awk '{print $1}'
   else
-    WASM_SHA256="$(shasum -a 256 "$WASM" | awk '{print $1}')"
+    shasum -a 256 "$1" | awk '{print $1}'
   fi
+}
+
+# Fetches the WASM deployed at ESCROW_ID and checks it against the evidence, so
+# the contract being exercised is provably the recorded artifact.
+verify_deployed_wasm() {
+  step "Verify deployed escrow WASM"
+  require_command stellar
+  [ -n "$ESCROW_ID" ] || fail "ESCROW_ID is required"
+  mkdir -p "$(dirname "$WASM")"
+  stellar contract fetch --id "$ESCROW_ID" --rpc-url "$RPC_URL" --network-passphrase "$NETWORK_PASSPHRASE" --out-file "$WASM" \
+    || fail "could not fetch the WASM deployed at $ESCROW_ID on $NETWORK"
+  [ -s "$WASM" ] || fail "fetched WASM is empty: $WASM"
+  WASM_SHA256="$(sha256_of "$WASM")"
   [ -f "$HASH_EVIDENCE" ] || fail "hash evidence missing at $HASH_EVIDENCE"
   EXPECTED_SHA256="$(awk 'NF {print $1; exit}' "$HASH_EVIDENCE")"
   [ -n "$EXPECTED_SHA256" ] || fail "hash evidence is empty: $HASH_EVIDENCE"
   if [ "$UPDATE_EVIDENCE" -eq 1 ]; then
     [ "${MAINTAINER_UPDATE:-0}" = "1" ] || fail "--update-evidence requires MAINTAINER_UPDATE=1"
-    printf '%s  %s\n' "$WASM_SHA256" "$(basename "$WASM")" > "$HASH_EVIDENCE"
+    printf '%s  %s\n' "$WASM_SHA256" "soroban_forge_escrow.wasm" > "$HASH_EVIDENCE"
     EXPECTED_SHA256="$WASM_SHA256"
     echo "updated maintainer evidence: $HASH_EVIDENCE"
   fi
-  [ "$WASM_SHA256" = "$EXPECTED_SHA256" ] || fail "WASM hash mismatch: expected $EXPECTED_SHA256, got $WASM_SHA256; review the artifact or use the explicit maintainer update step"
-  echo "verified sha256: $WASM_SHA256"
+  [ "$WASM_SHA256" = "$EXPECTED_SHA256" ] \
+    || fail "deployed WASM hash mismatch at $ESCROW_ID: expected $EXPECTED_SHA256, got $WASM_SHA256"
+  echo "contract: $ESCROW_ID"
+  echo "verified sha256: $WASM_SHA256 ($(wc -c < "$WASM" | tr -d ' ') bytes)"
 }
 
 identity_address() {
@@ -161,7 +191,7 @@ invoke() {
   local id="$1" source="$2"
   shift 2
   local output parsed
-  output="$(stellar contract invoke --id "$id" --source-account "$source" --network "$NETWORK" --rpc-url "$RPC_URL" --send yes --output json -- "$@" 2>&1)" \
+  output="$(stellar contract invoke --id "$id" --source-account "$source" --rpc-url "$RPC_URL" --network-passphrase "$NETWORK_PASSPHRASE" --send yes --output json -- "$@" 2>&1)" \
     || fail "contract invocation failed ($source $*): $output"
   parsed="$(printf '%s' "$output" | python3 -c '
 import json
@@ -215,7 +245,7 @@ print(os.environ["EXPECTED_EVENT"] + ": verified in transaction receipt")
 }
 
 balance() {
-  stellar token balance --id "$TOKEN_ID" --account "$1" --network "$NETWORK" --rpc-url "$RPC_URL" 2>/dev/null \
+  stellar token balance --id "$TOKEN_ID" --account "$1" --rpc-url "$RPC_URL" --network-passphrase "$NETWORK_PASSPHRASE" 2>/dev/null \
     | tail -1 \
     || fail "could not read token balance for $1; check token deployment and trustline"
 }
@@ -290,6 +320,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --help|-h) usage; exit 0 ;;
     --dry-run) MODE="dry_run" ;;
+    --verify-deployed) MODE="verify_deployed" ;;
     --update-evidence) UPDATE_EVIDENCE=1; MODE="evidence" ;;
     --receipt) shift; [ "$#" -gt 0 ] || fail "--receipt requires a path"; RECEIPT="$1" ;;
     *) fail "unknown option: $1 (use --help)" ;;
@@ -299,9 +330,14 @@ done
 
 if [ "$MODE" = "dry_run" ]; then
   dry_run
+elif [ "$MODE" = "verify_deployed" ]; then
+  ESCROW_ID="${ESCROW_ID:-$PROOF_ESCROW_ID}"
+  verify_deployed_wasm
+  json_receipt "verified_deployed"
 elif [ "$MODE" = "evidence" ]; then
-  build_and_verify_wasm
+  verify_deployed_wasm
 else
-  build_and_verify_wasm
+  [ -n "$ESCROW_ID" ] || fail "ESCROW_ID is required in live mode"
+  verify_deployed_wasm
   live_run
 fi

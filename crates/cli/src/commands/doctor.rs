@@ -90,7 +90,7 @@ fn check_versioned_tool(
             ok: false,
             detail: "not found on PATH".to_owned(),
             fix_hint: Some(if name == "stellar" {
-                "cargo install soroban-cli"
+                "cargo install --locked stellar-cli"
             } else {
                 "install Rust and Cargo"
             }),
@@ -135,13 +135,13 @@ fn check_wasm_artifact(path: &Path) -> CheckResult {
             name,
             ok: false,
             detail: format!("{} is not a regular file", path.display()),
-            fix_hint: Some("cargo build --release --target wasm32v1-none"),
+            fix_hint: Some("stellar contract build --locked"),
         },
         Ok(metadata) if metadata.len() == 0 => CheckResult {
             name,
             ok: false,
             detail: format!("{} is empty", path.display()),
-            fix_hint: Some("cargo build --release --target wasm32v1-none"),
+            fix_hint: Some("stellar contract build --locked"),
         },
         Ok(_) => CheckResult {
             name,
@@ -153,13 +153,13 @@ fn check_wasm_artifact(path: &Path) -> CheckResult {
             name,
             ok: false,
             detail: format!("{} does not exist", path.display()),
-            fix_hint: Some("cargo build --release --target wasm32v1-none"),
+            fix_hint: Some("stellar contract build --locked"),
         },
         Err(error) => CheckResult {
             name,
             ok: false,
             detail: format!("could not inspect {}: {error}", path.display()),
-            fix_hint: Some("cargo build --release --target wasm32v1-none"),
+            fix_hint: Some("stellar contract build --locked"),
         },
     }
 }
