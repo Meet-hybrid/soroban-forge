@@ -5,10 +5,18 @@
 [![Rust](https://img.shields.io/badge/Rust-1.96.0-orange)](rust-toolchain.toml)
 [![soroban-sdk](https://img.shields.io/badge/soroban--sdk-29.0.1-654FF0)](Cargo.toml)
 
-**Soroban Forge** is a library of reusable Soroban smart-contract foundations
-and developer tooling for the Stellar ecosystem — escrow, vesting, multi-
-signature wallets, DAO governance, subscription payments, and marketplace
-royalties, plus a developer CLI and TypeScript bindings.
+**Soroban Forge** is the payment layer for Stellar smart contracts: **escrow,
+vesting, subscriptions and royalty settlement** that move real SEP-41 tokens,
+plus a DAO with proposal bonds, a multi-sig wallet with withdrawal limits, a
+developer CLI and TypeScript bindings.
+
+It works with any SEP-41 token, including tokens built with
+[OpenZeppelin Stellar Contracts](https://github.com/OpenZeppelin/stellar-contracts):
+use OpenZeppelin for the token and its access control, and Forge for the money
+flows on top. That combination has been
+[run on testnet](docs/OPENZEPPELIN.md#testnet-proof): escrow, a paused token,
+a dispute and vesting, with every token accounted for. See
+[Soroban Forge and OpenZeppelin](docs/OPENZEPPELIN.md).
 
 ## Proof at a glance
 
