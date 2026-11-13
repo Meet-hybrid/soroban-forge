@@ -3,6 +3,18 @@
   "contract": "soroban-forge-escrow",
   "functions": [
     {
+      "name": "approve_release",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "cancel",
       "inputs": [
         {
@@ -87,6 +99,42 @@
       ]
     },
     {
+      "name": "create_escrow_with_review",
+      "inputs": [
+        {
+          "name": "buyer",
+          "type": "address"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "arbiter",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "timeout",
+          "type": "u64"
+        },
+        {
+          "name": "review_period",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "deposit",
       "inputs": [
         {
@@ -163,6 +211,18 @@
       ]
     },
     {
+      "name": "execute_release",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_basket",
       "inputs": [
         {
@@ -184,6 +244,18 @@
       ],
       "outputs": [
         "result<udt:EscrowData,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_release_request",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "option<udt:ReleaseRequest>"
       ]
     },
     {
@@ -295,6 +367,34 @@
       ]
     },
     {
+      "name": "request_release",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "request_release_basket",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "resolve",
       "inputs": [
         {
@@ -340,6 +440,18 @@
       ],
       "outputs": [
         "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "review_period",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "u64"
       ]
     },
     {
@@ -599,6 +711,24 @@
       ]
     },
     {
+      "name": "ReleaseRequested",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "release_at",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "Released",
       "dataFormat": "scSpecEventDataFormatMap",
       "params": [
@@ -853,6 +983,10 @@
         {
           "name": "ProposerCooldown",
           "value": 15
+        },
+        {
+          "name": "ReleasePending",
+          "value": 16
         }
       ]
     },
@@ -871,6 +1005,24 @@
         {
           "name": "total",
           "type": "u32"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ReleaseRequest",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "release_at",
+          "type": "u64"
+        },
+        {
+          "name": "requested_at",
+          "type": "u64"
         }
       ]
     }
@@ -935,6 +1087,10 @@
     {
       "name": "ProposerCooldown",
       "code": 15
+    },
+    {
+      "name": "ReleasePending",
+      "code": 16
     }
   ]
 }

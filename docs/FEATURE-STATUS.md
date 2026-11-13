@@ -25,12 +25,14 @@ machine.
 | :--- | :---: | :--- |
 | `create_escrow` | ✅ Implemented | Validates amount/timeout, buyer+seller auth, takes the SEP-41 token address |
 | `deposit` | ✅ Implemented | **Real token transfer** buyer → contract, before any state write |
-| `release` | ✅ Implemented | Seller-authorized; **real token transfer** contract → seller |
-| `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** |
-| `refund_expired` | ✅ Implemented | Permissionless strictly after timeout; `Funded` only, disputed escrows frozen |
-| `release` | ✅ Implemented | Seller-authorized; **real token transfer** contract → seller (full remaining balance) |
-| `release_partial` | ✅ Implemented | Seller-authorized; **real token transfer** of a partial amount contract → seller; `released` accounting tracked; final partial transitions to `Completed`; `refund`/`resolve` operate on remaining balance |
-| `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** of remaining balance |
+| `create_escrow_with_review` | ✅ Implemented | As `create_escrow`, with the review window (60 s to 30 days); `create_escrow` uses 3 days |
+| `request_release` | ✅ Implemented | Seller-authorized; starts the review window for all or part of the remaining balance; before the deadline only; one at a time |
+| `approve_release` | ✅ Implemented | Buyer-authorized; pays the pending request now via **real token transfer** |
+| `execute_release` | ✅ Implemented | Permissionless once the review window ends with no dispute; **real token transfer** contract → seller |
+| `release` | ✅ Implemented | **Buyer**-authorized direct payment; **real token transfer** contract → seller (full remaining balance) |
+| `release_partial` | ✅ Implemented | **Buyer**-authorized direct payment of a partial amount; `released` accounting tracked; final partial transitions to `Completed`; `refund`/`resolve` operate on remaining balance |
+| `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** of remaining balance; buyer's refund blocked by a pending release request (`ReleasePending`) |
+| `refund_expired` | ✅ Implemented | Permissionless strictly after timeout; pays the **remaining** balance; `Funded` only, disputed escrows frozen, blocked by a pending release request |
 | `dispute` | ✅ Implemented | Claimant (buyer or seller) authorized, `Funded` only — see [design notes](KNOWN-LIMITATIONS.md#design-notes-not-limitations-but-worth-knowing) |
 | `resolve` | ✅ Implemented | Arbiter-only, final; pays **remaining balance** either direction via **real token transfer** |
 | `cancel` | ✅ Implemented | Buyer, `Pending` only; removes id from each distinct participant index after validation/auth |
