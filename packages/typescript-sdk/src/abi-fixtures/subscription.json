@@ -534,6 +534,10 @@
         {
           "name": "ProposerCooldown",
           "value": 15
+        },
+        {
+          "name": "ReleasePending",
+          "value": 16
         }
       ]
     },
@@ -726,6 +730,10 @@
     {
       "name": "ProposerCooldown",
       "code": 15
+    },
+    {
+      "name": "ReleasePending",
+      "code": 16
     }
   ]
 }

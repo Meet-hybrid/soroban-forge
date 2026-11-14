@@ -40,6 +40,10 @@ step below was executed live. Check the deployed bytes yourself with
 | 2     | create → deposit → dispute(buyer) → resolve for seller | dispute + resolve transactions                                                                                                                      |
 | 3     | create → deposit → dispute(seller) → resolve for buyer | dispute + resolve transactions                                                                                                                      |
 
+**Release with a review window** (seller requests, buyer approves or disputes,
+then anyone executes) is newer than this deployment and was proven on a fresh
+one: see [the escrow docs](docs/contracts/escrow.md#testnet-proof).
+
 After all three rounds: **buyer 500 + seller 1000 = 1500 credit minted; the
 contract holds zero** — the on-chain conservation property (`deposited ==
 paid out`) verified on a live network, matching the in-repo property test.

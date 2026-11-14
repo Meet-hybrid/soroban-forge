@@ -8,7 +8,10 @@
 //! custodies the tokens until release, refund, or arbitration:
 //!
 //! ```text
-//! Pending --deposit--> Funded --release--> Completed (seller paid)
+//! Pending --deposit--> Funded --request_release--> (review window) --execute_release--> Completed
+//!                     |        (seller asks)          |  buyer: approve_release (pays now)
+//!                     |                               |  buyer or seller: dispute (blocks it)
+//!                     |        --release--> Completed (buyer pays directly)
 //!                     |        --refund--> Refunded  (buyer back)
 //!                     |        --refund_expired--> Refunded (keeper-triggered after deadline)
 //! Pending --deposit--> Funded --release_partial (×n)--> Funded  (partial)
@@ -19,6 +22,21 @@
 //!                     |        --dispute--> Disputed --resolve--> Completed | Refunded
 //!          --cancel--> Cancelled (before funding only)
 //! ```
+//!
+//! ## Release with a review window
+//!
+//! The seller asks to be paid with `request_release(escrow_id, amount)`; nothing
+//! moves yet. The buyer then has the escrow's review window (set at creation,
+//! [`DEFAULT_REVIEW_PERIOD`] = 3 days unless `create_escrow_with_review` set
+//! another) to `approve_release` (pay now) or `dispute`. When the window ends
+//! with no dispute, anyone may `execute_release` and the seller is paid.
+//!
+//! This protects both sides. The seller cannot take the money before the buyer
+//! can react, and a silent buyer cannot hold it: a request made before the
+//! deadline blocks the buyer's after-deadline refund (`ReleasePending`), so the
+//! buyer must approve or dispute. A request cannot be made after the deadline,
+//! so a seller cannot block a refund that is already due. Any payout, refund or
+//! dispute clears a pending request, so a stale request can never pay later.
 //!
 //! ## Partial releases
 //!
@@ -131,8 +149,9 @@
 //!
 //! On `deposit`, the token contract moves `amount` from the buyer to this
 //! contract's own address. From that moment the funds are inside the
-//! contract and can only leave via `release` / `release_partial` (to
-//! seller), `refund` (to buyer), or `resolve` (either, by arbiter decision).
+//! contract and can only leave via a release (to seller: `release`,
+//! `release_partial`, `approve_release` or `execute_release`), a refund (to
+//! buyer), or `resolve` (either, by arbiter decision).
 //! There is no admin key and no other exit.
 //!
 //! ## Ordering discipline (load-bearing)
@@ -155,16 +174,21 @@
 //!   on every standard signing path during the testnet demo).
 //! - `deposit` — buyer authorizes; their authorization covers the nested
 //!   token pull.
-//! - `release` — seller authorizes, confirming delivery. The buyer
-//!   authorizing their own payout would make this a confirmation flow,
-//!   not escrow.
-//! - `release_partial` — **seller authorizes**, same rationale as `release`.
-//!   Invalid requests (zero/negative amount, amount > remaining, non-Funded
-//!   status) return `InvalidInput` without modifying storage.
+//! - `request_release` / `request_release_basket` — **seller** authorizes:
+//!   asks to be paid, starting the review window.
+//! - `approve_release` — **buyer** authorizes: pays a pending request now.
+//! - `execute_release` — permissionless once the review window has ended.
+//! - `release` / `release_partial` (and the basket forms) — **buyer**
+//!   authorizes: the paying party pays directly. Until this version these were
+//!   seller-authorized, which let a seller pay themselves before the buyer
+//!   could dispute. Invalid requests (zero/negative amount, amount >
+//!   remaining, non-Funded status) return `InvalidInput` without modifying
+//!   storage.
 //! - `refund` — seller before the deadline; buyer may reclaim after the
-//!   deadline.
+//!   deadline, unless a release request is pending (`ReleasePending`).
 //! - `refund_expired` — permissionless after the deadline; pays the buyer
-//!   and cannot settle a disputed escrow.
+//!   the **remaining** balance, cannot settle a disputed escrow, and is
+//!   blocked by a pending release request.
 //! - `dispute` — the **claimant** (buyer or seller) is passed explicitly
 //!   and must be one of the two parties; their `require_auth` proves the
 //!   claim. Soroban has no "auth by A-or-B" primitive, so an explicit
@@ -234,6 +258,13 @@ mod ttl {
 /// duplicate-token scan performed at creation.
 const MAX_BASKET_ASSETS: u32 = 8;
 
+/// Review window used when an escrow is created without one: 3 days.
+pub const DEFAULT_REVIEW_PERIOD: u64 = 3 * 24 * 60 * 60;
+/// Shortest review window a buyer may set: 1 minute.
+pub const MIN_REVIEW_PERIOD: u64 = 60;
+/// Longest review window a buyer may set: 30 days.
+pub const MAX_REVIEW_PERIOD: u64 = 30 * 24 * 60 * 60;
+
 /// Public interface for the Soroban Forge escrow contract.
 #[contractclient(name = "SorobanForgeEscrowClient")]
 pub trait SorobanForgeEscrow {
@@ -280,8 +311,9 @@ pub trait SorobanForgeEscrow {
     ///   token, or undeployed token contract).
     fn deposit(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
-    /// Release the full remaining balance to the seller. Requires the
-    /// seller (confirms delivery); only valid while `Funded`.
+    /// Release the full remaining balance to the seller now. Requires the
+    /// **buyer**; only valid while `Funded`. A seller who wants to be paid
+    /// calls [`Self::request_release`] instead.
     ///
     /// Equivalent to calling `release_partial` with the full remaining
     /// balance, but in a single call. Backward-compatible with pre-partial-
@@ -296,8 +328,8 @@ pub trait SorobanForgeEscrow {
     ///   the payout.
     fn release(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
-    /// Release a partial amount to the seller. Requires the seller;
-    /// only valid while `Funded`.
+    /// Release a partial amount to the seller now. Requires the **buyer**;
+    /// only valid while `Funded`. Clears any pending release request.
     ///
     /// * `amount` must be positive and must not exceed the remaining balance
     ///   (`deposited - released`). Invalid requests return `InvalidInput`
@@ -321,21 +353,24 @@ pub trait SorobanForgeEscrow {
     /// Refund the buyer.
     ///
     /// Before the deadline the seller may refund; after the deadline the
-    /// buyer may reclaim. Only valid while `Funded`. Refunds the
-    /// **remaining** balance only (i.e., `deposited - released`).
+    /// buyer may reclaim, unless the seller has a release request waiting
+    /// (then the buyer approves or disputes). Only valid while `Funded`.
+    /// Refunds the **remaining** balance only (i.e., `deposited - released`).
     ///
     /// # Errors
     ///
     /// * [`ForgeError::NotFound`] — no escrow with this id.
     /// * [`ForgeError::InvalidInput`] — escrow is not `Funded`.
     /// * [`ForgeError::Unauthorized`] — wrong party for the current phase.
+    /// * [`ForgeError::ReleasePending`] — the buyer tried to reclaim while a
+    ///   seller's release request is waiting.
     /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
     ///   the payout.
     fn refund(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
-    /// Permissionlessly refund the full escrow amount to the buyer strictly
+    /// Permissionlessly refund the remaining balance to the buyer strictly
     /// after its deadline. Only valid while `Funded`; a disputed escrow stays
-    /// frozen. The existing party-authorized `refund` path is unchanged.
+    /// frozen, and a pending release request blocks it (`ReleasePending`).
     ///
     /// # Errors
     ///
@@ -382,7 +417,68 @@ pub trait SorobanForgeEscrow {
     /// buyer. The split is final and settles both transfers atomically.
     fn resolve_split(env: Env, escrow_id: u64, seller_bps: u32) -> Result<(), ForgeError>;
 
-    /// Cancel a `Pending` escrow before it is funded. Requires the buyer.
+    /// Create an escrow with its own review window (seconds the buyer has to
+    /// dispute after the seller requests release). [`Self::create_escrow`]
+    /// uses [`DEFAULT_REVIEW_PERIOD`].
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — as [`Self::create_escrow`], or
+    ///   `review_period` outside [`MIN_REVIEW_PERIOD`]..=[`MAX_REVIEW_PERIOD`].
+    #[allow(clippy::too_many_arguments)]
+    fn create_escrow_with_review(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        token: Address,
+        amount: i128,
+        timeout: u64,
+        review_period: u64,
+    ) -> Result<u64, ForgeError>;
+
+    /// Seller asks to be paid `amount` (all or part of the remaining
+    /// balance). Starts the review window and returns when it ends. Nothing
+    /// is paid yet.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no single-token escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — not `Funded`, or `amount` is not
+    ///   positive or exceeds the remaining balance.
+    /// * [`ForgeError::ReleasePending`] — a request is already waiting.
+    /// * [`ForgeError::DeadlineReached`] — the escrow's deadline has passed.
+    fn request_release(env: Env, escrow_id: u64, amount: i128) -> Result<u64, ForgeError>;
+
+    /// Seller asks to be paid every leg of a basket. Same rules as
+    /// [`Self::request_release`].
+    fn request_release_basket(env: Env, escrow_id: u64) -> Result<u64, ForgeError>;
+
+    /// Buyer approves the pending request; the seller is paid immediately.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no pending request.
+    /// * [`ForgeError::TokenTransferFailed`] — the token rejected the payout.
+    fn approve_release(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    /// Pay a request whose review window ended without a dispute. Anyone may
+    /// call it.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no pending request (none was made, or a
+    ///   dispute, refund or direct release cleared it).
+    /// * [`ForgeError::DeadlineReached`] — the review window has not ended.
+    /// * [`ForgeError::TokenTransferFailed`] — the token rejected the payout.
+    fn execute_release(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    /// The pending release request, if any.
+    fn get_release_request(env: Env, escrow_id: u64) -> Option<ReleaseRequest>;
+
+    /// The escrow's review window in seconds.
+    fn review_period(env: Env, escrow_id: u64) -> u64;
+
     /// Cancel a `Pending` escrow before it is funded. Requires the buyer and
     /// removes its id from each distinct party's participant index.
     ///
@@ -441,8 +537,9 @@ pub trait SorobanForgeEscrow {
     ///   was pulled.
     fn deposit_basket(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
-    /// Release every leg's remaining balance to the seller. Requires the
-    /// seller; only valid while `Funded`.
+    /// Release every leg's remaining balance to the seller now. Requires the
+    /// **buyer**; only valid while `Funded`. Sellers use
+    /// [`Self::request_release_basket`].
     ///
     /// # Errors
     ///
@@ -452,8 +549,8 @@ pub trait SorobanForgeEscrow {
     ///   paid.
     fn release_basket(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
-    /// Release `amount` of a single leg to the seller. Requires the seller;
-    /// only valid while `Funded`.
+    /// Release `amount` of a single leg to the seller now. Requires the
+    /// **buyer**; only valid while `Funded`.
     ///
     /// The per-leg generalization of [`Self::release_partial`]: the same
     /// accounting, applied to one named leg. The basket transitions to
@@ -796,6 +893,24 @@ impl BasketEscrowData {
     }
 }
 
+/// A seller's pending request to be paid, waiting out the review window.
+///
+/// Stored under [`DataKey::ReleaseRequest`], separate from the escrow record,
+/// so the stored shape of [`EscrowData`] and [`BasketEscrowData`] (and every
+/// event carrying them) is unchanged.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReleaseRequest {
+    /// Amount requested from a single-token escrow. `0` for a basket, where a
+    /// request always covers every leg's remaining balance.
+    pub amount: i128,
+    /// When the seller asked (ledger timestamp, seconds).
+    pub requested_at: u64,
+    /// From this time anyone may execute the release, unless the buyer
+    /// disputed first (ledger timestamp, seconds).
+    pub release_at: u64,
+}
+
 /// A page of escrow ids involving a participant.
 ///
 /// Returned by [`SorobanForgeEscrow::escrows_for_participant`]; powered by
@@ -859,6 +974,13 @@ pub enum DataKey {
     /// Expiration ledger mirrored for an escrow record because SDK 27
     /// exposes TTL introspection to test utilities but not contract code.
     EscrowExpiration(u64),
+    /// The seller's pending [`ReleaseRequest`] for escrow `u64` (either
+    /// kind). Absent when no release is waiting.
+    ReleaseRequest(u64),
+    /// The review window in seconds for escrow `u64`, set at creation.
+    /// Absent for escrows created before review windows existed, which read
+    /// as [`DEFAULT_REVIEW_PERIOD`].
+    ReviewPeriod(u64),
 }
 
 /// The deployable escrow contract.
@@ -885,6 +1007,60 @@ impl Escrow {
         amount: i128,
         timeout: u64,
     ) -> Result<u64, ForgeError> {
+        Self::create_single(
+            &env,
+            buyer,
+            seller,
+            arbiter,
+            token,
+            amount,
+            timeout,
+            DEFAULT_REVIEW_PERIOD,
+        )
+    }
+
+    /// Create an escrow with its own review window: how long the buyer has
+    /// to dispute after the seller requests release. Buyer-authorized, like
+    /// `create_escrow`. `review_period` must be between
+    /// [`MIN_REVIEW_PERIOD`] and [`MAX_REVIEW_PERIOD`] seconds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_escrow_with_review(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        token: Address,
+        amount: i128,
+        timeout: u64,
+        review_period: u64,
+    ) -> Result<u64, ForgeError> {
+        if !(MIN_REVIEW_PERIOD..=MAX_REVIEW_PERIOD).contains(&review_period) {
+            return Err(ForgeError::InvalidInput);
+        }
+        Self::create_single(
+            &env,
+            buyer,
+            seller,
+            arbiter,
+            token,
+            amount,
+            timeout,
+            review_period,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_single(
+        env: &Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        token: Address,
+        amount: i128,
+        timeout: u64,
+        review_period: u64,
+    ) -> Result<u64, ForgeError> {
+        let env = env.clone();
         if amount <= 0 {
             return Err(ForgeError::InvalidInput);
         }
@@ -920,6 +1096,7 @@ impl Escrow {
             .persistent()
             .set(&DataKey::Escrow(id), &escrow);
         bump_entry(&env, &DataKey::Escrow(id));
+        set_review_period(&env, id, review_period);
         // Index write joins the rest of the success-path writes: it runs
         // after every fallible step (validation, `require_auth`, id
         // allocation), so it cannot observe or create partial state.
@@ -956,8 +1133,10 @@ impl Escrow {
         Ok(())
     }
 
-    /// Release the full remaining balance to the seller. Seller-authorized:
-    /// delivery confirmation by the paid party, not the paying one.
+    /// Release the full remaining balance to the seller now. Buyer-authorized:
+    /// the paying party approves payment directly. A seller who wants to be
+    /// paid uses `request_release` instead, which pays after the
+    /// review window unless the buyer disputes.
     ///
     /// Backward-compatible: behaves identically to the pre-partial-release
     /// `release` when `released == 0`. When partial releases have already
@@ -965,7 +1144,7 @@ impl Escrow {
     /// transferred — maintaining the conservation invariant.
     pub fn release(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
         let escrow = Self::load_escrow(&env, escrow_id)?;
-        escrow.seller.require_auth();
+        escrow.buyer.require_auth();
 
         if escrow.status != EscrowStatus::Funded {
             return Err(ForgeError::InvalidInput);
@@ -984,11 +1163,14 @@ impl Escrow {
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &completed);
         bump_entry(&env, &DataKey::Escrow(escrow_id));
+        clear_request(&env, escrow_id);
         events::released(&env, &completed);
         Ok(())
     }
 
-    /// Release a partial `amount` to the seller. Seller-authorized.
+    /// Release a partial `amount` to the seller now. Buyer-authorized, like
+    /// `release`; sellers use `request_release`. Clears any
+    /// pending release request (the seller may request again).
     ///
     /// Only valid while `Funded`. `amount` must be positive and must not
     /// exceed the remaining balance. When `amount == remaining`, the escrow
@@ -998,7 +1180,7 @@ impl Escrow {
     /// before any storage write, so a failed transfer leaves no partial state.
     pub fn release_partial(env: Env, escrow_id: u64, amount: i128) -> Result<(), ForgeError> {
         let escrow = Self::load_escrow(&env, escrow_id)?;
-        escrow.seller.require_auth();
+        escrow.buyer.require_auth();
 
         // All validation before any state change or transfer.
         if escrow.status != EscrowStatus::Funded {
@@ -1033,6 +1215,7 @@ impl Escrow {
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &updated);
         bump_entry(&env, &DataKey::Escrow(escrow_id));
+        clear_request(&env, escrow_id);
         events::partially_released(&env, &updated, amount);
         Ok(())
     }
@@ -1055,6 +1238,11 @@ impl Escrow {
             &escrow.buyer,
             &escrow.seller,
         )?;
+        // A buyer cannot wait out the deadline to reclaim funds the seller has
+        // already asked to be paid: they must approve or dispute instead.
+        if authorizer == escrow.buyer && has_request(&env, escrow_id) {
+            return Err(ForgeError::ReleasePending);
+        }
         authorizer.require_auth();
 
         // Terminal payout through the shared loop; the settled leg reports the
@@ -1069,6 +1257,7 @@ impl Escrow {
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &refunded);
         bump_entry(&env, &DataKey::Escrow(escrow_id));
+        clear_request(&env, escrow_id);
         events::refunded(&env, &refunded);
         Ok(())
     }
@@ -1092,16 +1281,24 @@ impl Escrow {
         if now <= deadline {
             return Err(ForgeError::DeadlineReached);
         }
+        if has_request(&env, escrow_id) {
+            return Err(ForgeError::ReleasePending);
+        }
 
-        transfer_from_contract(&env, &escrow.token, &escrow.buyer, escrow.amount)?;
+        // Only what is still in custody: earlier partial releases already
+        // left the contract, and paying the full `amount` here would take the
+        // difference from other escrows held in the same token.
+        let refund_amount = escrow.remaining();
+        transfer_from_contract(&env, &escrow.token, &escrow.buyer, refund_amount)?;
 
         let mut refunded = escrow;
+        refunded.released = refunded.amount;
         refunded.status = EscrowStatus::Refunded;
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &refunded);
         bump_entry(&env, &DataKey::Escrow(escrow_id));
-        events::refund_expired(&env, escrow_id, refunded.amount, now);
+        events::refund_expired(&env, escrow_id, refund_amount, now);
         Ok(())
     }
 
@@ -1127,6 +1324,9 @@ impl Escrow {
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &disputed);
         bump_entry(&env, &DataKey::Escrow(escrow_id));
+        // The arbiter now decides the whole remaining balance; a pending
+        // release request no longer applies.
+        clear_request(&env, escrow_id);
         events::disputed(&env, &disputed);
         Ok(())
     }
@@ -1230,7 +1430,7 @@ impl Escrow {
     // -------------------------------------------------------------------
 
     /// Create a basket escrow. Buyer-authorized only, exactly as
-    /// [`Self::create_escrow`], and drawing from the same id sequence.
+    /// `create_escrow`, and drawing from the same id sequence.
     pub fn create_basket(
         env: Env,
         buyer: Address,
@@ -1266,6 +1466,7 @@ impl Escrow {
             .persistent()
             .set(&DataKey::Basket(id), &basket);
         bump_entry(&env, &DataKey::Basket(id));
+        set_review_period(&env, id, DEFAULT_REVIEW_PERIOD);
         // Same post-validation position as the single-token create path: the
         // index write cannot observe or create partial state.
         Self::index_participants(&env, id, &participants);
@@ -1297,10 +1498,11 @@ impl Escrow {
         Ok(())
     }
 
-    /// Pay every leg's remaining balance to the seller. Seller-authorized.
+    /// Pay every leg's remaining balance to the seller now. Buyer-authorized;
+    /// sellers use `request_release_basket`.
     pub fn release_basket(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
         let basket = Self::load_basket(&env, escrow_id)?;
-        basket.seller.require_auth();
+        basket.buyer.require_auth();
 
         if basket.status != EscrowStatus::Funded {
             return Err(ForgeError::InvalidInput);
@@ -1315,11 +1517,13 @@ impl Escrow {
             .persistent()
             .set(&DataKey::Basket(escrow_id), &completed);
         bump_entry(&env, &DataKey::Basket(escrow_id));
+        clear_request(&env, escrow_id);
         events::basket_released(&env, &completed);
         Ok(())
     }
 
-    /// Pay `amount` of one leg to the seller. Seller-authorized.
+    /// Pay `amount` of one leg to the seller now. Buyer-authorized. Clears any
+    /// pending release request.
     ///
     /// All validation before any state change or transfer, mirroring
     /// `release_partial`.
@@ -1330,7 +1534,7 @@ impl Escrow {
         amount: i128,
     ) -> Result<(), ForgeError> {
         let basket = Self::load_basket(&env, escrow_id)?;
-        basket.seller.require_auth();
+        basket.buyer.require_auth();
 
         if basket.status != EscrowStatus::Funded {
             return Err(ForgeError::InvalidInput);
@@ -1371,6 +1575,7 @@ impl Escrow {
             .persistent()
             .set(&DataKey::Basket(escrow_id), &updated);
         bump_entry(&env, &DataKey::Basket(escrow_id));
+        clear_request(&env, escrow_id);
         events::basket_partially_released(&env, &updated, &token, amount);
         Ok(())
     }
@@ -1391,6 +1596,9 @@ impl Escrow {
             &basket.buyer,
             &basket.seller,
         )?;
+        if authorizer == basket.buyer && has_request(&env, escrow_id) {
+            return Err(ForgeError::ReleasePending);
+        }
         authorizer.require_auth();
 
         let settled = payout_assets(&env, &basket.assets, &basket.buyer)?;
@@ -1402,6 +1610,7 @@ impl Escrow {
             .persistent()
             .set(&DataKey::Basket(escrow_id), &refunded);
         bump_entry(&env, &DataKey::Basket(escrow_id));
+        clear_request(&env, escrow_id);
         events::basket_refunded(&env, &refunded);
         Ok(())
     }
@@ -1424,6 +1633,7 @@ impl Escrow {
             .persistent()
             .set(&DataKey::Basket(escrow_id), &disputed);
         bump_entry(&env, &DataKey::Basket(escrow_id));
+        clear_request(&env, escrow_id);
         events::basket_disputed(&env, &disputed);
         Ok(())
     }
@@ -1479,6 +1689,71 @@ impl Escrow {
         bump_entry(&env, &DataKey::Basket(escrow_id));
         events::basket_cancelled(&env, &cancelled);
         Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // Release with a review window
+    // -------------------------------------------------------------------
+
+    /// Seller asks to be paid `amount` of a single-token escrow (all of the
+    /// remaining balance, or part of it for a milestone). Nothing moves yet:
+    /// the buyer has the escrow's review window to approve or dispute, after
+    /// which anyone may call `execute_release`.
+    ///
+    /// Seller-authorized, only while `Funded`, only up to the escrow's
+    /// deadline, and one request at a time.
+    pub fn request_release(env: Env, escrow_id: u64, amount: i128) -> Result<u64, ForgeError> {
+        let escrow = Self::load_escrow(&env, escrow_id)?;
+        if escrow.status != EscrowStatus::Funded {
+            return Err(ForgeError::InvalidInput);
+        }
+        if amount <= 0 || amount > escrow.remaining() {
+            return Err(ForgeError::InvalidInput);
+        }
+        escrow.seller.require_auth();
+        open_request(&env, escrow_id, escrow.created_at, escrow.timeout, amount)
+    }
+
+    /// Seller asks to be paid every leg's remaining balance of a basket. Same
+    /// rules as `request_release`.
+    pub fn request_release_basket(env: Env, escrow_id: u64) -> Result<u64, ForgeError> {
+        let basket = Self::load_basket(&env, escrow_id)?;
+        if basket.status != EscrowStatus::Funded {
+            return Err(ForgeError::InvalidInput);
+        }
+        basket.seller.require_auth();
+        open_request(&env, escrow_id, basket.created_at, basket.timeout, 0)
+    }
+
+    /// Buyer approves the pending release request: the seller is paid now,
+    /// without waiting for the review window to end. Either escrow kind.
+    pub fn approve_release(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
+        let request = load_request(&env, escrow_id)?;
+        Self::buyer_of(&env, escrow_id)?.require_auth();
+        Self::pay_request(&env, escrow_id, &request)
+    }
+
+    /// Pay the seller a release request whose review window has ended without
+    /// a dispute. Permissionless, so the seller (or a keeper) can finish it
+    /// even if the buyer never responds. Either escrow kind.
+    pub fn execute_release(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
+        let request = load_request(&env, escrow_id)?;
+        if env.ledger().timestamp() < request.release_at {
+            return Err(ForgeError::DeadlineReached);
+        }
+        Self::pay_request(&env, escrow_id, &request)
+    }
+
+    /// The pending release request of an escrow, if any.
+    pub fn get_release_request(env: Env, escrow_id: u64) -> Option<ReleaseRequest> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ReleaseRequest(escrow_id))
+    }
+
+    /// The review window of an escrow, in seconds.
+    pub fn review_period(env: Env, escrow_id: u64) -> u64 {
+        review_period_of(&env, escrow_id)
     }
 
     // -------------------------------------------------------------------
@@ -1585,6 +1860,73 @@ impl Escrow {
     // Internals
     // -------------------------------------------------------------------
 
+    /// The buyer of either escrow kind.
+    fn buyer_of(env: &Env, escrow_id: u64) -> Result<Address, ForgeError> {
+        if let Ok(single) = Self::load_escrow(env, escrow_id) {
+            return Ok(single.buyer);
+        }
+        Ok(Self::load_basket(env, escrow_id)?.buyer)
+    }
+
+    /// Pay a release request to the seller and clear it. Transfer before
+    /// state, through the same payout primitives as every other path.
+    fn pay_request(env: &Env, escrow_id: u64, request: &ReleaseRequest) -> Result<(), ForgeError> {
+        if let Ok(escrow) = Self::load_escrow(env, escrow_id) {
+            if escrow.status != EscrowStatus::Funded {
+                return Err(ForgeError::InvalidInput);
+            }
+            let remaining = escrow.remaining();
+            if request.amount <= 0 || request.amount > remaining {
+                return Err(ForgeError::InvalidInput);
+            }
+            payout_part(
+                env,
+                &single_leg(env, &escrow),
+                0,
+                &escrow.seller,
+                request.amount,
+            )?;
+            let mut updated = escrow;
+            updated.released = updated
+                .released
+                .checked_add(request.amount)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            let full = request.amount == remaining;
+            if full {
+                updated.status = EscrowStatus::Completed;
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::Escrow(escrow_id), &updated);
+            bump_entry(env, &DataKey::Escrow(escrow_id));
+            clear_request(env, escrow_id);
+            // Same events as the direct paths: paying everything that was left
+            // is a `Released`, a milestone is a `PartiallyReleased`.
+            if full {
+                events::released(env, &updated);
+            } else {
+                events::partially_released(env, &updated, request.amount);
+            }
+            return Ok(());
+        }
+
+        let basket = Self::load_basket(env, escrow_id)?;
+        if basket.status != EscrowStatus::Funded {
+            return Err(ForgeError::InvalidInput);
+        }
+        let settled = payout_assets(env, &basket.assets, &basket.seller)?;
+        let mut completed = basket;
+        completed.assets = settled;
+        completed.status = EscrowStatus::Completed;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Basket(escrow_id), &completed);
+        bump_entry(env, &DataKey::Basket(escrow_id));
+        clear_request(env, escrow_id);
+        events::basket_released(env, &completed);
+        Ok(())
+    }
+
     /// Load an escrow record by id with backward-compatible schema migration.
     ///
     /// Attempt to deserialize as `EscrowData` (current schema, 10 fields
@@ -1686,6 +2028,76 @@ impl Escrow {
             bump_entry(env, &key);
         }
     }
+}
+
+/// Record a seller's release request: one at a time, only up to the escrow's
+/// deadline, paying out after the escrow's review window. Returns `release_at`.
+fn open_request(
+    env: &Env,
+    escrow_id: u64,
+    created_at: u64,
+    timeout: u64,
+    amount: i128,
+) -> Result<u64, ForgeError> {
+    if has_request(env, escrow_id) {
+        return Err(ForgeError::ReleasePending);
+    }
+    let now = env.ledger().timestamp();
+    let deadline = created_at
+        .checked_add(timeout)
+        .ok_or(ForgeError::ArithmeticOverflow)?;
+    // After the deadline the funds are the buyer's to reclaim; a late request
+    // must not be able to block that.
+    if now > deadline {
+        return Err(ForgeError::DeadlineReached);
+    }
+    let release_at = now
+        .checked_add(review_period_of(env, escrow_id))
+        .ok_or(ForgeError::ArithmeticOverflow)?;
+    let request = ReleaseRequest {
+        amount,
+        requested_at: now,
+        release_at,
+    };
+    let key = DataKey::ReleaseRequest(escrow_id);
+    env.storage().persistent().set(&key, &request);
+    bump_entry(env, &key);
+    events::release_requested(env, escrow_id, amount, release_at);
+    Ok(release_at)
+}
+
+fn load_request(env: &Env, escrow_id: u64) -> Result<ReleaseRequest, ForgeError> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ReleaseRequest(escrow_id))
+        .ok_or(ForgeError::NotFound)
+}
+
+fn has_request(env: &Env, escrow_id: u64) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::ReleaseRequest(escrow_id))
+}
+
+/// Drop a pending release request. Called by every path that pays out,
+/// refunds or freezes an escrow, so a stale request can never pay later.
+fn clear_request(env: &Env, escrow_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::ReleaseRequest(escrow_id));
+}
+
+fn set_review_period(env: &Env, escrow_id: u64, seconds: u64) {
+    let key = DataKey::ReviewPeriod(escrow_id);
+    env.storage().persistent().set(&key, &seconds);
+    bump_entry(env, &key);
+}
+
+fn review_period_of(env: &Env, escrow_id: u64) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ReviewPeriod(escrow_id))
+        .unwrap_or(DEFAULT_REVIEW_PERIOD)
 }
 
 /// Pull every leg of `assets` from `from` into this contract's custody, in
@@ -2040,6 +2452,16 @@ mod events {
         pub data: EscrowData,
     }
 
+    /// A seller asked to be paid; the buyer may approve or dispute until
+    /// `release_at`. `amount` is `0` for a basket (every leg's remainder).
+    #[contractevent]
+    pub struct ReleaseRequested {
+        #[topic]
+        pub escrow_id: u64,
+        pub amount: i128,
+        pub release_at: u64,
+    }
+
     #[contractevent]
     pub struct RefundExpired {
         #[topic]
@@ -2193,6 +2615,15 @@ mod events {
         .publish(env);
     }
 
+    pub fn release_requested(env: &Env, escrow_id: u64, amount: i128, release_at: u64) {
+        ReleaseRequested {
+            escrow_id,
+            amount,
+            release_at,
+        }
+        .publish(env);
+    }
+
     pub fn refund_expired(env: &Env, escrow_id: u64, refunded_amount: i128, timestamp: u64) {
         RefundExpired {
             escrow_id,
@@ -2325,6 +2756,9 @@ mod resource_report;
 
 #[cfg(test)]
 mod authz;
+
+#[cfg(test)]
+mod review_tests;
 
 #[cfg(test)]
 mod props;

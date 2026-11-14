@@ -58,6 +58,12 @@ pub enum ForgeError {
     /// A proposer has reached the maximum allowed concurrent active proposals
     /// or is within the proposer cooldown window.
     ProposerCooldown = 15,
+    /// A seller's release request is waiting out its review window, so the
+    /// buyer cannot take the funds back by refunding. The buyer can approve
+    /// the release or raise a dispute instead. Kept distinct from
+    /// [`ForgeError::InvalidInput`] so a wallet can explain why the refund
+    /// was refused and offer the dispute path.
+    ReleasePending = 16,
 }
 
 #[cfg(test)]

@@ -175,9 +175,13 @@ contributions have landed yet.
   surfaces as `ForgeError::TokenTransferFailed` because a client cannot
   tell which contract produced a forwarded discriminant. Root causes stay
   visible in diagnostic events.
-- **Escrow release is seller-confirmed**: the paid party confirms
-  delivery. Buyer-confirmed release was the v0.1.0 behavior and is what
-  made the old contract a confirmation flow rather than escrow.
+- **Escrow release has a review window**: the seller requests payment and
+  the buyer has the escrow's review window (3 days by default) to approve or
+  dispute; then anyone can execute it. Release used to be seller-confirmed
+  with no window, which let a seller pay themselves before the buyer could
+  dispute; purely buyer-confirmed release (v0.1.0) let a silent buyer hold
+  the money. The window protects both. The testnet deployment listed in the
+  README predates this change and still has seller-confirmed release.
 - **Contract self-authorization is implicit**: the Soroban host
   auto-approves `require_auth` when the demand comes from the currently
   executing contract. That is what makes the custody pattern work —

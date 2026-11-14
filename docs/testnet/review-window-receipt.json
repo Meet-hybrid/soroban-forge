@@ -1,0 +1,121 @@
+{
+  "network": "testnet",
+  "date": "2026-11-13",
+  "token": {
+    "asset": "native XLM",
+    "contract": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+  },
+  "wasm_sha256": "db0a1b699ef430b502e1a969d778eb12d9c78c7993f25790a8587f8bcf200413",
+  "built_from": "aa1ef0f",
+  "review_period_seconds": 60,
+  "roles": {
+    "buyer": "GARSTUL54RN6DUOVYX6RUOR5ROTB5BHVIDKC32JZTERQ6PPN743WQLNC",
+    "seller": "GBR5AGHIIBJEY2DDOADPKIF4UKQFNQCZ55QGI55OSYGRMCACU3WXCQMI",
+    "arbiter": "GDA77WEHTWDL4HJWLA5CZM4SVOHQCV4G2QPC267LD6UYPCDYKIR35W4F"
+  },
+  "steps": [
+    {
+      "what": "deploy the escrow with review windows",
+      "contract": "CAGIVLP2G4GUJFAX4UHNQDZ7UZ6OFHT76ZZMMLKDEIHAHOBMISVNFCKU",
+      "tx": "https://stellar.expert/explorer/testnet/tx/db0a1b699ef430b502e1a969d778eb12d9c78c7993f25790a8587f8bcf200413"
+    },
+    {
+      "what": "A. request, window ends, a third party executes",
+      "escrow_id": "1",
+      "create": "https://stellar.expert/explorer/testnet/tx/201368404b4e874b1c10912ae6b8b8688e924a0eb67d46d7b0d2b91406fb634c",
+      "deposit": "https://stellar.expert/explorer/testnet/tx/44be4285201a42ee3fe188e4c848b2467df031945790574028ab51c1e360db60",
+      "request": "https://stellar.expert/explorer/testnet/tx/66ad60bc89c920dd3af23c2fea3410179e0eebafbbbac30a1511077187298b9d",
+      "execute": "https://stellar.expert/explorer/testnet/tx/cfa1e71a49820fb4994fac3ea082f049e0c85c0fddb7830aca513d8ecf1f9490",
+      "execute_before_window_refused": true,
+      "early_error": "Error(Contract, #7)",
+      "contract_still_held_xlm_before_window": 10.0,
+      "released_xlm": 10.0,
+      "status": "Completed",
+      "ok": true
+    },
+    {
+      "what": "B. request, buyer approves early",
+      "escrow_id": "2",
+      "create": "https://stellar.expert/explorer/testnet/tx/2f230a9e90ecdf70b13834cda9fb1529655d45c94e3bcf3ef056792bcd16cbdf",
+      "deposit": "https://stellar.expert/explorer/testnet/tx/edc6368bfec4d4f38429436e458e7dcccd1eeafacdb553a6f3d19f6cbae25e5c",
+      "request": "https://stellar.expert/explorer/testnet/tx/50fe0fa48f1610f315f2c11ff8bb2ff7ca0edc87c40f1ca15adad48d1179513e",
+      "approve": "https://stellar.expert/explorer/testnet/tx/9d123d5496ac2dcde114320f904767aa0a92f5bd8f821e2df50923f387e9f093",
+      "released_xlm": 10.0,
+      "status": "Completed",
+      "ok": true
+    },
+    {
+      "what": "C. request, buyer disputes, executing is refused, arbiter refunds the buyer",
+      "escrow_id": "3",
+      "create": "https://stellar.expert/explorer/testnet/tx/7a9e6e904a4c470fb71e442cc4c8270b023770361fda53f7a6a4d14e9b6faa54",
+      "deposit": "https://stellar.expert/explorer/testnet/tx/ae40887c1166c2db92f2b961c15c5cf735a075c16fbc18aac2e6e3f0ee79d4f9",
+      "request": "https://stellar.expert/explorer/testnet/tx/7e2ab02fd9b4b50258ee36a58de699e628b6c8bf6d85f040166f4c5f6b2562c3",
+      "dispute": "https://stellar.expert/explorer/testnet/tx/3aa5530c6a4717da8c8645a3a5a447fb3235c9fcf4967fa8ce301600d9a78089",
+      "resolve": "https://stellar.expert/explorer/testnet/tx/51cdf8c3b5061afe46127854c7dc14bd87b4cc68c1b8497b198eac549efb46da",
+      "execute_after_dispute_refused": true,
+      "execute_error": "Error(Contract, #2)",
+      "status": "Refunded",
+      "ok": true
+    },
+    {
+      "what": "D. milestones: 3 XLM after the window, then 7 XLM approved",
+      "escrow_id": "4",
+      "create": "https://stellar.expert/explorer/testnet/tx/ecac084477f477e0cb36aab35e2525c2b6e0ccd03b528fbc4d369a8bac95e547",
+      "deposit": "https://stellar.expert/explorer/testnet/tx/c4b8a577c1f8a575c2f1579e654b34438513beb070c043fc174298645f82da3e",
+      "requests": [
+        "https://stellar.expert/explorer/testnet/tx/13298cfecfcfec95a2ea8e57a25ba2a9d6c0150c6913648724bcb7994879f5d6",
+        "https://stellar.expert/explorer/testnet/tx/2dd5ef6a227d44de022e30ce6f33a5bf8936f0613032fd01268d5965252cc69b"
+      ],
+      "execute": "https://stellar.expert/explorer/testnet/tx/3f0ed1f6e9a36b27af07b86e607bcf1c069cde9d140e6c6f27926226df3181fb",
+      "approve": "https://stellar.expert/explorer/testnet/tx/0f35d9d1b6ec632ef24b76980f1a59b81797096edec658b3067f8dd4bde329a4",
+      "released_after_first_xlm": 3.0,
+      "status_after_first": "Funded",
+      "released_at_end_xlm": 10.0,
+      "status_at_end": "Completed",
+      "ok": true
+    },
+    {
+      "what": "E. after the deadline the buyer cannot refund around a pending request",
+      "escrow_id": "5",
+      "create": "https://stellar.expert/explorer/testnet/tx/257e31151be8564222a58c90800965c10550986905c708c7c5d27a34293abea6",
+      "deposit": "https://stellar.expert/explorer/testnet/tx/68604631361e2833fea877c85e0e4d04c84e12bb4ad5cfb78c0334e239816f10",
+      "request": "https://stellar.expert/explorer/testnet/tx/d8e437269961f8acffc015c074a55f94bf338b668ac80b5fb6ac838d31a4760a",
+      "execute": "https://stellar.expert/explorer/testnet/tx/7913e2cd48fe857438cb0bf985cf0f7d6b0076fd1fb475fb76ee168eb20b1596",
+      "deadline": 1794576614,
+      "release_at": 1794576654,
+      "refund_refused": true,
+      "refund_error": "Error(Contract, #16)",
+      "refund_expired_refused": true,
+      "refund_expired_error": "Error(Contract, #16)",
+      "released_xlm": 10.0,
+      "status": "Completed",
+      "ok": true
+    },
+    {
+      "what": "F. the seller cannot pay themselves with a direct release",
+      "escrow_id": "6",
+      "create": "https://stellar.expert/explorer/testnet/tx/98883ffec9088041cdb98a901d2dbe6cf25ef82201877b2c2f6a856e9b9afa17",
+      "deposit": "https://stellar.expert/explorer/testnet/tx/50d85bdde1a45411be1f38544a0137c57810982627417a9072abc1e7d99ea265",
+      "release_refused": true,
+      "error": "refused",
+      "released_xlm": 0.0,
+      "status": "Funded",
+      "ok": true
+    },
+    {
+      "what": "F2. the buyer can still pay directly",
+      "escrow_id": "6",
+      "release": "https://stellar.expert/explorer/testnet/tx/3176bfb375dacc6db737cc2d2577f981caafc4ceb8a769447ee7f8ee119edce7",
+      "released_xlm": 10.0,
+      "status": "Completed",
+      "ok": true
+    },
+    {
+      "what": "the contract holds nothing extra after every round",
+      "held_change": 0,
+      "ok": true
+    }
+  ],
+  "escrow": "CAGIVLP2G4GUJFAX4UHNQDZ7UZ6OFHT76ZZMMLKDEIHAHOBMISVNFCKU",
+  "all_ok": true
+}
