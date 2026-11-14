@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `refund_expired_returns_only_what_is_left_after_partial_releases`).
 
 ### Added
+- **Works with OpenZeppelin Stellar Contracts, proven on testnet**
+  (`docs/OPENZEPPELIN.md`, `scripts/openzeppelin-token-proof.py`,
+  `docs/testnet/openzeppelin-token-receipt.json`): a token built from
+  OpenZeppelin's `fungible-pausable` example (v0.8.0) went through Forge's
+  deployed escrow (release, dispute refund) and a vesting contract. While the
+  token was paused, release failed with `TokenTransferFailed` and the escrow
+  kept the funds; after unpause it succeeded. Every token was accounted for.
+  The README now leads with the payment flows OpenZeppelin does not cover.
 - **ForgeGuard scan-then-merge bot** (`.github/workflows/forgeguard.yml`,
   `scripts/forgeguard/`): scans every open pull request for supply-chain
   malware patterns without checking out or executing PR code, publishes a
