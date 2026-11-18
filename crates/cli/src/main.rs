@@ -19,8 +19,8 @@ mod decode_failure;
 
 use clap::{Parser, Subcommand};
 use cli::{
-    BuildArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs,
-    ScaffoldValidateArgs, TestArgs, VerifyArgs,
+    BuildArgs, CompareArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs,
+    NewArgs, ScaffoldValidateArgs, TestArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 
@@ -50,6 +50,7 @@ pub enum Commands {
     Events(EventsArgs),
     Inspect(InspectArgs),
     Doctor(DoctorArgs),
+    Compare(CompareArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -69,6 +70,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,
         Commands::Doctor(args) => commands::doctor::run(args)?,
+        Commands::Compare(args) => commands::compare::run(args)?,
     }
 
     Ok(())
