@@ -2774,3 +2774,6 @@ mod ttl_chaos;
 // (see `indexer/docs/event-schema.md`).
 #[cfg(test)]
 mod indexer_fixtures;
+
+#[cfg(test)]
+mod model_check;
