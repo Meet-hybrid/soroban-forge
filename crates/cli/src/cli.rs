@@ -131,3 +131,41 @@ pub struct DoctorArgs {
     #[arg(long, value_name = "PATH")]
     pub wasm: Option<PathBuf>,
 }
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ValidatePlanArgs {
+    #[arg(
+        value_name = "PLAN_PATH",
+        help = "Path to a transaction-plan JSON or TOML file"
+    )]
+    pub file: Option<PathBuf>,
+    #[arg(
+        short = 'f',
+        long,
+        value_name = "PATH",
+        help = "Path to a transaction-plan JSON or TOML file"
+    )]
+    pub plan: Option<PathBuf>,
+    #[arg(long, help = "Expected target network used to detect mismatches")]
+    pub expected_network: Option<String>,
+    #[arg(long, help = "Network override for the plan being validated")]
+    pub network: Option<String>,
+    #[arg(long, help = "Contract strkey or workspace alias override")]
+    pub contract: Option<String>,
+    #[arg(
+        long,
+        visible_alias = "function",
+        help = "Contract method name override"
+    )]
+    pub method: Option<String>,
+    #[arg(long, help = "Source account override")]
+    pub source: Option<String>,
+    #[arg(
+        long = "arg",
+        action = clap::ArgAction::Append,
+        help = "Typed argument as name=type:value"
+    )]
+    pub args: Vec<String>,
+    #[arg(long, help = "Emit a machine-readable JSON validation report")]
+    pub json: bool,
+}

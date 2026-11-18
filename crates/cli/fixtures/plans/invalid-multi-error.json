@@ -1,0 +1,23 @@
+{
+  "schema": "soroban-forge/transaction-plan@1",
+  "version": "1",
+  "network": "testnet",
+  "network_passphrase": "Public Global Stellar Network ; September 2015",
+  "contract": "INVALID_CONTRACT_STRKEY",
+  "contract_type": "escrow",
+  "method": "unknown_escrow_method",
+  "source": "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7",
+  "secret": "should-never-be-echoed",
+  "args": [
+    {
+      "name": "amount",
+      "type": "i128",
+      "value": "not-an-integer"
+    },
+    {
+      "name": "api_key",
+      "type": "string",
+      "value": "should-never-be-echoed"
+    }
+  ]
+}

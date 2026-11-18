@@ -1,0 +1,5 @@
+{
+  "schema": "soroban-forge/plan@beta",
+  "secret": "should-never-be-echoed",
+  "args": []
+}
