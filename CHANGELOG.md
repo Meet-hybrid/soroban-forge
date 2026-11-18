@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Next.js example local demo state tools** (`packages/nextjs-example`): versioned JSON export, schema validation, and a confirmed reset flow for browser-only form state. Exports exclude secrets, signed transactions, wallet state, and on-chain data. Includes storage utility tests and a boundary note in the package README.
 - **ForgeGuard scan-then-merge bot** (`.github/workflows/forgeguard.yml`,
   `scripts/forgeguard/`): scans every open pull request for supply-chain
   malware patterns without checking out or executing PR code, publishes a

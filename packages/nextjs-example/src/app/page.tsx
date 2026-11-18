@@ -1,11 +1,23 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Client,
   networks,
   type EscrowData,
 } from "@soroban-forge/escrow-client";
+import {
+  DEFAULT_DEMO_AMOUNT,
+  DEFAULT_DEMO_TIMEOUT_SECS,
+  DEFAULT_DEMO_TOKEN,
+  browserDemoStorage,
+  emptyDemoState,
+  loadDemoState,
+  resetDemoState,
+  saveDemoState,
+  serializeDemoStateExport,
+  type DemoState,
+} from "../lib/demo-state";
 
 declare global {
   interface Window {
@@ -23,11 +35,6 @@ declare global {
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE = networks.testnet.networkPassphrase;
 const CONTRACT_ID = networks.testnet.contractId;
-
-// 7-decimal demo token (SAC "credit" asset) used by the repo's own testnet demo
-// (see the README proof table at the repository root).
-const DEFAULT_TOKEN =
-  "CBJQ53EOHB5MWSS7CETN523WILLNVS7NQAQQAQIS5QAYTPRCZSGKL23O";
 
 // 1 unit = 10^7 stroops (SEP-41 default for 7-decimal tokens such as XLM)
 const DECIMALS = BigInt(7);
@@ -52,9 +59,9 @@ export default function Home() {
   const [buyer, setBuyer] = useState("");
   const [seller, setSeller] = useState("");
   const [arbiter, setArbiter] = useState("");
-  const [token, setToken] = useState(DEFAULT_TOKEN);
-  const [amount, setAmount] = useState("10000000"); // stroops
-  const [timeoutSecs, setTimeoutSecs] = useState("3600");
+  const [token, setToken] = useState(DEFAULT_DEMO_TOKEN);
+  const [amount, setAmount] = useState(DEFAULT_DEMO_AMOUNT);
+  const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_DEMO_TIMEOUT_SECS);
   const [creating, setCreating] = useState(false);
   const [createdId, setCreatedId] = useState<string | null>(null);
 
@@ -75,12 +82,113 @@ export default function Home() {
   const [listTotal, setListTotal] = useState<number | null>(null);
   const [listBusy, setListBusy] = useState(false);
 
+  const demoHydrated = useRef(false);
+  const skipNextPersist = useRef(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+
   const pushLog = useCallback(
     (text: string, kind: LogEntry["kind"] = "info") => {
       setLog((prev) => [{ id: logId++, time: ts(), text, kind }, ...prev]);
     },
     []
   );
+
+  const applyDemoState = useCallback((state: DemoState) => {
+    setBuyer(state.buyer);
+    setSeller(state.seller);
+    setArbiter(state.arbiter);
+    setToken(state.token);
+    setAmount(state.amount);
+    setTimeoutSecs(state.timeoutSecs);
+    setCreatedId(state.createdId);
+    setActionEscrowId(state.actionEscrowId);
+    setReadEscrowId(state.readEscrowId);
+    setResolveFavor(state.resolveFavor);
+  }, []);
+
+  const currentDemoState = useCallback(
+    (): DemoState => ({
+      buyer,
+      seller,
+      arbiter,
+      token,
+      amount,
+      timeoutSecs,
+      createdId,
+      actionEscrowId,
+      readEscrowId,
+      resolveFavor,
+    }),
+    [
+      buyer,
+      seller,
+      arbiter,
+      token,
+      amount,
+      timeoutSecs,
+      createdId,
+      actionEscrowId,
+      readEscrowId,
+      resolveFavor,
+    ]
+  );
+
+  useEffect(() => {
+    const storage = browserDemoStorage();
+    queueMicrotask(() => {
+      try {
+        const stored = loadDemoState(storage);
+        if (stored !== null) applyDemoState(stored);
+      } catch (error) {
+        resetDemoState(storage);
+        skipNextPersist.current = true;
+        pushLog(
+          `Stored demo state was invalid and was reset: ${(error as Error).message}`,
+          "err"
+        );
+      } finally {
+        demoHydrated.current = true;
+      }
+    });
+  }, [applyDemoState, pushLog]);
+
+  useEffect(() => {
+    if (!demoHydrated.current) return;
+    if (skipNextPersist.current) {
+      skipNextPersist.current = false;
+      return;
+    }
+    saveDemoState(browserDemoStorage(), currentDemoState());
+  }, [currentDemoState]);
+
+  const exportDemoState = useCallback(() => {
+    try {
+      const json = serializeDemoStateExport(currentDemoState());
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "soroban-forge-local-demo-state.json";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      pushLog("Exported local demo state as JSON (browser only).", "ok");
+    } catch (error) {
+      pushLog(`Export failed: ${(error as Error).message}`, "err");
+    }
+  }, [currentDemoState, pushLog]);
+
+  const confirmDemoReset = useCallback(() => {
+    resetDemoState(browserDemoStorage());
+    skipNextPersist.current = true;
+    applyDemoState(emptyDemoState());
+    setConfirmReset(false);
+    pushLog(
+      "Reset local demo state. Wallet connection and network settings were unchanged.",
+      "ok"
+    );
+  }, [applyDemoState, pushLog]);
 
   const freighterMissing =
     typeof window !== "undefined" && !window.freighterApi;
@@ -654,6 +762,71 @@ export default function Home() {
           )}
         </section>
       </div>
+
+      <section className="mt-6 rounded-xl border border-gray-300 p-4">
+        <h2 className="text-lg font-semibold mb-2">6 · Local demo state</h2>
+        <p className="text-sm text-gray-600 mb-3">
+          Export contains local browser form state only. It is not on-chain
+          data and contains no wallet keys or signed transaction payloads.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={exportDemoState}
+            className="rounded bg-blue-600 px-4 py-1.5 text-sm text-white hover:bg-blue-700"
+          >
+            Export local demo state
+          </button>
+          <button
+            onClick={() => setConfirmReset(true)}
+            className="rounded bg-gray-200 px-4 py-1.5 text-sm hover:bg-gray-300"
+          >
+            Reset local demo state
+          </button>
+          <span className="text-sm text-gray-500">
+            Reset keeps your wallet connection and network settings unchanged.
+          </span>
+        </div>
+      </section>
+
+      {confirmReset && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="presentation"
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-demo-state-title"
+            className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl"
+          >
+            <h2
+              id="reset-demo-state-title"
+              className="text-lg font-semibold mb-2"
+            >
+              Reset local demo state?
+            </h2>
+            <p className="text-sm text-gray-600 mb-4">
+              This clears the browser-only form state stored by this demo. It
+              does not change the network, contract, wallet connection, or any
+              on-chain data.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmReset(false)}
+                className="rounded bg-gray-200 px-4 py-1.5 text-sm hover:bg-gray-300"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDemoReset}
+                className="rounded bg-red-600 px-4 py-1.5 text-sm text-white hover:bg-red-700"
+              >
+                Reset local demo state
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Log feed */}
       <section className="mt-6">

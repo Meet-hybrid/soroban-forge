@@ -11,6 +11,7 @@
 **/.next/
 **/out/
 **/dist/
+**/dist-test/
 **/build/
 **/*.log
 **/.DS_Store
