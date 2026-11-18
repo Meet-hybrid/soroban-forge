@@ -2228,6 +2228,9 @@ mod indexer_fixtures;
 mod resource_report;
 
 #[cfg(test)]
+mod model_check;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_forge_test_utils::{MockTarget, MockTargetClient, TestAccounts};
