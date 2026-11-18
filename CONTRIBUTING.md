@@ -80,11 +80,11 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
    cd soroban-forge
    git remote add upstream https://github.com/Meet-hybrid/soroban-forge.git
    git fetch upstream
-   git checkout -b my-feature upstream/main
+   git checkout -b my-feature upstream/develop
    ```
 
    Push the branch to your fork and open a Pull Request against
-   `Meet-hybrid/soroban-forge:main`. Working in a fork means you never need
+   `Meet-hybrid/soroban-forge:develop`, the default branch. Working in a fork means you never need
    direct push access to the repository; the maintainers review and merge
    your PR.
 2. If you've added code that should be tested, add tests.

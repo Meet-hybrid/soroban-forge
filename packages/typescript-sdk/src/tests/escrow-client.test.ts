@@ -511,3 +511,61 @@ test("EscrowStatus type has all 6 documented tags (compile-time verified)", () =
 test("EscrowData type has the documented field shape (compile-time verified)", () => {
   assert.ok(true, "compile-time type assertions for EscrowData passed");
 });
+
+test("paginateParticipantEscrows: empty page returns empty list without extra queries", async () => {
+  let callCount = 0;
+  const ids = await escrow.paginateParticipantEscrows(async (cursor, limit) => {
+    callCount++;
+    assert.equal(cursor, 0);
+    assert.equal(limit, 10);
+    return { ids: [], next_cursor: undefined, total: 0 };
+  }, 10);
+
+  assert.equal(callCount, 1);
+  assert.deepEqual(ids, []);
+});
+
+test("paginateParticipantEscrows: single page terminating cleanly", async () => {
+  let callCount = 0;
+  const ids = await escrow.paginateParticipantEscrows(async (cursor, limit) => {
+    callCount++;
+    assert.equal(cursor, 0);
+    return { ids: [1n, 2n, 3n], next_cursor: undefined, total: 3 };
+  }, 10);
+
+  assert.equal(callCount, 1);
+  assert.deepEqual(ids, [1n, 2n, 3n]);
+});
+
+test("paginateParticipantEscrows: multi-page preserves creation order and cursor propagation", async () => {
+  const pages: Record<number, { ids: bigint[]; next_cursor?: number }> = {
+    0: { ids: [10n, 11n], next_cursor: 2 },
+    2: { ids: [12n, 13n], next_cursor: 4 },
+    4: { ids: [14n], next_cursor: undefined },
+  };
+
+  const queriedCursors: number[] = [];
+  const ids = await escrow.paginateParticipantEscrows(async (cursor) => {
+    queriedCursors.push(cursor);
+    const p = pages[cursor];
+    assert.ok(p, `Unexpected cursor: ${cursor}`);
+    return { ids: p.ids, next_cursor: p.next_cursor, total: 5 };
+  }, 2);
+
+  assert.deepEqual(queriedCursors, [0, 2, 4]);
+  assert.deepEqual(ids, [10n, 11n, 12n, 13n, 14n]);
+});
+
+test("paginateParticipantEscrows: propagates page failure to caller", async () => {
+  await assert.rejects(
+    async () => {
+      await escrow.paginateParticipantEscrows(async (cursor) => {
+        if (cursor === 0) {
+          return { ids: [1n], next_cursor: 1, total: 2 };
+        }
+        throw new Error("RPC timeout on second page");
+      });
+    },
+    { message: "RPC timeout on second page" }
+  );
+});

@@ -17,6 +17,32 @@ const releaseDir = join(rootDir, "target", target, "release");
 const generatedDir = join(rootDir, "target", "generated-typescript-clients");
 const sdkClientsDir = join(sdkDir, "src", "clients");
 
+const escrowPaginationHelper = `
+
+/**
+ * Automatically pages through participant escrows using a page provider function.
+ * Stops cleanly when next_cursor is null/undefined and preserves on-chain creation order.
+ */
+export async function paginateParticipantEscrows(
+  fetchPage: (cursor: u32, limit: u32) => Promise<ParticipantEscrowsPage>,
+  limit: u32 = 50,
+): Promise<Array<u64>> {
+  const ids: Array<u64> = [];
+  let cursor: u32 | undefined = 0;
+
+  while (cursor !== undefined && cursor !== null) {
+    const page = await fetchPage(cursor, limit);
+    ids.push(...page.ids);
+    if (page.next_cursor === null || page.next_cursor === undefined) {
+      break;
+    }
+    cursor = page.next_cursor;
+  }
+
+  return ids;
+}
+`;
+
 const contracts = [
   {
     crate: "soroban-forge-escrow",
@@ -64,13 +90,13 @@ function run(command, args, cwd = rootDir) {
 }
 
 console.log(`==> Building contract WASMs for target '${target}'`);
-run("cargo", [
+run("stellar", [
+  "contract",
   "build",
   "--locked",
-  "--release",
-  "--target",
-  target,
-  ...contracts.flatMap(({ crate }) => ["--package", crate]),
+  "--profile",
+  "release",
+  "--optimize=false",
 ]);
 
 mkdirSync(sdkClientsDir, { recursive: true });
@@ -101,28 +127,24 @@ for (const contract of contracts) {
     throw new Error(`Expected generated binding missing: ${generatedSource}`);
   }
 
-  const clientClass = "export class Client extends ContractClient {";
   const generatedText = readFileSync(generatedSource, "utf8").replace(
     /[ \t]+(?=\r?$)/gm,
     "",
   );
-  if (!generatedText.includes(clientClass)) {
+  if (!generatedText.includes("export class Client extends ContractClient {")) {
     throw new Error(`Expected generated Client class in ${generatedSource}`);
   }
-  writeFileSync(
-    generatedSource,
-    generatedText.replace(
-      clientClass,
-      `export interface Client {\n  readonly spec: ContractSpec;\n  txFromJSON<T = unknown>(json: string): AssembledTransaction<T>;\n}\n${clientClass}`,
-    ),
-  );
+  const finalText =
+    contract.module === "escrow"
+      ? `${generatedText}${escrowPaginationHelper}`
+      : generatedText;
+  writeFileSync(generatedSource, finalText);
   cpSync(generatedSource, join(sdkClientsDir, `${contract.module}.ts`));
 
   if (contract.package) {
-    const packageDir = join(rootDir, "packages", contract.package);
-    rmSync(packageDir, { recursive: true, force: true });
-    mkdirSync(packageDir, { recursive: true });
-    cpSync(outputDir, packageDir, { recursive: true });
+    const packageSourceDir = join(rootDir, "packages", contract.package, "src");
+    mkdirSync(packageSourceDir, { recursive: true });
+    cpSync(generatedSource, join(packageSourceDir, "index.ts"));
   }
 }
 

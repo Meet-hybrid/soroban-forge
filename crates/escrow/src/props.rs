@@ -1402,3 +1402,119 @@ proptest! {
         assert_eq!(page.next_cursor, expected_next);
     }
 }
+
+// -----------------------------------------------------------------------
+// P7: release with a review window
+// -----------------------------------------------------------------------
+
+/// ops: 0=request (frac/10 of the original amount, clamped to remaining),
+///      1=approve, 2=execute, 3=dispute (buyer), 4=resolve, 5=refund,
+///      6=advance time by `step` seconds.
+fn review_action() -> impl Strategy<Value = (u8, u8, bool, u64)> {
+    (0u8..=6, 1u8..=10, prop::bool::ANY, 0u64..=4 * 24 * 3600)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Random sequences over the review-window flow never create or lose
+    /// tokens, never pay a request early, never pay one that a dispute,
+    /// refund or payout cleared, and never let the buyer refund around a
+    /// pending request after the deadline.
+    #[test]
+    fn p7_review_window_sequences_keep_funds_safe(
+        amount in 1i128..=MAX_AMOUNT,
+        timeout in 1u64..=30 * 24 * 3600,
+        actions in prop::collection::vec(review_action(), 0..=16),
+    ) {
+        use EscrowStatus::{Completed, Disputed, Funded, Refunded};
+
+        let w = setup_world();
+        w.mint_to_buyer(amount);
+        let id = w.create(amount, timeout);
+        w.escrow_client().deposit(&id);
+        let review = crate::DEFAULT_REVIEW_PERIOD;
+        let deadline = START + timeout;
+
+        let mut now = START;
+        let mut state = Funded;
+        let mut released: i128 = 0;
+        // (amount, release_at) of the pending request, as the model sees it.
+        let mut pending: Option<(i128, u64)> = None;
+
+        for (op, frac, pay_seller, step) in actions {
+            let client = w.escrow_client();
+            let before = w.pool_total();
+            let remaining = amount - released;
+
+            match op {
+                0 => {
+                    let ask = ((amount * i128::from(frac)) / 10).max(1).min(remaining.max(1));
+                    let res = client.try_request_release(&id, &ask);
+                    let ok = state == Funded && pending.is_none() && remaining > 0 && now <= deadline;
+                    prop_assert_eq!(res.is_ok(), ok, "request: state={:?} pending={:?} now={} deadline={}", state, pending, now, deadline);
+                    if ok {
+                        pending = Some((ask, now + review));
+                    }
+                }
+                1 => {
+                    let res = client.try_approve_release(&id);
+                    let ok = state == Funded && pending.is_some();
+                    prop_assert_eq!(res.is_ok(), ok, "approve: state={:?} pending={:?}", state, pending);
+                    if ok {
+                        let (ask, _) = pending.take().unwrap();
+                        released += ask;
+                        if released == amount { state = Completed; }
+                    }
+                }
+                2 => {
+                    let res = client.try_execute_release(&id);
+                    let ok = state == Funded && pending.is_some_and(|(_, at)| now >= at);
+                    prop_assert_eq!(res.is_ok(), ok, "execute: state={:?} pending={:?} now={}", state, pending, now);
+                    if ok {
+                        let (ask, _) = pending.take().unwrap();
+                        released += ask;
+                        if released == amount { state = Completed; }
+                    }
+                }
+                3 => {
+                    let res = client.try_dispute(&id, &w.buyer);
+                    let ok = state == Funded;
+                    prop_assert_eq!(res.is_ok(), ok);
+                    if ok { state = Disputed; pending = None; }
+                }
+                4 => {
+                    let res = client.try_resolve(&id, &pay_seller);
+                    let ok = state == Disputed;
+                    prop_assert_eq!(res.is_ok(), ok);
+                    if ok { released = amount; state = if pay_seller { Completed } else { Refunded }; }
+                }
+                5 => {
+                    let res = client.try_refund(&id);
+                    // After the deadline it is the buyer's refund, which a
+                    // pending request blocks; before it, the seller's.
+                    let blocked = now >= deadline && pending.is_some();
+                    let ok = state == Funded && !blocked;
+                    prop_assert_eq!(res.is_ok(), ok, "refund: state={:?} pending={:?} now={} deadline={}", state, pending, now, deadline);
+                    if blocked && state == Funded {
+                        prop_assert_eq!(res, Err(Ok(ForgeError::ReleasePending)));
+                    }
+                    if ok { released = amount; state = Refunded; pending = None; }
+                }
+                _ => {
+                    now += step;
+                    w.env.ledger().set_timestamp(now);
+                }
+            }
+
+            prop_assert_eq!(w.pool_total(), before, "no call may create or destroy tokens");
+            let record: EscrowData = w.escrow_client().get_escrow(&id);
+            prop_assert_eq!(record.released, released, "released must match the model");
+            prop_assert_eq!(record.status.clone(), state.clone());
+            let on_chain = w.escrow_client().get_release_request(&id).map(|r| (r.amount, r.release_at));
+            prop_assert_eq!(on_chain, pending, "pending request must match the model");
+            let (_, _, _, held) = w.pool();
+            prop_assert_eq!(held, amount - released, "custody must equal the unreleased balance");
+        }
+    }
+}

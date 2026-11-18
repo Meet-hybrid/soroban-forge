@@ -38,7 +38,7 @@ concurrency:
 jobs:
   status:
     name: ForgeBot status report
-    # Only pull-request CI runs are reported; pushes to main are ignored.
+    # Only pull-request CI runs are reported; branch pushes are ignored.
     if: >-
       github.event_name == 'workflow_dispatch'
       || github.event.workflow_run.event == 'pull_request'
@@ -63,6 +63,6 @@ jobs:
           FORGEBOT_REPO: ${{ github.repository }}
           FORGEBOT_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
           FORGEBOT_LOGIN: "github-actions[bot]"
-          FORGEBOT_BASE_BRANCH: main
+          FORGEBOT_BASE_BRANCH: develop
           FORGEBOT_CI_WORKFLOW: ci.yml
         run: bash scripts/forgebot/status-report.sh

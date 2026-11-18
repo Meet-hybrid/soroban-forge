@@ -255,17 +255,34 @@ of `0` fails with `ForgeError::InvalidInput`.
 
 ## Storage
 
-- `Subscription(id)` — the record for id `u64`. The record carries the
-  lapsed bookkeeping (a due-since timestamp or missed-period counter) alongside
-  the existing fields.
+- `Subscription(id)` — a persistent record for id `u64`. Persistent entries
+  are TTL-managed and are refreshed on writes; `touch_ttl(id)` can refresh an
+  existing record without changing its lifecycle state.
 - `Count` — monotonic subscription id counter.
-- `SubscriberSubscriptions(address)` — subscriber id index.
-- `ProviderSubscriptions(address)` — provider id index.
+- `SubscriberSubscriptions(address)` and `ProviderSubscriptions(address)` —
+  persistent, creation-ordered id indexes used by the paginated enumeration
+  methods. New writes refresh their TTLs.
 - `RenewalPolicy(id)` — separate instance-storage record; the `Subscription`
   wire shape remains unchanged.
-- `Usage(subscription_id, metric)` — the open period's raw unit counter for one
-  metric, stamped with the `last_charged` window it belongs to; removed by the
-  charge that closes the period.
+- `Usage(subscription_id, metric)` — a persistent open-period raw unit counter
+  for one metric, stamped with the `last_charged` window it belongs to; removed
+  by the charge that closes the period.
+
+### Storage migration and TTL compatibility
+
+Older deployments may contain subscription records and indexes in instance
+storage. Reads first use the persistent shape and then fall back to the legacy
+instance entry, including the pre-`prepaid_balance` record shape. A subsequent
+lifecycle write upgrades that record to the current persistent shape; the
+contract does not silently create a default subscription when an entry is
+missing. Index reads also retain the legacy instance fallback while new index
+writes use persistent storage. This makes the migration incremental and keeps
+pagination deterministic.
+
+`touch_ttl` is an explicit maintenance operation for integrations that want to
+refresh a subscription record ahead of its normal write path. It only extends
+the persistent record's TTL and does not charge, pause, resume, cancel, or
+otherwise change subscription state.
 
 ## Payment Semantics
 
