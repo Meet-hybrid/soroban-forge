@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { xdr } from "@stellar/stellar-sdk";
 
 export interface IndexerCursor {
@@ -406,11 +404,39 @@ const FIXTURE_NAME_ALIASES: Record<string, string> = {
   "vesting-events": "vesting-events.json",
 };
 
+function getNodeModule<T = unknown>(name: string): T {
+  const proc =
+    typeof globalThis !== "undefined"
+      ? (globalThis as { process?: { getBuiltinModule?: (m: string) => unknown } }).process
+      : undefined;
+  if (proc?.getBuiltinModule) {
+    return proc.getBuiltinModule(name) as T;
+  }
+  try {
+    const req = (globalThis as unknown as { require?: (m: string) => unknown }).require;
+    if (typeof req === "function") {
+      return req(name) as T;
+    }
+  } catch {
+    // fallback if require fails
+  }
+  throw new Error(`Cannot load module '${name}' in this environment.`);
+}
+
 export function resolveFixturePath(nameOrPath?: string): string {
+  const path = getNodeModule<{
+    resolve: (...paths: string[]) => string;
+    dirname: (p: string) => string;
+  }>("node:path");
+  const url = getNodeModule<{
+    fileURLToPath: (url: string | URL) => string;
+  }>("node:url");
+
   const candidate = (nameOrPath ?? "escrow").trim();
   const alias = FIXTURE_NAME_ALIASES[candidate.toLowerCase()] ?? candidate;
-  const root = fileURLToPath(
-    new URL("../../../indexer/fixtures", import.meta.url),
+  const root = path.resolve(
+    path.dirname(url.fileURLToPath(import.meta.url)),
+    "../../../indexer/fixtures",
   );
   const target = alias.endsWith(".json") ? alias : `${alias}.json`;
   const absolute = `${root}/${target}`;
@@ -418,8 +444,11 @@ export function resolveFixturePath(nameOrPath?: string): string {
 }
 
 export function loadFixtureEvents(nameOrPath?: string): ContractEventRecord[] {
+  const fs = getNodeModule<{
+    readFileSync: (path: string, encoding: string) => string;
+  }>("node:fs");
   const absolute = resolveFixturePath(nameOrPath);
-  const raw = readFileSync(absolute, "utf8");
+  const raw = fs.readFileSync(absolute, "utf8");
   const parsed = JSON.parse(raw) as { events?: unknown[] };
   if (!parsed || !Array.isArray(parsed.events)) {
     throw new Error(`Fixture '${absolute}' does not contain an events array.`);

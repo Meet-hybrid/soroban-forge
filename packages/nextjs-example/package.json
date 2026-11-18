@@ -2,11 +2,13 @@
   "name": "soroban-forge-nextjs-example",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "node --experimental-strip-types --test src/app/state-transitions.test.ts"
   },
   "dependencies": {
     "@creit.tech/stellar-wallets-kit": "^2.8.0",
@@ -17,6 +19,7 @@
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/node": "^26",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
