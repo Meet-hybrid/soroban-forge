@@ -227,6 +227,9 @@ cargo run -p soroban-forge-cli -- scaffold-validate crates/my-contract
 # New commands for contract interaction
 cargo run -p soroban-forge-cli -- invoke --contract <CONTRACT_ID> --function balance --network testnet
 cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --since <LEDGER> --network testnet
+
+# Validate a transaction plan offline (text or --json report)
+cargo run -p soroban-forge-cli -- validate-plan --plan crates/cli/fixtures/plans/valid-create-escrow.json --expected-network testnet
 ```
 
 ### 5. Deploy to testnet

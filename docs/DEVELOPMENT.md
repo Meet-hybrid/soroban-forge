@@ -41,6 +41,29 @@ no usable version, the check remains PASS with `version unknown`. The target che
 distinguishes a missing path, directory, empty file, and filesystem error. Any required failure
 causes the command to exit non-zero and lists the failed checks in the summary.
 
+Validate a transaction plan before signing or submitting it:
+
+```bash
+# Human-readable validation report
+cargo run -p soroban-forge-cli -- validate-plan \
+  --plan crates/cli/fixtures/plans/valid-create-escrow.json \
+  --expected-network testnet
+
+# Machine-readable validation report (schema soroban-forge/tx-plan-validation-report@1)
+cargo run -p soroban-forge-cli -- validate-plan \
+  --plan crates/cli/fixtures/plans/invalid-multi-error.json \
+  --expected-network testnet \
+  --json
+```
+
+`validate-plan` (alias `plan`) accepts JSON or TOML plan files and checks required fields,
+network identity and passphrase, contract strkey or workspace alias, method name, and `ScVal`
+argument encoding. All independent findings are reported together with stable categories:
+`missing_required_field`, `network_mismatch`, `invalid_contract_id`, `unsupported_method`,
+`malformed_argument`, `sensitive_input_rejected`, and `schema_mismatch`. Secret values are
+rejected and redacted as `[REDACTED]` in both text and JSON output. Valid plans exit with code
+`0`; invalid plans exit with code `1`.
+
 ```bash
 # Install or update Rust
 rustup update stable

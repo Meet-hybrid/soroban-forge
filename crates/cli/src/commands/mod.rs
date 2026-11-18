@@ -8,4 +8,5 @@ pub mod lint;
 pub mod new;
 pub mod scaffold_validate;
 pub mod test;
+pub mod validate_plan;
 pub mod verify;
