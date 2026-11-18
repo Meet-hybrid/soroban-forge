@@ -19,6 +19,12 @@ on:
     workflows: ["CI"]
     types: [completed]
   # Approvals arrive after CI, so sweep open PRs periodically as well.
+  # Re-evaluate as soon as CI finishes on a pull request, or a maintainer
+  # approves one (relayed by forgeguard-trigger.yml).
+  workflow_run:
+    workflows: ["CI", "ForgeGuard Trigger"]
+    types: [completed]
+  # Backstop in case an event is missed; GitHub may delay scheduled runs.
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
@@ -47,6 +53,7 @@ jobs:
     if: >-
       github.event_name != 'workflow_run'
       || github.event.workflow_run.event == 'pull_request'
+      || github.event.workflow_run.event == 'pull_request_review'
     runs-on: ubuntu-latest
     permissions:
       contents: write # merge pull requests

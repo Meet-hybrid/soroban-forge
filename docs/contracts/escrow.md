@@ -6,12 +6,20 @@ Secure fund custody for buyer-seller transactions with optional arbiter dispute 
 
 ```rust
 fn create_escrow(buyer, seller, arbiter, token, amount, timeout) -> Result<u64, ForgeError>
+fn create_escrow_with_review(buyer, seller, arbiter, token, amount, timeout, review_period) -> Result<u64, ForgeError>
 fn deposit(escrow_id) -> Result<(), ForgeError>
-fn release(escrow_id) -> Result<(), ForgeError>
-fn release_partial(escrow_id, amount) -> Result<(), ForgeError>
+
+// Seller is paid after a review window (see below)
+fn request_release(escrow_id, amount) -> Result<u64, ForgeError>    // seller; returns release_at
+fn approve_release(escrow_id) -> Result<(), ForgeError>             // buyer: pay now
+fn execute_release(escrow_id) -> Result<(), ForgeError>             // anyone, after release_at
+fn get_release_request(escrow_id) -> Option<ReleaseRequest>
+fn review_period(escrow_id) -> u64
+
+fn release(escrow_id) -> Result<(), ForgeError>                     // buyer pays directly
+fn release_partial(escrow_id, amount) -> Result<(), ForgeError>     // buyer pays directly
 fn refund(escrow_id) -> Result<(), ForgeError>
-fn schedule_release(escrow_id, release_at) -> Result<(), ForgeError>
-fn execute_scheduled(escrow_id) -> Result<(), ForgeError>
+fn refund_expired(escrow_id) -> Result<(), ForgeError>
 fn dispute(escrow_id, claimant) -> Result<(), ForgeError>
 fn resolve(escrow_id, in_favor_of_seller) -> Result<(), ForgeError>
 fn cancel(escrow_id) -> Result<(), ForgeError>
@@ -23,7 +31,8 @@ fn touch_ttl(escrow_id) -> Result<(), ForgeError>              // either record 
 // Multi-asset baskets (additive; the single-token interface above is unchanged)
 fn create_basket(buyer, seller, arbiter, assets: Vec<EscrowAsset>, timeout) -> Result<u64, ForgeError>
 fn deposit_basket(escrow_id) -> Result<(), ForgeError>
-fn release_basket(escrow_id) -> Result<(), ForgeError>
+fn request_release_basket(escrow_id) -> Result<u64, ForgeError>     // seller; every leg
+fn release_basket(escrow_id) -> Result<(), ForgeError>              // buyer pays directly
 fn release_partial_basket(escrow_id, token, amount) -> Result<(), ForgeError>
 fn refund_basket(escrow_id) -> Result<(), ForgeError>
 fn dispute_basket(escrow_id, claimant) -> Result<(), ForgeError>
@@ -107,6 +116,8 @@ index. No entrypoint signatures or generated TypeScript ABI changed.
 ## Lifecycle
 
 ```text
+Pending --deposit--> Funded --request_release--> review window --execute_release / approve_release--> paid
+                    |                              (dispute during the window freezes it instead)
 Pending --deposit--> Funded --release_partial (×n)--> Funded  (partial)
                     |                                  |
                     |                                  +--> Completed (final partial)
@@ -125,10 +136,68 @@ Pending --deposit--> Funded --release_partial (×n)--> Funded  (partial)
 - `Disputed` — Under arbitration (remaining balance frozen)
 - `Cancelled` — Cancelled before funding
 
+## Release With a Review Window
+
+The seller is paid in two steps, so neither side can take the money alone:
+
+1. **The seller asks:** `request_release(escrow_id, amount)` (seller-signed).
+   `amount` is the whole remaining balance or part of it for a milestone.
+   Nothing moves; the call returns `release_at = now + review window`.
+2. **The buyer reviews** until `release_at`, and can:
+   - `approve_release(escrow_id)` (buyer-signed): the seller is paid now;
+   - `dispute(escrow_id, buyer)`: the escrow freezes and the arbiter decides.
+3. **The window ends** with no dispute: anyone calls
+   `execute_release(escrow_id)` and the seller is paid.
+
+| Rule | Why |
+| --- | --- |
+| The review window is set at creation: `create_escrow_with_review(..., review_period)` (1 minute to 30 days), or 3 days with `create_escrow`. Escrows from before this version read as 3 days | Both parties know the terms before funding |
+| One request at a time; a second returns `ReleasePending` | The buyer always reviews one known amount |
+| A request must be made **before** the escrow's deadline (`DeadlineReached` after) | A seller cannot block a refund that is already due |
+| While a request is pending, the buyer's after-deadline `refund` and `refund_expired` return `ReleasePending` | A buyer cannot sit on a delivered order and take the money back after the deadline; they approve or dispute |
+| Any payout, refund or dispute clears the pending request | A stale request can never pay out later |
+| `execute_release` before `release_at` returns `DeadlineReached` | Nothing is paid early |
+
+`release` and `release_partial` still exist and pay immediately, but they are
+now **buyer-signed**: the paying party approving payment. Until this version
+they were seller-signed, which let a seller pay themselves before the buyer
+could raise a dispute. Baskets follow the same rules with
+`request_release_basket` (always every leg) and buyer-signed
+`release_basket` / `release_partial_basket`.
+
+Events: `request_release*` emits `ReleaseRequested { escrow_id, amount,
+release_at }` (`amount` is `0` for a basket). Paying a request emits the same
+event as a direct payment: `Released` when it pays everything left,
+`PartiallyReleased` for a milestone, `BasketReleased` for a basket.
+
+Storage: `DataKey::ReleaseRequest(id)` holds the pending request and
+`DataKey::ReviewPeriod(id)` the window. Both are new keys; `EscrowData` and
+`BasketEscrowData` keep their stored shape.
+
+### Testnet proof
+
+[`docs/testnet/review-window-receipt.json`](../testnet/review-window-receipt.json)
+records a live run on 13 November 2026 against a fresh deployment
+(`CAGIVLP2G4GUJFAX4UHNQDZ7UZ6OFHT76ZZMMLKDEIHAHOBMISVNFCKU`) with native XLM and
+a 60-second window, from `scripts/review-window-proof.py`:
+
+| Round | Result |
+| --- | --- |
+| Request, window ends, a third party executes | Executing early was refused (`DeadlineReached`) and the contract kept the 10 XLM; after the window the seller was paid |
+| Request, buyer approves | Seller paid at once |
+| Request, buyer disputes | Executing was refused (`NotFound`); the arbiter refunded the buyer |
+| Milestones | 3 XLM through the window (escrow stayed `Funded`), then 7 XLM approved (`Completed`) |
+| Request just before the deadline | After the deadline, `refund` and `refund_expired` were both refused with `ReleasePending`; the seller was paid when the window ended |
+| Seller calls `release` directly | Refused; the buyer's direct `release` still works |
+
+The contract held nothing extra afterwards. The earlier escrow deployment
+(`CC227UDF…NBZHSB`) predates review windows and keeps seller-confirmed release.
+
 ## Partial Release
 
-`release_partial(escrow_id, amount)` allows the seller to receive the escrow
-balance incrementally while the escrow remains `Funded`.
+`release_partial(escrow_id, amount)` lets the buyer pay the seller part of the
+balance directly while the escrow remains `Funded`. Sellers request milestone
+payments with `request_release(escrow_id, amount)` instead.
 
 ### Accounting
 
@@ -151,7 +220,7 @@ released  = cumulative amount transferred to seller via release_partial
 
 ### Authorization
 
-`release_partial` is seller-authorized. Invalid requests (wrong status,
+`release_partial` is buyer-authorized. Invalid requests (wrong status,
 non-positive amount, amount exceeding remaining) return `InvalidInput` and
 do not modify any storage.
 
@@ -162,57 +231,6 @@ carries `partial_amount` (the incremental transfer) and the full `EscrowData`
 (including updated `released` and `status`). The existing `Released` event
 remains exclusively for the `release` entrypoint and signals terminal
 completion to indexers.
-
-## Time-Lock Release
-
-`schedule_release(escrow_id, release_at)` lets the buyer schedule a full
-release for a future ledger timestamp. `execute_scheduled(escrow_id)` performs
-the release once `release_at` has passed. This enables scheduled payments,
-cool-off periods, and regulatory reversal windows without changing the
-existing immediate-release path.
-
-### Scheduling
-
-- `schedule_release` is buyer-authorized and only valid while
-  `status == Funded` and no schedule is already pending.
-- `release_at` must be strictly greater than the current ledger timestamp;
-  otherwise `InvalidInput` is returned and no storage is modified.
-- The scheduled release covers the **remaining** balance only, consistent with
-  `release`, `refund`, and `resolve`.
-- Scheduling does not move funds. The escrow stays `Funded` and
-  `release_partial` remains available until `execute_scheduled` runs.
-
-### Execution
-
-- `execute_scheduled` is permissionless: anyone may call it once the
-  time-lock has expired. Funds always go to the seller.
-- It requires `status == Funded` and a pending schedule whose `release_at` is
-  `<=` the current ledger timestamp. Calling before expiry returns
-  `InvalidInput` and leaves the schedule intact.
-- On success it transfers the remaining balance to the seller, transitions to
-  `Completed`, and clears the scheduled state.
-
-### Storage
-
-Scheduled release state is stored under `DataKey::ScheduledRelease(escrow_id)`
-as an `Option<ScheduledRelease>` carrying `release_at` and the `scheduled_by`
-address. Absence of the key means no schedule is pending. Terminal transitions
-(`release`, `release_partial` final, `refund`, `resolve`, `cancel`) clear any
-pending schedule.
-
-### Events
-
-- `ReleaseScheduled` — emitted by `schedule_release`, carrying `escrow_id`,
-  `release_at`, and `scheduled_by`.
-- `ScheduledReleased` — emitted by `execute_scheduled`, carrying `escrow_id`
-  and the full `EscrowData` after the terminal transition. The existing
-  `Released` event remains exclusive to the immediate `release` entrypoint.
-
-### Non-goals
-
-Partial time-lock, recurring schedules, and time-locked refunds are out of
-scope. A schedule may be replaced only after it has been executed or the
-escrow has reached a terminal state.
 
 ## Storage Compatibility
 
@@ -233,15 +251,15 @@ writes the current schema back.
 
 `DataKey::Escrow(id)` is unchanged.
 
-`DataKey::ScheduledRelease(id)` is a new key; old records have no entry and
-decode as `None`.
+`DataKey::ReleaseRequest(id)` and `DataKey::ReviewPeriod(id)` are new keys;
+old escrows have no entry, which reads as "no pending request" and the
+3-day default window.
 
 ## WASM Budget
 
-Current size: ~28 KB  
+Current size: ~48 KB (unoptimized release build)  
 Limit: < 150 KB
 
 ## Feature Flags
 
 - `test-utils` — enables test-only helpers (proptest, authz tests)
-- `time-lock` — enables time-lock release entrypoints and tests

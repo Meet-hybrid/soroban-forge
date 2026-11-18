@@ -1,8 +1,8 @@
-# The workspace tracks stable Rust: soroban-sdk 27.x compiles on current
-# stable toolchains (the old 1.96.0 pin existed only for the SDK 21.x /
-# ethnum 1.5.0 breakage, removed in the SDK 27 migration).
+# Pin the compiler used to build the checked-in WASM and generated SDK
+# artifacts. A moving `stable` channel makes ABI output change underneath
+# `verify:generated` as Rust and LLVM evolve.
 [toolchain]
-channel  = "stable"
+channel  = "1.96.0"
 components = ["rustfmt", "clippy"]
 profile  = "minimal"
 targets  = ["wasm32v1-none"]

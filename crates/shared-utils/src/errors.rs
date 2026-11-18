@@ -58,4 +58,47 @@ pub enum ForgeError {
     /// A proposer has reached the maximum allowed concurrent active proposals
     /// or is within the proposer cooldown window.
     ProposerCooldown = 15,
+    /// A seller's release request is waiting out its review window, so the
+    /// buyer cannot take the funds back by refunding. The buyer can approve
+    /// the release or raise a dispute instead. Kept distinct from
+    /// [`ForgeError::InvalidInput`] so a wallet can explain why the refund
+    /// was refused and offer the dispute path.
+    ReleasePending = 16,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ForgeError;
+
+    fn is_retryable_after_recovery(error: ForgeError) -> bool {
+        matches!(
+            error,
+            ForgeError::DeadlineReached
+                | ForgeError::WithdrawalLimitExceeded
+                | ForgeError::SubscriptionPastDue
+                | ForgeError::ProposerCooldown
+        )
+    }
+
+    #[test]
+    fn retryable_failures_are_distinct_from_transfer_and_validation_failures() {
+        let cases = [
+            (ForgeError::DeadlineReached, true),
+            (ForgeError::WithdrawalLimitExceeded, true),
+            (ForgeError::SubscriptionPastDue, true),
+            (ForgeError::ProposerCooldown, true),
+            (ForgeError::InvalidInput, false),
+            (ForgeError::TokenTransferFailed, false),
+            (ForgeError::ContractInvocationFailed, false),
+            (ForgeError::Unauthorized, false),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(
+                is_retryable_after_recovery(error),
+                expected,
+                "unexpected retry classification for {error:?}"
+            );
+        }
+    }
 }

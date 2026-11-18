@@ -1,11 +1,10 @@
 use crate::cli::VerifyArgs;
-use crate::commands::build::{self, CONTRACT_PACKAGES, WASM_TARGET};
+use crate::commands::build::{self, CONTRACT_PACKAGES};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// A provenance manifest produced by `scripts/provenance.sh`
 /// (schema `soroban-forge/provenance@1`).
@@ -123,20 +122,7 @@ fn verify_manifest(manifest_path: &str) -> Result<()> {
     let manifest = parse_manifest(Path::new(manifest_path))?;
 
     build::ensure_wasm_target_installed()?;
-    let mut cmd = Command::new("cargo");
-    cmd.arg("build")
-        .arg("--release")
-        .arg("--target")
-        .arg(WASM_TARGET);
-    for package in CONTRACT_PACKAGES {
-        cmd.arg("--package").arg(package);
-    }
-    let status = cmd
-        .status()
-        .context("failed to run cargo build for provenance verification")?;
-    if !status.success() {
-        bail!("cargo build failed with status {status}");
-    }
+    build::build_contract_wasm(None).context("rebuilding contracts for provenance verification")?;
 
     println!("Verifying provenance manifest against source rebuild");
     if let Some(commit) = manifest.git_commit.as_deref() {
@@ -285,19 +271,7 @@ fn rebuild_wasm(package: &str) -> Result<PathBuf> {
 }
 
 fn rebuild_package(package: &str) -> Result<()> {
-    let status = Command::new("cargo")
-        .arg("build")
-        .arg("--release")
-        .arg("--target")
-        .arg(WASM_TARGET)
-        .arg("--package")
-        .arg(package)
-        .status()
-        .context("failed to run cargo build")?;
-    if !status.success() {
-        bail!("cargo build failed with status {status}");
-    }
-    Ok(())
+    build::build_contract_wasm(Some(package))
 }
 
 fn wasm_artifact_path(package: &str) -> Result<PathBuf> {

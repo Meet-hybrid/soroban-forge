@@ -22,39 +22,33 @@ pub fn run(args: BuildArgs) -> Result<()> {
     // mode even if the caller omits --wasm.
     let wasm = args.wasm || args.check_size;
     if wasm {
-        ensure_wasm_target_installed()?;
-    }
-
-    let mut cmd = Command::new("cargo");
-    cmd.arg("build");
-    if wasm {
-        cmd.arg("--release").arg("--target").arg(WASM_TARGET);
-    }
-
-    match args.package.as_deref() {
-        Some(pkg) => {
-            cmd.arg("--package").arg(pkg);
+        if let Some(package) = args.package.as_deref() {
+            ensure_contract_package(package)?;
         }
-        None if wasm => {
-            for package in CONTRACT_PACKAGES {
-                cmd.arg("--package").arg(package);
+        ensure_wasm_target_installed()?;
+        build_contract_wasm(args.package.as_deref())?;
+    } else {
+        let mut cmd = Command::new("cargo");
+        cmd.arg("build");
+        match args.package.as_deref() {
+            Some(pkg) => {
+                cmd.arg("--package").arg(pkg);
+            }
+            None => {
+                cmd.arg("--workspace");
             }
         }
-        None => {
-            cmd.arg("--workspace");
+        if args.release {
+            cmd.arg("--release");
         }
-    }
+        if args.all_targets {
+            cmd.arg("--all-targets");
+        }
 
-    if args.release && !wasm {
-        cmd.arg("--release");
-    }
-    if args.all_targets {
-        cmd.arg("--all-targets");
-    }
-
-    let status = cmd.status().context("failed to run cargo build")?;
-    if !status.success() {
-        bail!("cargo build failed with status {status}");
+        let status = cmd.status().context("failed to run cargo build")?;
+        if !status.success() {
+            bail!("cargo build failed with status {status}");
+        }
     }
 
     if args.check_size {
@@ -76,6 +70,64 @@ pub fn run(args: BuildArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The arguments CI and `scripts/provenance.sh` build contract WASM with, so
+/// artifacts built here hash the same as theirs.
+pub(crate) fn contract_build_args(package: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "contract",
+        "build",
+        "--locked",
+        "--profile",
+        "release",
+        "--optimize=false",
+    ]
+    .iter()
+    .map(|arg| (*arg).to_owned())
+    .collect();
+    if let Some(package) = package {
+        args.push("--package".to_owned());
+        args.push(package.to_owned());
+    }
+    args
+}
+
+/// Builds contract WASM with `stellar contract build`. soroban-sdk 28 and
+/// later reject a plain `cargo build --target wasm32v1-none`: contracts must
+/// be built by stellar-cli v25.2.0+. Without a package, every contract crate
+/// (the workspace's cdylib crates) is built.
+pub(crate) fn build_contract_wasm(package: Option<&str>) -> Result<()> {
+    let status = match Command::new("stellar")
+        .args(contract_build_args(package))
+        .status()
+    {
+        Ok(status) => status,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!(missing_stellar_message())
+        }
+        Err(error) => return Err(error).context("failed to run stellar contract build"),
+    };
+    if !status.success() {
+        bail!("stellar contract build failed with status {status}");
+    }
+    Ok(())
+}
+
+fn missing_stellar_message() -> String {
+    "building contracts to WASM needs stellar-cli v25.2.0 or newer on PATH (soroban-sdk rejects a plain `cargo build --target wasm32v1-none`); install it with `cargo install --locked stellar-cli`".to_owned()
+}
+
+/// Rejects packages that do not build a contract before anything is built.
+pub(crate) fn ensure_contract_package(package: &str) -> Result<()> {
+    if CONTRACT_PACKAGES.contains(&package) {
+        Ok(())
+    } else {
+        bail!(
+            "`{package}` is not a Soroban Forge contract package; expected one of: {}",
+            CONTRACT_PACKAGES.join(", ")
+        )
+    }
 }
 
 pub(crate) fn ensure_wasm_target_installed() -> Result<()> {
@@ -219,6 +271,50 @@ mod tests {
             .expect("system clock must be after unix epoch")
             .as_nanos();
         env::temp_dir().join(format!("soroban-forge-cli-{}-{nonce}", std::process::id()))
+    }
+
+    #[test]
+    fn contract_wasm_builds_like_ci_and_provenance() {
+        assert_eq!(
+            contract_build_args(None),
+            [
+                "contract",
+                "build",
+                "--locked",
+                "--profile",
+                "release",
+                "--optimize=false"
+            ]
+        );
+        assert_eq!(
+            contract_build_args(Some("soroban-forge-escrow")),
+            [
+                "contract",
+                "build",
+                "--locked",
+                "--profile",
+                "release",
+                "--optimize=false",
+                "--package",
+                "soroban-forge-escrow"
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_stellar_cli_error_names_the_install_command() {
+        let message = missing_stellar_message();
+        assert!(message.contains("v25.2.0"));
+        assert!(message.contains("cargo install --locked stellar-cli"));
+    }
+
+    #[test]
+    fn wasm_build_rejects_non_contract_packages() {
+        assert!(ensure_contract_package("soroban-forge-escrow").is_ok());
+        let err = ensure_contract_package("soroban-forge-shared-utils").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("not a Soroban Forge contract package"));
     }
 
     #[test]

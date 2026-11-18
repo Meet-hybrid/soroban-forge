@@ -7,7 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Escrow release now has a review window (breaking).** The seller asks to be
+  paid with `request_release(escrow_id, amount)` (all or part, for
+  milestones); the buyer can `approve_release` to pay at once or `dispute`
+  during the window; when it ends anyone can `execute_release`. Baskets use
+  `request_release_basket`. The window is set per escrow with
+  `create_escrow_with_review` (60 s to 30 days) or defaults to 3 days. While a
+  request is pending, the buyer cannot refund after the deadline
+  (`ReleasePending`, a new error code 16); requests are only accepted before
+  the deadline, and any payout, refund or dispute clears them.
+  `release`, `release_partial`, `release_basket` and `release_partial_basket`
+  are now **buyer**-signed direct payments; until now they were seller-signed,
+  which let a seller pay themselves before the buyer could dispute.
+  Regenerated TypeScript clients; new tests in `review_tests.rs` and property
+  test P7 (random sequences over the new flow keep funds conserved).
+
+### Fixed
+- **`refund_expired` refunded the full original amount, even after partial
+  releases.** Because every escrow of a token is held by the same contract,
+  the extra was taken from other escrows' funds. It now refunds only the
+  remaining balance (regression test
+  `refund_expired_returns_only_what_is_left_after_partial_releases`).
+
 ### Added
+- **Works with OpenZeppelin Stellar Contracts, proven on testnet**
+  (`docs/OPENZEPPELIN.md`, `scripts/openzeppelin-token-proof.py`,
+  `docs/testnet/openzeppelin-token-receipt.json`): a token built from
+  OpenZeppelin's `fungible-pausable` example (v0.8.0) went through Forge's
+  deployed escrow (release, dispute refund) and a vesting contract. While the
+  token was paused, release failed with `TokenTransferFailed` and the escrow
+  kept the funds; after unpause it succeeded. Every token was accounted for.
+  The README now leads with the payment flows OpenZeppelin does not cover.
 - **ForgeGuard scan-then-merge bot** (`.github/workflows/forgeguard.yml`,
   `scripts/forgeguard/`): scans every open pull request for supply-chain
   malware patterns without checking out or executing PR code, publishes a
