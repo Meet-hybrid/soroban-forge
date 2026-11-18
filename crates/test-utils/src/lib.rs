@@ -15,10 +15,15 @@ extern crate std;
 use soroban_sdk::Env;
 
 pub mod mocks;
+pub mod model;
 pub mod ttl;
 
 pub use mocks::{
     MockTarget, MockTargetClient, RevertingTarget, RevertingTargetClient, TestAccounts,
+};
+pub use model::{
+    assert_model_check, replay_ops, run_model_check, LifecycleModel, ModelDriver, ModelRng,
+    ModelStepRecord, ModelTrace, ModelTraceFor, OpGenerator,
 };
 pub use ttl::{
     advance_ledger, assert_no_violations, chaos_drive, entry_is_live, entry_ttl, ChaosStep,
