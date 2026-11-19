@@ -1190,7 +1190,7 @@ mod resource_report;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_forge_test_utils::{MockTarget, MockTargetClient, TestAccounts};
+    use soroban_forge_test_utils::{FailureSchedule, MockTarget, MockTargetClient, TestAccounts};
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{Bytes, Env};
@@ -2107,6 +2107,53 @@ mod tests {
         let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
         assert_eq!(mock_target.count(), 1);
+    }
+
+    #[test]
+    fn execute_result_decoding_failure_preserves_proposal_bond_and_events() {
+        let (env, _token, tc, contract_id, client, accounts) = bonded_env!();
+        let target_id = env.register(MockTarget, ());
+        let target = MockTargetClient::new(&env, &target_id);
+        target.set_failure_schedule(&FailureSchedule::MalformedResult);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+        let bond_before = tc.balance(&contract_id);
+
+        let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::ContractInvocationFailed);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Succeeded
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).bond_state,
+            BondState::Posted
+        );
+        assert_eq!(target.count(), 0);
+        assert!(target.trace().is_empty());
+        assert_eq!(tc.balance(&contract_id), bond_before);
+        assert_eq!(bond_held(&env, &contract_id), BOND);
+        assert!(dao_events(&env, &contract_id).is_empty());
+
+        target.set_failure_schedule(&FailureSchedule::None);
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Executed
+        );
+        assert_eq!(target.count(), 1);
+        assert_eq!(tc.balance(&accounts.user1), FUNDS);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(bond_held(&env, &contract_id), 0);
     }
 
     #[test]

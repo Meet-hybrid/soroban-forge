@@ -2,7 +2,7 @@ use crate::cli::DoctorArgs;
 use anyhow::Result;
 use serde::Serialize;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -45,11 +45,19 @@ fn command_output(output: Output) -> CommandOutput {
 }
 
 pub fn run(args: DoctorArgs) -> Result<()> {
-    let results = collect_checks(&SystemCommandRunner, args.wasm.as_deref());
+    run_with_runner(&SystemCommandRunner, args, io::stdout())
+}
+
+fn run_with_runner<W: Write>(
+    runner: &impl CommandRunner,
+    args: DoctorArgs,
+    mut output: W,
+) -> Result<()> {
+    let results = collect_checks(runner, args.wasm.as_deref());
     if args.json {
-        print_json_report(&results)?;
+        print_json_report(&mut output, &results)?;
     } else {
-        print_report(&results);
+        print_report(&mut output, &results)?;
     }
     if results.iter().all(|result| result.ok) {
         Ok(())
@@ -179,18 +187,22 @@ fn check_wasm_artifact(path: &Path) -> CheckResult {
     }
 }
 
-fn print_report(results: &[CheckResult]) {
-    println!("Check                    Status  Details");
-    println!("-----------------------  ------  ------------------------------");
+fn print_report<W: Write>(mut output: W, results: &[CheckResult]) -> io::Result<()> {
+    writeln!(output, "Check                    Status  Details")?;
+    writeln!(
+        output,
+        "-----------------------  ------  ------------------------------"
+    )?;
     for result in results {
-        println!(
+        writeln!(
+            output,
             "{:<23}  {:<6}  {}",
             result.name,
             if result.ok { "PASS" } else { "FAIL" },
             result.detail
-        );
+        )?;
         if let Some(fix) = result.fix_hint {
-            println!("  fix: {fix}");
+            writeln!(output, "  fix: {fix}")?;
         }
     }
     let failed: Vec<_> = results
@@ -199,10 +211,11 @@ fn print_report(results: &[CheckResult]) {
         .map(|result| result.name)
         .collect();
     if failed.is_empty() {
-        println!("Summary: all checks passed");
+        writeln!(output, "Summary: all checks passed")?;
     } else {
-        println!("Summary: failed checks: {}", failed.join(", "));
+        writeln!(output, "Summary: failed checks: {}", failed.join(", "))?;
     }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -210,25 +223,47 @@ struct JsonDoctorReport<'a> {
     checks: &'a [CheckResult],
 }
 
-fn print_json_report(results: &[CheckResult]) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string(&JsonDoctorReport { checks: results })?
-    );
+fn print_json_report<W: Write>(mut output: W, results: &[CheckResult]) -> Result<()> {
+    serde_json::to_writer(&mut output, &JsonDoctorReport { checks: results })?;
+    writeln!(output)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
 
-    struct SequenceRunner(std::cell::RefCell<VecDeque<io::Result<CommandOutput>>>);
+    struct SequenceRunner {
+        responses: RefCell<VecDeque<io::Result<CommandOutput>>>,
+        calls: RefCell<Vec<(String, Vec<String>)>>,
+    }
+
+    impl SequenceRunner {
+        fn new(responses: Vec<io::Result<CommandOutput>>) -> Self {
+            Self {
+                responses: RefCell::new(responses.into()),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, Vec<String>)> {
+            self.calls.borrow().clone()
+        }
+    }
 
     impl CommandRunner for SequenceRunner {
-        fn output(&self, _program: &str, _args: &[&str]) -> io::Result<CommandOutput> {
-            self.0.borrow_mut().pop_front().expect("response available")
+        fn output(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+            self.calls.borrow_mut().push((
+                program.to_owned(),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ));
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .expect("response available")
         }
     }
 
@@ -242,14 +277,11 @@ mod tests {
 
     #[test]
     fn checks_run_in_required_order_and_all_pass() {
-        let runner = SequenceRunner(std::cell::RefCell::new(
-            vec![
-                output("stellar 1.0", false),
-                output("cargo 1.0", true),
-                output("x86_64-unknown-linux-gnu\nwasm32v1-none\n", true),
-            ]
-            .into(),
-        ));
+        let runner = SequenceRunner::new(vec![
+            output("stellar 1.0", false),
+            output("cargo 1.0", true),
+            output("x86_64-unknown-linux-gnu\nwasm32v1-none\n", true),
+        ]);
         let results = collect_checks(&runner, None);
         assert_eq!(
             results.iter().map(|result| result.name).collect::<Vec<_>>(),
@@ -258,25 +290,100 @@ mod tests {
         assert!(results.iter().all(|result| result.ok));
         assert_eq!(results[0].detail, "develop");
         assert_eq!(results[1].detail, "stellar 1.0");
+        assert_eq!(results[2].detail, "cargo 1.0");
+        assert_eq!(results[3].detail, "installed");
+        assert_eq!(
+            runner.calls(),
+            vec![
+                ("stellar".to_owned(), vec!["--version".to_owned()]),
+                ("cargo".to_owned(), vec!["--version".to_owned()]),
+                (
+                    "rustup".to_owned(),
+                    vec![
+                        "target".to_owned(),
+                        "list".to_owned(),
+                        "--installed".to_owned(),
+                    ]
+                ),
+            ]
+        );
     }
 
     #[test]
-    fn missing_and_failed_checks_are_reported_without_short_circuiting() {
-        let runner = SequenceRunner(std::cell::RefCell::new(
-            vec![
-                Err(io::Error::new(io::ErrorKind::NotFound, "missing")),
-                output("", false),
-                output("", false),
-            ]
-            .into(),
-        ));
+    fn missing_tool_and_target_are_reported_without_short_circuiting() {
+        let runner = SequenceRunner::new(vec![
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing")),
+            output("cargo 1.0", true),
+            output("x86_64-unknown-linux-gnu\n", true),
+        ]);
         let results = collect_checks(&runner, None);
         assert_eq!(results.len(), 4);
         assert!(results[0].ok);
         assert!(!results[1].ok);
+        assert_eq!(results[1].detail, "not found on PATH");
+        assert_eq!(
+            results[1].fix_hint,
+            Some("cargo install --locked stellar-cli")
+        );
         assert!(results[2].ok);
         assert!(!results[3].ok);
-        assert_eq!(results[3].detail, "could not verify rustup target list");
+        assert_eq!(results[3].detail, "not installed");
+        assert_eq!(results[3].fix_hint, Some("rustup target add wasm32v1-none"));
+    }
+
+    #[test]
+    fn rustup_failure_is_reported_with_fix_hint() {
+        let runner = SequenceRunner::new(vec![output("", false)]);
+        let result = check_wasm_target(&runner);
+        assert!(!result.ok);
+        assert_eq!(result.detail, "could not verify rustup target list");
+        assert_eq!(result.fix_hint, Some("rustup target add wasm32v1-none"));
+    }
+
+    #[test]
+    fn run_returns_ok_when_all_required_checks_pass() {
+        let runner = SequenceRunner::new(vec![
+            output("stellar 1.0", false),
+            output("cargo 1.0", true),
+            output("wasm32v1-none\n", true),
+        ]);
+        let mut report = Vec::new();
+        run_with_runner(
+            &runner,
+            DoctorArgs {
+                wasm: None,
+                json: false,
+            },
+            &mut report,
+        )
+        .unwrap();
+        let report = String::from_utf8(report).unwrap();
+        assert!(report.contains("Summary: all checks passed"));
+        assert!(!report.contains("FAIL"));
+    }
+
+    #[test]
+    fn run_fails_when_a_required_check_fails() {
+        let runner = SequenceRunner::new(vec![
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing")),
+            output("cargo 1.0", true),
+            output("x86_64-unknown-linux-gnu\n", true),
+        ]);
+        let mut report = Vec::new();
+        let error = run_with_runner(
+            &runner,
+            DoctorArgs {
+                wasm: None,
+                json: false,
+            },
+            &mut report,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "environment preflight failed");
+        let report = String::from_utf8(report).unwrap();
+        assert!(report.contains("Summary: failed checks: stellar, wasm32v1-none"));
+        assert!(report.contains("fix: cargo install --locked stellar-cli"));
+        assert!(report.contains("fix: rustup target add wasm32v1-none"));
     }
 
     #[test]
@@ -301,19 +408,26 @@ mod tests {
     }
 
     #[test]
-    fn json_report_has_stable_fields_for_missing_tool_and_target() {
+    fn json_report_has_stable_fields_for_missing_tool_target_and_artifact() {
         let root = std::env::temp_dir().join(format!("soroban-doctor-json-{}", std::process::id()));
         let missing_target = root.join("missing.wasm");
-        let runner = SequenceRunner(std::cell::RefCell::new(
-            vec![
-                Err(io::Error::new(io::ErrorKind::NotFound, "missing stellar")),
-                output("cargo 1.0", true),
-                output("wasm32v1-none\n", true),
-            ]
-            .into(),
-        ));
-        let results = collect_checks(&runner, Some(&missing_target));
-        let json = serde_json::to_string(&JsonDoctorReport { checks: &results }).unwrap();
+        let runner = SequenceRunner::new(vec![
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing stellar")),
+            output("cargo 1.0", true),
+            output("x86_64-unknown-linux-gnu\n", true),
+        ]);
+        let mut report = Vec::new();
+        let error = run_with_runner(
+            &runner,
+            DoctorArgs {
+                wasm: Some(missing_target.clone()),
+                json: true,
+            },
+            &mut report,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "environment preflight failed");
+        let json = String::from_utf8(report).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         let checks = value["checks"].as_array().unwrap();
         assert_eq!(checks.len(), 5);
@@ -322,6 +436,9 @@ mod tests {
         assert_eq!(checks[1]["name"], "stellar");
         assert_eq!(checks[1]["ok"], false);
         assert_eq!(checks[1]["fix_hint"], "cargo install --locked stellar-cli");
+        assert_eq!(checks[3]["name"], "wasm32v1-none");
+        assert_eq!(checks[3]["ok"], false);
+        assert_eq!(checks[3]["fix_hint"], "rustup target add wasm32v1-none");
         assert_eq!(checks[4]["name"], "WASM artifact");
         assert_eq!(checks[4]["ok"], false);
         assert_eq!(

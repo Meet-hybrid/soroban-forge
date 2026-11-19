@@ -19,8 +19,8 @@ pub mod model;
 pub mod ttl;
 
 pub use mocks::{
-    FailureSchedule, FailureToken, FailureTokenClient, MockTarget, MockTargetClient,
-    RevertingTarget, RevertingTargetClient, TestAccounts,
+    failure_step_for_seed, FailureBoundary, FailureSchedule, FailureToken, FailureTokenClient,
+    MockTarget, MockTargetClient, RevertingTarget, RevertingTargetClient, TestAccounts,
 };
 pub use model::{
     assert_model_check, replay_ops, run_model_check, LifecycleModel, ModelDriver, ModelRng,

@@ -7,7 +7,7 @@
 //! authorization.
 
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{contracttype, Address, Env, Vec};
+use soroban_sdk::{contracttype, Address, Env, Val, Vec};
 
 /// A fixed set of distinct mock accounts for use in tests.
 ///
@@ -44,6 +44,68 @@ pub enum FailureSchedule {
     AfterAuthorization,
     MalformedResult,
     AuthorizationMismatch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailureBoundary {
+    BeforeTransfer,
+    AfterAuthorization,
+    BeforeBatchStep,
+    ResultDecoding,
+    AuthorizationMismatch,
+}
+
+impl FailureBoundary {
+    fn tag(self) -> u64 {
+        match self {
+            Self::BeforeTransfer => 1,
+            Self::AfterAuthorization => 2,
+            Self::BeforeBatchStep => 3,
+            Self::ResultDecoding => 4,
+            Self::AuthorizationMismatch => 5,
+        }
+    }
+}
+
+pub fn failure_step_for_seed(seed: u64, boundary: FailureBoundary) -> u32 {
+    let mut state = seed ^ boundary.tag();
+    state ^= state >> 30;
+    state = state.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    state ^= state >> 27;
+    state = state.wrapping_mul(0x94d0_49bb_1331_11eb);
+    state ^= state >> 31;
+    match boundary {
+        FailureBoundary::BeforeBatchStep => (state % 8) as u32 + 1,
+        _ => 1,
+    }
+}
+
+impl FailureSchedule {
+    pub fn seeded(seed: u64, boundary: FailureBoundary) -> Self {
+        match boundary {
+            FailureBoundary::BeforeTransfer => Self::BeforeTransfer,
+            FailureBoundary::AfterAuthorization => Self::AfterAuthorization,
+            FailureBoundary::BeforeBatchStep => {
+                Self::BeforeCall(failure_step_for_seed(seed, boundary))
+            }
+            FailureBoundary::ResultDecoding => Self::MalformedResult,
+            FailureBoundary::AuthorizationMismatch => Self::AuthorizationMismatch,
+        }
+    }
+
+    pub fn failing_step(&self) -> Option<u32> {
+        match self {
+            Self::None | Self::MalformedResult => None,
+            Self::BeforeCall(step) => Some(*step),
+            Self::BeforeTransfer | Self::AfterAuthorization | Self::AuthorizationMismatch => {
+                Some(1)
+            }
+        }
+    }
+
+    pub fn attempt_trace(&self, attempts: u32) -> std::vec::Vec<u32> {
+        (1..=attempts).collect()
+    }
 }
 
 impl TestAccounts {
@@ -87,12 +149,14 @@ pub enum MockTargetKey {
     FailAt,
     Schedule,
     Trace,
+    RequiredAuth,
+    MismatchedAuth,
 }
 
 #[soroban_sdk::contractimpl]
 impl MockTarget {
     /// Dispatched by contracts executing actions via cross-contract calls.
-    pub fn execute(env: Env, payload: soroban_sdk::Bytes) {
+    pub fn execute(env: Env, payload: soroban_sdk::Bytes) -> Val {
         let count: u32 = env
             .storage()
             .instance()
@@ -111,6 +175,22 @@ impl MockTarget {
             .instance()
             .get(&MockTargetKey::Schedule)
             .unwrap_or(FailureSchedule::None);
+        if schedule == FailureSchedule::AuthorizationMismatch {
+            match env
+                .storage()
+                .instance()
+                .get::<_, Address>(&MockTargetKey::MismatchedAuth)
+            {
+                Some(signer) => signer.require_auth(),
+                None => panic!("mock target authorization mismatch"),
+            }
+        } else if let Some(required) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&MockTargetKey::RequiredAuth)
+        {
+            required.require_auth();
+        }
         match schedule {
             FailureSchedule::BeforeCall(call) if call == next_call => {
                 panic!("mock target failed before call {call}");
@@ -119,15 +199,13 @@ impl MockTarget {
                 panic!("mock target rejected transfer");
             }
             FailureSchedule::AfterAuthorization => {
-                panic!("mock target authorization mismatch");
-            }
-            FailureSchedule::MalformedResult => {
-                panic!("mock target returned malformed data");
+                panic!("mock target failed after nested authorization");
             }
             FailureSchedule::AuthorizationMismatch => {
-                panic!("mock target authorization mismatch");
+                panic!("authorization mismatch aborts before dispatch")
             }
-            _ => {}
+            FailureSchedule::MalformedResult => {}
+            FailureSchedule::BeforeCall(_) | FailureSchedule::None => {}
         }
         if env
             .storage()
@@ -151,6 +229,10 @@ impl MockTarget {
         env.storage()
             .instance()
             .set(&MockTargetKey::LastPayload, &payload);
+        match schedule {
+            FailureSchedule::MalformedResult => Val::from(1_u32),
+            _ => Val::from(()),
+        }
     }
 
     /// Make subsequent `execute` calls revert when enabled.
@@ -175,6 +257,18 @@ impl MockTarget {
         env.storage()
             .instance()
             .set(&MockTargetKey::Schedule, &schedule);
+    }
+
+    pub fn set_required_auth(env: Env, signer: Address) {
+        env.storage()
+            .instance()
+            .set(&MockTargetKey::RequiredAuth, &signer);
+    }
+
+    pub fn set_mismatched_auth(env: Env, signer: Address) {
+        env.storage()
+            .instance()
+            .set(&MockTargetKey::MismatchedAuth, &signer);
     }
 
     /// Return the invocation trace in one-based call/order form.
@@ -317,9 +411,12 @@ impl FailureToken {
 
 #[cfg(test)]
 mod tests {
-    use super::{FailureToken, FailureTokenClient, MockTarget, MockTargetClient};
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{Address, Bytes, Env};
+    use super::{
+        failure_step_for_seed, FailureBoundary, FailureSchedule, FailureToken, FailureTokenClient,
+        MockTarget, MockTargetClient,
+    };
+    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+    use soroban_sdk::{Address, Bytes, Env, IntoVal};
 
     #[test]
     fn target_succeeds_by_default_and_records_payload() {
@@ -414,6 +511,101 @@ mod tests {
     }
 
     #[test]
+    fn seeded_schedules_reproduce_the_same_failure_trace() {
+        let seed = 42;
+        let step = failure_step_for_seed(seed, FailureBoundary::BeforeBatchStep);
+        assert!((1..=8).contains(&step));
+        assert_eq!(
+            FailureSchedule::seeded(seed, FailureBoundary::BeforeBatchStep),
+            FailureSchedule::BeforeCall(step)
+        );
+
+        let schedule = FailureSchedule::BeforeCall(step);
+        let mut committed = std::vec::Vec::new();
+        let mut attempts = std::vec::Vec::new();
+        for _ in 0..2 {
+            let env = Env::default();
+            let token = env.register(FailureToken, ());
+            let client = FailureTokenClient::new(&env, &token);
+            let from = Address::generate(&env);
+            let to = Address::generate(&env);
+            client.mint(&from, &100);
+            client.set_fail_at_transfer(&step);
+            for _ in 1..step {
+                assert!(client.try_transfer(&from, &to, &1).is_ok());
+            }
+            assert!(client.try_transfer(&from, &to, &1).is_err());
+            committed.push(
+                client
+                    .transfer_trace()
+                    .iter()
+                    .collect::<std::vec::Vec<u32>>(),
+            );
+            attempts.push(schedule.attempt_trace(step));
+        }
+        assert_eq!(committed[0], committed[1]);
+        assert_eq!(attempts[0], attempts[1]);
+        assert_eq!(attempts[0], (1..=step).collect::<std::vec::Vec<u32>>());
+    }
+
+    #[test]
+    fn target_exposes_after_authorization_and_result_decoding_failure_points() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let target = env.register(MockTarget, ());
+        let client = MockTargetClient::new(&env, &target);
+        let signer = Address::generate(&env);
+        let payload = Bytes::from_slice(&env, b"dispatch");
+        client.set_required_auth(&signer);
+        client.set_failure_schedule(&FailureSchedule::AfterAuthorization);
+
+        assert!(client.try_execute(&payload).is_err());
+        assert_eq!(client.count(), 0);
+        assert!(client.trace().is_empty());
+
+        client.set_failure_schedule(&FailureSchedule::None);
+        client.execute(&payload);
+        assert_eq!(client.count(), 1);
+        assert_eq!(client.trace(), soroban_sdk::Vec::from_slice(&env, &[1]));
+
+        let malformed = env.register(MockTarget, ());
+        let malformed_client = MockTargetClient::new(&env, &malformed);
+        malformed_client.set_failure_schedule(&FailureSchedule::MalformedResult);
+        assert!(malformed_client.try_execute(&payload).is_ok());
+        assert_eq!(malformed_client.count(), 1);
+        assert_eq!(
+            malformed_client.trace(),
+            soroban_sdk::Vec::from_slice(&env, &[1])
+        );
+    }
+
+    #[test]
+    fn target_rejects_an_authorization_mismatch() {
+        let env = Env::default();
+        let target = env.register(MockTarget, ());
+        let client = MockTargetClient::new(&env, &target);
+        let signer = Address::generate(&env);
+        let wrong = Address::generate(&env);
+        let payload = Bytes::from_slice(&env, b"dispatch");
+        client.set_required_auth(&signer);
+        client.set_mismatched_auth(&wrong);
+        client.set_failure_schedule(&FailureSchedule::AuthorizationMismatch);
+        env.mock_auths(&[MockAuth {
+            address: &signer,
+            invoke: &MockAuthInvoke {
+                contract: &target,
+                fn_name: "execute",
+                args: (payload.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(client.try_execute(&payload).is_err());
+        assert_eq!(client.count(), 0);
+        assert!(client.trace().is_empty());
+    }
+
+    #[test]
     fn failure_token_reproducibly_traces_pre_and_later_transfer_failures() {
         let env = Env::default();
         let token = env.register(FailureToken, ());
@@ -429,7 +621,7 @@ mod tests {
         assert_eq!(client.balance(&to), 25);
         assert_eq!(
             client.transfer_trace(),
-            soroban_sdk::Vec::from_slice(&env, &[1, 2])
+            soroban_sdk::Vec::from_slice(&env, &[1])
         );
 
         client.set_fail_at_transfer(&0);
@@ -437,5 +629,9 @@ mod tests {
         assert!(client.try_transfer(&from, &to, &25).is_err());
         assert_eq!(client.balance(&from), 75);
         assert_eq!(client.balance(&to), 25);
+        assert_eq!(
+            client.transfer_trace(),
+            soroban_sdk::Vec::from_slice(&env, &[1])
+        );
     }
 }

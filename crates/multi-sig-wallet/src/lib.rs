@@ -2408,7 +2408,7 @@ mod model_check;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_forge_test_utils::{MockTarget, MockTargetClient, TestAccounts};
+    use soroban_forge_test_utils::{FailureSchedule, MockTarget, MockTargetClient, TestAccounts};
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
@@ -3701,6 +3701,46 @@ mod tests {
         assert_eq!(err, ForgeError::ContractInvocationFailed);
         // The tx is NOT executed.
         assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+    }
+
+    #[test]
+    fn execute_failure_after_nested_auth_and_on_result_decoding_is_retryable() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let contract_id = env.register(MultiSigWallet, ());
+        let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        let owners = owner_vec(&env, &accounts);
+        client.initialize(&owners, &2_u32);
+        let mock_target_id = env.register(MockTarget, ());
+        let target = MockTargetClient::new(&env, &mock_target_id);
+        target.set_required_auth(&accounts.user1);
+        target.set_failure_schedule(&FailureSchedule::AfterAuthorization);
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env), &None);
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::ContractInvocationFailed);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+        assert_eq!(target.count(), 0);
+        assert!(target.trace().is_empty());
+        assert!(env.events().all().events().is_empty());
+
+        target.set_required_auth(&accounts.user2);
+        target.set_failure_schedule(&FailureSchedule::MalformedResult);
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::ContractInvocationFailed);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+        assert_eq!(target.count(), 0);
+        assert!(target.trace().is_empty());
+        assert!(env.events().all().events().is_empty());
+
+        target.set_failure_schedule(&FailureSchedule::None);
+        client.execute(&tx_id);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
+        assert_eq!(target.count(), 1);
+        assert_eq!(target.trace(), soroban_sdk::Vec::from_slice(&env, &[1]));
     }
 
     #[test]

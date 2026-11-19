@@ -1051,7 +1051,10 @@ mod model_check;
 mod tests {
     use super::*;
     use soroban_forge_shared_utils::ttl::{BUMP_AMOUNT, BUMP_THRESHOLD};
-    use soroban_forge_test_utils::{advance_ledger_to, entry_ttl, TestAccounts};
+    use soroban_forge_test_utils::{
+        advance_ledger_to, entry_ttl, FailureBoundary, FailureSchedule, FailureToken,
+        FailureTokenClient, TestAccounts,
+    };
     use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::Env;
@@ -2173,6 +2176,61 @@ mod tests {
                 .len(),
             events_before
         );
+    }
+
+    #[test]
+    fn failure_token_seeded_batch_step_rolls_back_every_sale() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let token = env.register(FailureToken, ());
+        let token_client = FailureTokenClient::new(&env, &token);
+        let contract_id = env.register(MarketplaceRoyalties, ());
+        let client = SorobanForgeMarketplaceRoyaltiesClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        client.set_royalty(&accounts.arbiter, &accounts.user2, &500_u32);
+        token_client.mint(&accounts.user1, &1_000_i128);
+        let schedule = FailureSchedule::seeded(1, FailureBoundary::BeforeBatchStep);
+        let step = schedule.failing_step().expect("seeded step");
+        token_client.set_fail_at_transfer(&step);
+        let payer = &accounts.user1;
+        let recipient = &accounts.user2;
+        let seller = &accounts.user3;
+        let collection = &accounts.arbiter;
+        let batch = sales_of(
+            &env,
+            &[
+                (seller.clone(), 100),
+                (seller.clone(), 100),
+                (seller.clone(), 100),
+                (seller.clone(), 100),
+            ],
+        );
+        let err = client
+            .try_settle_sales(collection, &token, payer, &batch)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::TokenTransferFailed);
+        assert_eq!(token_client.balance(payer), 1_000);
+        assert_eq!(token_client.balance(seller), 0);
+        assert_eq!(token_client.balance(recipient), 0);
+        assert_eq!(
+            client
+                .try_get_settlement_summary(collection)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+        assert!(token_client.transfer_trace().is_empty());
+        assert_eq!(
+            schedule.attempt_trace(step),
+            (1..=step).collect::<std::vec::Vec<u32>>()
+        );
+        assert!(env
+            .events()
+            .all()
+            .filter_by_contract(&contract_id)
+            .events()
+            .is_empty());
     }
 
     #[test]

@@ -10,6 +10,8 @@ import {
   parseIndexerCheckpoint,
   serializeIndexerCheckpoint,
   type ContractEventRecord,
+  type EventFilter,
+  type IndexerCursor,
 } from "../indexer.js";
 
 test("fixture events can be loaded and normalized deterministically", () => {
@@ -52,82 +54,184 @@ test("indexer filters by ledger and contract metadata", () => {
 
 test("ledger boundaries are inclusive and field filters compose independently", () => {
   const events = loadFixtureEvents("escrow");
+  const allIds = events.map((event) => event.id);
   const atLower = events.find((event) => event.ledger === 1001)!;
   const atUpper = events.find((event) => event.ledger === 1004)!;
+  const escrowContractId =
+    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M";
 
   const lowerInclusive = filterEvents(events, { fromLedger: atLower.ledger });
-  assert.ok(lowerInclusive.every((event) => event.ledger >= atLower.ledger));
-  assert.ok(lowerInclusive.some((event) => event.ledger === atLower.ledger));
+  assert.deepEqual(
+    lowerInclusive.map((event) => event.id),
+    allIds.filter((id) => id !== "1000-0"),
+  );
+  assert.deepEqual(
+    lowerInclusive
+      .filter((event) => event.ledger === atLower.ledger)
+      .map((event) => event.id),
+    ["1001-0"],
+  );
 
   const upperInclusive = filterEvents(events, { toLedger: atUpper.ledger });
-  assert.ok(upperInclusive.every((event) => event.ledger <= atUpper.ledger));
-  assert.ok(upperInclusive.some((event) => event.ledger === atUpper.ledger));
+  assert.deepEqual(
+    upperInclusive.map((event) => event.id),
+    [
+      "1000-0",
+      "1001-0",
+      "1002-0",
+      "1002-1",
+      "1003-0",
+      "1004-0",
+      "1004-1",
+    ],
+  );
+  assert.deepEqual(
+    upperInclusive
+      .filter((event) => event.ledger === atUpper.ledger)
+      .map((event) => event.id),
+    ["1004-0", "1004-1"],
+  );
 
-  const independent = [
-    ["contractId", atLower.contractId],
-    ["eventType", atLower.eventType],
-    ["txHash", atLower.transactionHash],
-    ["entityId", atLower.entityId],
-  ] as const;
-  for (const [field, value] of independent) {
-    if (value === undefined) continue;
-    const filtered = filterEvents(events, { [field]: value });
-    assert.ok(filtered.length > 0, `${field} should match fixture records`);
+  const escrowIds = [
+    "1001-0",
+    "1002-1",
+    "1003-0",
+    "1004-1",
+    "2001-0",
+    "2002-0",
+    "3001-0",
+    "3002-1",
+    "3003-1",
+    "4001-0",
+    "4002-1",
+    "4003-0",
+    "4004-1",
+    "5001-0",
+    "5002-1",
+    "5003-1",
+    "6001-0",
+    "6002-1",
+    "6003-1",
+    "7001-0",
+    "7002-1",
+    "7003-1",
+    "7004-1",
+    "7005-1",
+  ];
+  const createdIds = [
+    "1001-0",
+    "2001-0",
+    "3001-0",
+    "4001-0",
+    "5001-0",
+    "6001-0",
+    "7001-0",
+  ];
+
+  const independent: ReadonlyArray<{
+    field: string;
+    filter: EventFilter;
+    expected: readonly string[];
+  }> = [
+    {
+      field: "contractId",
+      filter: { contractId: escrowContractId },
+      expected: escrowIds,
+    },
+    {
+      field: "eventType",
+      filter: { eventType: atLower.eventType },
+      expected: createdIds,
+    },
+    {
+      field: "txHash",
+      filter: { txHash: "0000000000001002" },
+      expected: ["1002-0", "1002-1"],
+    },
+    {
+      field: "entityId",
+      filter: { entityId: atLower.entityId },
+      expected: escrowIds,
+    },
+    {
+      field: "fromLedger",
+      filter: { fromLedger: 7005 },
+      expected: ["7005-0", "7005-1"],
+    },
+    {
+      field: "toLedger",
+      filter: { toLedger: 1000 },
+      expected: ["1000-0"],
+    },
+    {
+      field: "after",
+      filter: {
+        after: { ledger: 1002, eventIndex: 1, pagingToken: "1002-1" },
+      },
+      expected: allIds.slice(4),
+    },
+    {
+      field: "includeMalformed",
+      filter: { includeMalformed: true },
+      expected: allIds,
+    },
+  ];
+
+  for (const { field, filter, expected } of independent) {
+    assert.deepEqual(
+      filterEvents(events, filter).map((event) => event.id),
+      expected,
+      `${field} should return exactly the expected fixture IDs`,
+    );
   }
 
   const combined = filterEvents(events, {
-    contractId: atLower.contractId,
+    contractId: escrowContractId,
     eventType: atLower.eventType,
     txHash: atLower.transactionHash,
     entityId: atLower.entityId,
     fromLedger: atLower.ledger,
     toLedger: atUpper.ledger,
+    after: { ledger: 1000, eventIndex: 0, pagingToken: "1000-0" },
+    includeMalformed: true,
   });
-  assert.ok(
-    combined.every(
-      (event) =>
-        event.contractId === atLower.contractId &&
-        event.eventType === atLower.eventType &&
-        event.transactionHash === atLower.transactionHash &&
-        event.ledger >= atLower.ledger &&
-        event.ledger <= atUpper.ledger &&
-        (atLower.entityId === undefined || event.entityId === atLower.entityId),
-    ),
-  );
+  assert.deepEqual(combined.map((event) => event.id), ["1001-0"]);
 });
 
 test("omitted filters retain matching records and cursor paging has no gaps or duplicates", () => {
   const events = loadFixtureEvents("escrow");
-  assert.deepEqual(filterEvents(events).map((event) => event.id), events.map((event) => event.id));
+  const allIds = events.map((event) => event.id);
+  const sorted = normalizeEvents(events);
 
-  const sorted = [...events].sort(
-    (left, right) =>
-      left.ledger - right.ledger ||
-      left.eventIndex - right.eventIndex ||
-      left.pagingToken.localeCompare(right.pagingToken),
-  );
-  const resumeAt = sorted[3];
-  assert.ok(resumeAt);
-  const firstPage = filterEvents(sorted, {
-    toLedger: resumeAt.ledger,
-  }).slice(0, 4);
-  const secondPage = filterEvents(sorted, { after: {
-    ledger: firstPage[lastPageIndex(firstPage)].ledger,
-    eventIndex: firstPage[lastPageIndex(firstPage)].eventIndex,
-  } });
+  assert.deepEqual(sorted.map((event) => event.id), allIds);
+  assert.deepEqual(filterEvents(events).map((event) => event.id), allIds);
+  assert.deepEqual(filterEvents(events, {}).map((event) => event.id), allIds);
 
-  const ids = [...firstPage, ...secondPage].map((event) => event.id);
-  assert.equal(new Set(ids).size, ids.length);
-  assert.deepEqual(
-    [...ids].sort(),
-    [...sorted.map((event) => event.id)].sort(),
-  );
-  assert.ok(secondPage.every((event) => event.ledger >= resumeAt.ledger));
+  const pageSize = 4;
+  const expectedPages = Math.ceil(sorted.length / pageSize);
+  const pagedIds: string[] = [];
+  let cursor: IndexerCursor | undefined;
+
+  for (let pageNumber = 0; pageNumber < expectedPages; pageNumber += 1) {
+    const page = filterEvents(sorted, cursor ? { after: cursor } : {}).slice(
+      0,
+      pageSize,
+    );
+    assert.ok(page.length > 0, `page ${pageNumber} should not be empty`);
+
+    const last = page[page.length - 1];
+    pagedIds.push(...page.map((event) => event.id));
+    cursor = {
+      ledger: last.ledger,
+      eventIndex: last.eventIndex,
+      pagingToken: last.pagingToken,
+    };
+  }
+
+  assert.deepEqual(pagedIds, allIds);
+  assert.equal(new Set(pagedIds).size, pagedIds.length);
+  assert.deepEqual(filterEvents(sorted, cursor ? { after: cursor } : {}), []);
 });
-
-function lastPageIndex(page: readonly unknown[]): number {
-  return page.length - 1;
-}
 
 test("event type derivation recognizes lifecycle event names", () => {
   const event = loadFixtureEvents("escrow")[1] as ContractEventRecord;
