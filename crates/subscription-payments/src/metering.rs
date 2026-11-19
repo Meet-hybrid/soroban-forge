@@ -967,6 +967,80 @@ fn a_failed_settlement_publishes_no_metering_events() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn arrears_reconciliation_matrix_is_exact_partial_repeat_safe_and_atomic() {
+    let (env, _token, token_client, client, accounts, subscription_id) =
+        setup_with_quotas!(calls_and_bytes);
+    let provider = client.get_subscription(&subscription_id).provider;
+
+    // Exact settlement: prepaid balance, provider/subscriber balances, and
+    // last-charged all advance according to one accounting invariant.
+    client.deposit(&subscription_id, &AMOUNT);
+    env.ledger().set_timestamp(START + PERIOD);
+    assert_eq!(client.charge(&subscription_id), AMOUNT);
+    assert_eq!(
+        client.get_subscription(&subscription_id).prepaid_balance,
+        Some(0)
+    );
+    assert_eq!(
+        client.get_subscription(&subscription_id).last_charged,
+        START + PERIOD
+    );
+    assert_eq!(token_client.balance(&accounts.user1), 10_000_000 - AMOUNT);
+    assert_eq!(token_client.balance(&provider), AMOUNT);
+
+    // Repeated settlement in the same period is a no-op and cannot collect twice.
+    assert_eq!(client.charge(&subscription_id), 0);
+    assert_eq!(
+        client.get_subscription(&subscription_id).last_charged,
+        START + PERIOD
+    );
+    assert_eq!(token_client.balance(&provider), AMOUNT);
+
+    // Partial prepaid funds preserve the residual due and make no transfer.
+    client.deposit(&subscription_id, &(AMOUNT / 2));
+    env.ledger().set_timestamp(START + PERIOD * 2);
+    assert_eq!(client.charge(&subscription_id), 0);
+    assert_eq!(
+        client.get_subscription(&subscription_id).prepaid_balance,
+        Some(AMOUNT / 2)
+    );
+    assert_eq!(
+        client.get_subscription(&subscription_id).last_charged,
+        START + PERIOD
+    );
+    assert_eq!(
+        client.get_subscription(&subscription_id).status,
+        SubscriptionStatus::PastDue
+    );
+    assert_eq!(token_client.balance(&provider), AMOUNT);
+
+    // Invalid settlement leaves subscription, meter, balance, and timestamp unchanged.
+    let subscription_before = client.get_subscription(&subscription_id);
+    let subscriber_before = token_client.balance(&accounts.user1);
+    let provider_before = token_client.balance(&provider);
+    let calls_before = client
+        .get_usage(&subscription_id, &Symbol::new(&env, CALLS))
+        .units;
+    let err = client
+        .try_deposit(&subscription_id, &0)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(
+        client.get_subscription(&subscription_id),
+        subscription_before
+    );
+    assert_eq!(token_client.balance(&accounts.user1), subscriber_before);
+    assert_eq!(token_client.balance(&provider), provider_before);
+    assert_eq!(
+        client
+            .get_usage(&subscription_id, &Symbol::new(&env, CALLS))
+            .units,
+        calls_before
+    );
+}
+
+#[test]
 fn charge_transfers_the_derived_amount_from_subscriber_to_provider() {
     let (env, _token, _tc, client, accounts, subscription_id) = setup_with_quotas!(calls_and_bytes);
     client.record_usage(&subscription_id, &Symbol::new(&env, CALLS), &11_001);

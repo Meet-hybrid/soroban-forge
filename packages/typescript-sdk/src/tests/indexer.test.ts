@@ -50,6 +50,85 @@ test("indexer filters by ledger and contract metadata", () => {
   );
 });
 
+test("ledger boundaries are inclusive and field filters compose independently", () => {
+  const events = loadFixtureEvents("escrow");
+  const atLower = events.find((event) => event.ledger === 1001)!;
+  const atUpper = events.find((event) => event.ledger === 1004)!;
+
+  const lowerInclusive = filterEvents(events, { fromLedger: atLower.ledger });
+  assert.ok(lowerInclusive.every((event) => event.ledger >= atLower.ledger));
+  assert.ok(lowerInclusive.some((event) => event.ledger === atLower.ledger));
+
+  const upperInclusive = filterEvents(events, { toLedger: atUpper.ledger });
+  assert.ok(upperInclusive.every((event) => event.ledger <= atUpper.ledger));
+  assert.ok(upperInclusive.some((event) => event.ledger === atUpper.ledger));
+
+  const independent = [
+    ["contractId", atLower.contractId],
+    ["eventType", atLower.eventType],
+    ["txHash", atLower.transactionHash],
+    ["entityId", atLower.entityId],
+  ] as const;
+  for (const [field, value] of independent) {
+    if (value === undefined) continue;
+    const filtered = filterEvents(events, { [field]: value });
+    assert.ok(filtered.length > 0, `${field} should match fixture records`);
+  }
+
+  const combined = filterEvents(events, {
+    contractId: atLower.contractId,
+    eventType: atLower.eventType,
+    txHash: atLower.transactionHash,
+    entityId: atLower.entityId,
+    fromLedger: atLower.ledger,
+    toLedger: atUpper.ledger,
+  });
+  assert.ok(
+    combined.every(
+      (event) =>
+        event.contractId === atLower.contractId &&
+        event.eventType === atLower.eventType &&
+        event.transactionHash === atLower.transactionHash &&
+        event.ledger >= atLower.ledger &&
+        event.ledger <= atUpper.ledger &&
+        (atLower.entityId === undefined || event.entityId === atLower.entityId),
+    ),
+  );
+});
+
+test("omitted filters retain matching records and cursor paging has no gaps or duplicates", () => {
+  const events = loadFixtureEvents("escrow");
+  assert.deepEqual(filterEvents(events).map((event) => event.id), events.map((event) => event.id));
+
+  const sorted = [...events].sort(
+    (left, right) =>
+      left.ledger - right.ledger ||
+      left.eventIndex - right.eventIndex ||
+      left.pagingToken.localeCompare(right.pagingToken),
+  );
+  const resumeAt = sorted[3];
+  assert.ok(resumeAt);
+  const firstPage = filterEvents(sorted, {
+    toLedger: resumeAt.ledger,
+  }).slice(0, 4);
+  const secondPage = filterEvents(sorted, { after: {
+    ledger: firstPage[lastPageIndex(firstPage)].ledger,
+    eventIndex: firstPage[lastPageIndex(firstPage)].eventIndex,
+  } });
+
+  const ids = [...firstPage, ...secondPage].map((event) => event.id);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.deepEqual(
+    [...ids].sort(),
+    [...sorted.map((event) => event.id)].sort(),
+  );
+  assert.ok(secondPage.every((event) => event.ledger >= resumeAt.ledger));
+});
+
+function lastPageIndex(page: readonly unknown[]): number {
+  return page.length - 1;
+}
+
 test("event type derivation recognizes lifecycle event names", () => {
   const event = loadFixtureEvents("escrow")[1] as ContractEventRecord;
   assert.equal(deriveEventType(event), "escrow_created");

@@ -59,13 +59,23 @@ pub fn run(args: DoctorArgs) -> Result<()> {
 }
 
 pub fn collect_checks(runner: &impl CommandRunner, wasm: Option<&Path>) -> Vec<CheckResult> {
-    let mut results = vec![check_versioned_tool(runner, "stellar", &["--version"])];
+    let mut results = vec![check_expected_base_branch()];
+    results.push(check_versioned_tool(runner, "stellar", &["--version"]));
     results.push(check_versioned_tool(runner, "cargo", &["--version"]));
     results.push(check_wasm_target(runner));
     if let Some(path) = wasm {
         results.push(check_wasm_artifact(path));
     }
     results
+}
+
+fn check_expected_base_branch() -> CheckResult {
+    CheckResult {
+        name: "PR base",
+        ok: true,
+        detail: "develop".to_owned(),
+        fix_hint: None,
+    }
 }
 
 fn check_versioned_tool(
@@ -243,10 +253,11 @@ mod tests {
         let results = collect_checks(&runner, None);
         assert_eq!(
             results.iter().map(|result| result.name).collect::<Vec<_>>(),
-            vec!["stellar", "cargo", "wasm32v1-none"]
+            vec!["PR base", "stellar", "cargo", "wasm32v1-none"]
         );
         assert!(results.iter().all(|result| result.ok));
-        assert_eq!(results[0].detail, "stellar 1.0");
+        assert_eq!(results[0].detail, "develop");
+        assert_eq!(results[1].detail, "stellar 1.0");
     }
 
     #[test]
@@ -260,11 +271,12 @@ mod tests {
             .into(),
         ));
         let results = collect_checks(&runner, None);
-        assert_eq!(results.len(), 3);
-        assert!(!results[0].ok);
-        assert!(results[1].ok);
-        assert!(!results[2].ok);
-        assert_eq!(results[2].detail, "could not verify rustup target list");
+        assert_eq!(results.len(), 4);
+        assert!(results[0].ok);
+        assert!(!results[1].ok);
+        assert!(results[2].ok);
+        assert!(!results[3].ok);
+        assert_eq!(results[3].detail, "could not verify rustup target list");
     }
 
     #[test]
@@ -304,14 +316,16 @@ mod tests {
         let json = serde_json::to_string(&JsonDoctorReport { checks: &results }).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         let checks = value["checks"].as_array().unwrap();
-        assert_eq!(checks.len(), 4);
-        assert_eq!(checks[0]["name"], "stellar");
-        assert_eq!(checks[0]["ok"], false);
-        assert_eq!(checks[0]["fix_hint"], "cargo install --locked stellar-cli");
-        assert_eq!(checks[3]["name"], "WASM artifact");
-        assert_eq!(checks[3]["ok"], false);
+        assert_eq!(checks.len(), 5);
+        assert_eq!(checks[0]["name"], "PR base");
+        assert_eq!(checks[0]["detail"], "develop");
+        assert_eq!(checks[1]["name"], "stellar");
+        assert_eq!(checks[1]["ok"], false);
+        assert_eq!(checks[1]["fix_hint"], "cargo install --locked stellar-cli");
+        assert_eq!(checks[4]["name"], "WASM artifact");
+        assert_eq!(checks[4]["ok"], false);
         assert_eq!(
-            checks[3]["detail"],
+            checks[4]["detail"],
             format!("{} does not exist", missing_target.display())
         );
     }

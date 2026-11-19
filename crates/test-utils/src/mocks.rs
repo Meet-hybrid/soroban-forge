@@ -30,6 +30,22 @@ pub struct TestAccounts {
     pub arbiter: Address,
 }
 
+/// Deterministic external-call failure schedule shared by test contracts.
+///
+/// The values are deliberately finite and explicit so a test can reproduce the
+/// same invocation trace under the same seed. They are never used by
+/// production contract code.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FailureSchedule {
+    None,
+    BeforeTransfer,
+    BeforeCall(u32),
+    AfterAuthorization,
+    MalformedResult,
+    AuthorizationMismatch,
+}
+
 impl TestAccounts {
     /// Generate a fresh set of distinct mock addresses from `env`.
     pub fn generate(env: &Env) -> Self {
@@ -69,6 +85,8 @@ pub enum MockTargetKey {
     LastPayload,
     Revert,
     FailAt,
+    Schedule,
+    Trace,
 }
 
 #[soroban_sdk::contractimpl]
@@ -80,6 +98,37 @@ impl MockTarget {
             .instance()
             .get(&MockTargetKey::Count)
             .unwrap_or(0);
+        let next_call = count.saturating_add(1);
+        let mut trace: soroban_sdk::Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&MockTargetKey::Trace)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        trace.push_back(next_call);
+        env.storage().instance().set(&MockTargetKey::Trace, &trace);
+        let schedule: FailureSchedule = env
+            .storage()
+            .instance()
+            .get(&MockTargetKey::Schedule)
+            .unwrap_or(FailureSchedule::None);
+        match schedule {
+            FailureSchedule::BeforeCall(call) if call == next_call => {
+                panic!("mock target failed before call {call}");
+            }
+            FailureSchedule::BeforeTransfer => {
+                panic!("mock target rejected transfer");
+            }
+            FailureSchedule::AfterAuthorization => {
+                panic!("mock target authorization mismatch");
+            }
+            FailureSchedule::MalformedResult => {
+                panic!("mock target returned malformed data");
+            }
+            FailureSchedule::AuthorizationMismatch => {
+                panic!("mock target authorization mismatch");
+            }
+            _ => {}
+        }
         if env
             .storage()
             .instance()
@@ -93,7 +142,6 @@ impl MockTarget {
             .instance()
             .get(&MockTargetKey::FailAt)
             .unwrap_or(0);
-        let next_call = count.saturating_add(1);
         if fail_at != 0 && fail_at == next_call {
             panic!("mock target failed at configured call {fail_at}");
         }
@@ -122,6 +170,21 @@ impl MockTarget {
             .set(&MockTargetKey::FailAt, &call_number);
     }
 
+    /// Configure a deterministic failure schedule for subsequent calls.
+    pub fn set_failure_schedule(env: Env, schedule: FailureSchedule) {
+        env.storage()
+            .instance()
+            .set(&MockTargetKey::Schedule, &schedule);
+    }
+
+    /// Return the invocation trace in one-based call/order form.
+    pub fn trace(env: Env) -> soroban_sdk::Vec<u32> {
+        env.storage()
+            .instance()
+            .get(&MockTargetKey::Trace)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
     /// Read the number of times `execute` was called.
     pub fn count(env: Env) -> u32 {
         env.storage()
@@ -148,10 +211,115 @@ impl RevertingTarget {
     }
 }
 
+/// Minimal SEP-41-shaped test token with deterministic transfer failure points.
+///
+/// It exists only in `test-utils` and is not production contract code. The
+/// fixture supports pre-transfer rejection and one-based transfer ordinal
+/// rejection, with balances and a reusable invocation trace.
+#[soroban_sdk::contract]
+pub struct FailureToken;
+
+#[contracttype]
+enum FailureTokenKey {
+    Balance(Address),
+    FailBeforeTransfer,
+    FailAtTransfer,
+    TransferCount,
+    TransferTrace,
+}
+
+#[soroban_sdk::contractimpl]
+impl FailureToken {
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let key = FailureTokenKey::Balance(to);
+        let balance: i128 = env.storage().instance().get(&key).unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&key, &(balance.saturating_add(amount)));
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        let key = FailureTokenKey::Balance(id);
+        env.storage().instance().get(&key).unwrap_or(0)
+    }
+
+    pub fn set_fail_before_transfer(env: Env, enabled: bool) {
+        env.storage()
+            .instance()
+            .set(&FailureTokenKey::FailBeforeTransfer, &enabled);
+    }
+
+    pub fn set_fail_at_transfer(env: Env, transfer_number: u32) {
+        env.storage()
+            .instance()
+            .set(&FailureTokenKey::FailAtTransfer, &transfer_number);
+    }
+
+    pub fn transfer_trace(env: Env) -> soroban_sdk::Vec<u32> {
+        env.storage()
+            .instance()
+            .get(&FailureTokenKey::TransferTrace)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        let failed_before: bool = env
+            .storage()
+            .instance()
+            .get(&FailureTokenKey::FailBeforeTransfer)
+            .unwrap_or(false);
+        if failed_before {
+            panic!("failure token rejected before transfer");
+        }
+
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&FailureTokenKey::TransferCount)
+            .unwrap_or(0);
+        let next = count.saturating_add(1);
+        let mut trace: soroban_sdk::Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&FailureTokenKey::TransferTrace)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        trace.push_back(next);
+        env.storage()
+            .instance()
+            .set(&FailureTokenKey::TransferTrace, &trace);
+        let fail_at: u32 = env
+            .storage()
+            .instance()
+            .get(&FailureTokenKey::FailAtTransfer)
+            .unwrap_or(0);
+        if fail_at != 0 && fail_at == next {
+            panic!("failure token rejected transfer {next}");
+        }
+
+        let from_key = FailureTokenKey::Balance(from);
+        let to_key = FailureTokenKey::Balance(to);
+        let from_balance: i128 = env.storage().instance().get(&from_key).unwrap_or(0);
+        if amount < 0 || from_balance < amount {
+            panic!("failure token has insufficient funds");
+        }
+        env.storage()
+            .instance()
+            .set(&from_key, &(from_balance - amount));
+        let to_balance: i128 = env.storage().instance().get(&to_key).unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&to_key, &(to_balance.saturating_add(amount)));
+        env.storage()
+            .instance()
+            .set(&FailureTokenKey::TransferCount, &next);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MockTarget, MockTargetClient};
-    use soroban_sdk::{Bytes, Env};
+    use super::{FailureToken, FailureTokenClient, MockTarget, MockTargetClient};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{Address, Bytes, Env};
 
     #[test]
     fn target_succeeds_by_default_and_records_payload() {
@@ -243,5 +411,31 @@ mod tests {
             second_client.last_payload(),
             Some(Bytes::from_slice(&env, b"allowed"))
         );
+    }
+
+    #[test]
+    fn failure_token_reproducibly_traces_pre_and_later_transfer_failures() {
+        let env = Env::default();
+        let token = env.register(FailureToken, ());
+        let client = FailureTokenClient::new(&env, &token);
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+        client.mint(&from, &100);
+
+        client.set_fail_at_transfer(&2);
+        assert!(client.try_transfer(&from, &to, &25).is_ok());
+        assert!(client.try_transfer(&from, &to, &25).is_err());
+        assert_eq!(client.balance(&from), 75);
+        assert_eq!(client.balance(&to), 25);
+        assert_eq!(
+            client.transfer_trace(),
+            soroban_sdk::Vec::from_slice(&env, &[1, 2])
+        );
+
+        client.set_fail_at_transfer(&0);
+        client.set_fail_before_transfer(&true);
+        assert!(client.try_transfer(&from, &to, &25).is_err());
+        assert_eq!(client.balance(&from), 75);
+        assert_eq!(client.balance(&to), 25);
     }
 }

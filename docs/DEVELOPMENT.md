@@ -33,7 +33,7 @@ cargo run -p soroban-forge-cli -- doctor \
   --wasm target/wasm32v1-none/release/soroban_forge_escrow.wasm
 ```
 
-`doctor` never installs tools or performs network checks. It runs every check in order and prints
+`doctor` identifies `develop` as the expected PR base branch and never installs tools or performs network checks. It runs every check in order and prints
 PASS/FAIL rows plus an exact remediation command for each failure. `stellar --version` and
 `cargo --version` are reported when available; if an existing binary returns a non-zero status or
 no usable version, the check remains PASS with `version unknown`. The target check only passes when
