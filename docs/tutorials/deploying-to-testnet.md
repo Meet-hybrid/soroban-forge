@@ -2,27 +2,65 @@
 
 ## Prerequisites
 
-- Stellar CLI installed.
-- Funded account on Testnet.
+- Stellar CLI 25.2.0 or newer.
+- Caller-provided funded identities for live deployment.
+- An existing SEP-41 token ID for contract smoke flows.
 
 ## Build WASM
 
 ```bash
-stellar contract build --locked --package soroban-forge-<contract>
+stellar contract build --locked --profile release --optimize=false
 ```
 
-soroban-sdk 29 contracts must be built with the Stellar CLI (v25.2.0 or
-newer); plain `cargo build --target wasm32v1-none` is rejected.
+The pinned workspace builds six deployable contract artifacts. `cargo build
+--target wasm32v1-none` is not the supported build path for Soroban SDK 29.
 
-## Deploy
+## Dry run
+
+The deployment workflow is credential-free and offline in dry-run mode:
 
 ```bash
-stellar contract deploy \
-  --wasm target/wasm32v1-none/release/soroban_forge_<contract>.wasm \
-  --source-account <ACCOUNT_ID> \
-  --network testnet
+bash scripts/deploy-testnet.sh --dry-run \
+  --receipt artifacts/testnet-deployment-manifest.json
 ```
 
-## Interact
+This writes a six-contract JSON template and performs no CLI, network, build,
+funding, or key operations.
 
-Use the TypeScript SDK or Stellar CLI to invoke contract methods.
+## Live deployment
+
+Provide existing Stellar CLI identities; this script never creates, prints,
+funds, stores, or commits private keys.
+
+```bash
+SOURCE_IDENTITY=<FUNDED_IDENTITY> \
+TOKEN_ID=<SEP41_CONTRACT_ID> \
+ESCROW_ID=<OPTIONAL_EXISTING_ID> \
+# Add one identity variable per contract smoke flow...
+bash scripts/deploy-testnet.sh \
+  --receipt artifacts/testnet-deployment-manifest.json
+```
+
+The script builds artifacts, validates their hashes against
+`provenance-manifest.json`, deploys or selects each contract independently,
+then runs one minimal smoke flow. Success and failure receipts include the
+contract ID, WASM hash, deployment transaction, verification status, smoke
+transaction, expected event list, and key state.
+
+Supported contracts:
+
+- escrow
+- vesting
+- multi-sig-wallet
+- dao-governance
+- subscription-payments
+- marketplace-royalties
+
+Run `bash scripts/deploy-testnet.sh --help` for the complete environment and
+identity configuration.
+
+## Existing escrow proof
+
+The escrow-specific live proof and receipt remain available through
+`scripts/demo-testnet.sh`; use `--verify-deployed` for a read-only check or
+`--dry-run` for a credential-free plan.
