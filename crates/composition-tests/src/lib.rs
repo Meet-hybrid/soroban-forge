@@ -21,6 +21,8 @@ mod vesting_subscription;
 /// Helper to create a test environment for composition tests.
 fn setup_env() -> (Env, soroban_forge_test_utils::TestAccounts) {
     let env = soroban_forge_test_utils::new_env();
+    // Composition scenarios exercise authorization through nested contract calls.
+    env.mock_all_auths_allowing_non_root_auth();
     let accounts = soroban_forge_test_utils::TestAccounts::generate(&env);
 
     (env, accounts)
