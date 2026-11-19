@@ -256,4 +256,27 @@ mod tests {
         );
         assert_eq!(args.expected.as_deref(), Some("a".repeat(64).as_str()));
     }
+
+    #[test]
+    fn inspect_contract_json_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "inspect",
+            "CA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAXE",
+            "--json",
+            "--network",
+            "testnet",
+        ])
+        .unwrap();
+
+        let Commands::Inspect(args) = cli.command else {
+            panic!("expected inspect command");
+        };
+        assert_eq!(
+            args.contract.as_deref(),
+            Some("CA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAXE")
+        );
+        assert!(args.json);
+        assert_eq!(args.network, "testnet");
+    }
 }
