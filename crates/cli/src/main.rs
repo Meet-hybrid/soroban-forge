@@ -21,8 +21,7 @@ mod decode_failure;
 use clap::{Parser, Subcommand};
 use cli::{
     BuildArgs, CompareArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs,
-    NewArgs, ScaffoldValidateArgs, StorageDiffArgs, TestArgs, VerifyArgs,
-    NewArgs, ScaffoldValidateArgs, TestArgs, ValidatePlanArgs, VerifyArgs,
+    NewArgs, ScaffoldValidateArgs, StorageDiffArgs, TestArgs, ValidatePlanArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 

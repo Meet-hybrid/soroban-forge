@@ -188,6 +188,9 @@ pub struct StorageDiffArgs {
     pub target: PathBuf,
     /// Emit a machine-readable JSON report; diagnostics go to stderr.
     #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 #[derive(Args, Debug, Clone, Default)]
 pub struct ValidatePlanArgs {
     #[arg(
