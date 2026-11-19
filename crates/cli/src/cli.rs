@@ -159,4 +159,7 @@ pub struct DoctorArgs {
     /// Optional WASM artifact to validate as a regular, non-empty file.
     #[arg(long, value_name = "PATH")]
     pub wasm: Option<PathBuf>,
+    /// Emit machine-readable JSON diagnostics.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
