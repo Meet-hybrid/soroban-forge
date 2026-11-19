@@ -112,6 +112,29 @@ mod tests {
     }
 
     #[test]
+    fn events_follow_alias_topic_and_format_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "events",
+            "--contract",
+            "C123",
+            "--follow",
+            "--topic",
+            "Transfer",
+            "--format",
+            "jsonl",
+        ])
+        .unwrap();
+
+        let Commands::Events(args) = cli.command else {
+            panic!("expected events command");
+        };
+        assert!(args.stream);
+        assert_eq!(args.topic.as_deref(), Some("Transfer"));
+        assert_eq!(args.format, crate::cli::EventsFormat::Jsonl);
+    }
+
+    #[test]
     fn verify_flags_parse() {
         let cli = Cli::try_parse_from([
             "soroban-forge",
