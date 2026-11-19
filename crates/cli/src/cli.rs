@@ -68,6 +68,9 @@ pub struct VerifyArgs {
     /// Provenance manifest to validate; defaults to `provenance-manifest.json`.
     #[arg(long, default_value = "provenance-manifest.json")]
     pub manifest: String,
+    /// Print a JSON summary of manifest verification to stdout.
+    #[arg(long, conflicts_with_all = ["wasm", "expected"])]
+    pub json: bool,
     /// Crate to rebuild; inferred from the WASM file name when omitted.
     #[arg(short, long)]
     pub package: Option<String>,
