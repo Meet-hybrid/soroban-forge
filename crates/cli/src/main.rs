@@ -19,11 +19,8 @@ mod decode_failure;
 
 use clap::{Parser, Subcommand};
 use cli::{
-    BuildArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs,
-    ScaffoldValidateArgs, TestArgs, ValidatePlanArgs, VerifyArgs,
-    ScaffoldValidateArgs, TestArgs, VerifyArgs,
     BuildArgs, CompareArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs,
-    NewArgs, ScaffoldValidateArgs, TestArgs, VerifyArgs,
+    NewArgs, ScaffoldValidateArgs, TestArgs, ValidatePlanArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 
@@ -290,6 +287,9 @@ mod tests {
 
         let aliased = Cli::try_parse_from(["soroban-forge", "plan", "plan.json"]).unwrap();
         assert!(matches!(aliased.command, Commands::ValidatePlan(_)));
+    }
+
+    #[test]
     fn inspect_dry_run_flags_parse() {
         let cli = Cli::try_parse_from([
             "soroban-forge",
