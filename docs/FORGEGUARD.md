@@ -78,6 +78,8 @@ listing the findings, and updates it in place on later runs.
 ## How it runs
 
 `.github/workflows/forgeguard.yml` runs when CI completes on a pull request,
+every 30 minutes (to pick up approvals), and on demand from the Actions tab.
+The manual run takes an optional PR number and a dry-run switch.
 right after a maintainer approves one, every 30 minutes as a backstop, and on
 demand from the Actions tab. The manual run takes an optional PR number and a
 dry-run switch.

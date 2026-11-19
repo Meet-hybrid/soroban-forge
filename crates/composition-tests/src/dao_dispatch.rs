@@ -1,3 +1,5 @@
+//! Ensures a failed DAO target dispatch rolls back and remains retryable.
+
 use soroban_forge_dao_governance::{
     BondState, DaoGovernance, ProposalState, SorobanForgeDaoGovernanceClient,
 };
