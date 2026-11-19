@@ -2574,7 +2574,6 @@ mod tests {
 
         let approvers = soroban_sdk::vec![&env, accounts.user1.clone(), accounts.user2.clone()];
         client.pause_wallet(&approvers);
-        assert!(client.is_paused());
         assert_eq!(
             events_named(&env, &client.address, "wallet_paused").len(),
             1
@@ -2583,6 +2582,7 @@ mod tests {
         assert_eq!(auths.len(), 2);
         assert!(auths.iter().any(|(address, _)| address == &accounts.user1));
         assert!(auths.iter().any(|(address, _)| address == &accounts.user2));
+        assert!(client.is_paused());
 
         let err = client
             .try_resume_wallet(&one_approver)
@@ -2592,7 +2592,6 @@ mod tests {
         assert!(client.is_paused());
 
         client.resume_wallet(&approvers);
-        assert!(!client.is_paused());
         assert_eq!(
             events_named(&env, &client.address, "wallet_resumed").len(),
             1
@@ -2601,6 +2600,7 @@ mod tests {
         assert_eq!(auths.len(), 2);
         assert!(auths.iter().any(|(address, _)| address == &accounts.user1));
         assert!(auths.iter().any(|(address, _)| address == &accounts.user2));
+        assert!(!client.is_paused());
     }
 
     #[test]
