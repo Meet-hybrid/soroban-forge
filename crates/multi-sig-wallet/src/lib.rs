@@ -363,8 +363,26 @@ pub trait SorobanForgeMultiSigWallet {
     ///
     /// Failure ordering: a target revert surfaces as
     /// [`ForgeError::ContractInvocationFailed`] and leaves the
-    /// transaction un-executed (status stays `Pending`).
+    /// transaction un-executed (status stays `Pending`). A paused wallet
+    /// rejects execution before loading or invoking the transaction.
     fn execute(env: Env, tx_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Pause execution after distinct owners meeting the configured
+    /// threshold authorize the operation.
+    fn pause_wallet(
+        env: Env,
+        approvers: Vec<Address>,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Resume execution after distinct owners meeting the configured
+    /// threshold authorize the operation.
+    fn resume_wallet(
+        env: Env,
+        approvers: Vec<Address>,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read whether transaction execution is paused.
+    fn is_paused(env: Env) -> bool;
 
     /// Deposit `amount` of `token` into the wallet's custody, pulling the
     /// tokens from `from` with their authorization.
@@ -862,7 +880,7 @@ pub struct WalletTx {
 }
 
 /// Storage keys, split by class (see the storage-and-TTL notes in the
-/// module docs). Config keys (`Owners`/`Threshold`/`Count`) stay in
+/// module docs). Config keys (`Owners`/`Threshold`/`Count`/`Paused`) stay in
 /// **instance** storage: they are small, hot, and their semantics predate
 /// the custody layer. Transaction records live in **per-id persistent**
 /// entries so the byte budget scales with the transaction count instead of
@@ -890,6 +908,9 @@ enum DataKey {
     WithdrawalLimit(Address),
     /// The in-window withdrawal entries for the token at `Address`.
     WindowUsage(Address),
+    /// Instance-level execution pause flag. Appended to preserve existing
+    /// storage-key discriminants.
+    Paused,
 }
 
 /// The deployable multi-signature wallet contract.
@@ -902,7 +923,7 @@ impl MultiSigWallet {
     ///
     /// Requires a non-empty owner set with no duplicates and
     /// `0 < threshold <= owners.len()`. The caller deploys the wallet and
-    /// initialises it in the same transaction.
+    /// initialises it in the same transaction. New wallets start unpaused.
     pub fn initialize(env: Env, owners: Vec<Address>, threshold: u32) -> Result<(), ForgeError> {
         if env.storage().instance().has(&DataKey::Threshold) {
             return Err(ForgeError::AlreadyInitialized);
@@ -928,7 +949,49 @@ impl MultiSigWallet {
         env.storage()
             .instance()
             .set(&DataKey::Threshold, &threshold);
+        env.storage().instance().set(&DataKey::Paused, &false);
         Ok(())
+    }
+
+    /// Pause all transaction execution with a threshold of distinct owner
+    /// authorizations.
+    pub fn pause_wallet(env: Env, approvers: Vec<Address>) -> Result<(), ForgeError> {
+        if !Self::is_initialized(&env) {
+            return Err(ForgeError::NotInitialized);
+        }
+        if Self::is_paused(env.clone()) {
+            return Err(ForgeError::InvalidInput);
+        }
+        Self::require_owner_threshold(&env, &approvers)?;
+
+        env.storage().instance().set(&DataKey::Paused, &true);
+        events::wallet_paused(&env);
+        Ok(())
+    }
+
+    /// Resume transaction execution with a threshold of distinct owner
+    /// authorizations. This direct approval path remains available while
+    /// execution is paused.
+    pub fn resume_wallet(env: Env, approvers: Vec<Address>) -> Result<(), ForgeError> {
+        if !Self::is_initialized(&env) {
+            return Err(ForgeError::NotInitialized);
+        }
+        if !Self::is_paused(env.clone()) {
+            return Err(ForgeError::InvalidInput);
+        }
+        Self::require_owner_threshold(&env, &approvers)?;
+
+        env.storage().instance().set(&DataKey::Paused, &false);
+        events::wallet_resumed(&env);
+        Ok(())
+    }
+
+    /// Read whether transaction execution is paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     /// Submit a new transaction for owner approval.
@@ -1125,8 +1188,13 @@ impl MultiSigWallet {
     /// and leaves the transaction un-executed (status stays `Pending`).
     ///
     /// A terminal `Rejected` tx returns [`ForgeError::InvalidInput`] before
-    /// any external call or state change (see the module docs).
+    /// any external call or state change (see the module docs). While the
+    /// wallet is paused, every execution request returns
+    /// [`ForgeError::InvalidInput`] before loading or invoking the tx.
     pub fn execute(env: Env, tx_id: u64) -> Result<(), ForgeError> {
+        if Self::is_paused(env.clone()) {
+            return Err(ForgeError::InvalidInput);
+        }
         let mut wallet_tx = Self::get_tx_impl(&env, tx_id)?;
         if wallet_tx.status == TxStatus::Expired {
             return Err(ForgeError::DeadlineReached);
@@ -2035,6 +2103,36 @@ impl MultiSigWallet {
         owners.contains(address)
     }
 
+    /// Require distinct current-owner authorizations meeting the wallet's
+    /// configured threshold.
+    fn require_owner_threshold(env: &Env, approvers: &Vec<Address>) -> Result<(), ForgeError> {
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .ok_or(ForgeError::NotInitialized)?;
+        if approvers.len() < threshold {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        for i in 0..approvers.len() {
+            let approver = approvers.get_unchecked(i);
+            if !Self::is_owner_impl(env, &approver) {
+                return Err(ForgeError::Unauthorized);
+            }
+            for j in 0..i {
+                if approvers.get_unchecked(j) == approver {
+                    return Err(ForgeError::InvalidInput);
+                }
+            }
+        }
+
+        for i in 0..approvers.len() {
+            approvers.get_unchecked(i).require_auth();
+        }
+        Ok(())
+    }
+
     /// Check whether `tx_id` is live (read-only view).
     /// Returns `true` if the transaction exists, is `Pending`, and has not expired.
     pub fn is_live(env: Env, tx_id: u64) -> bool {
@@ -2185,6 +2283,21 @@ mod events {
         pub tx_id: u64,
         pub rejector: Address,
     }
+
+    #[contractevent]
+    pub struct WalletPaused {
+        #[topic]
+        pub wallet: Address,
+        pub timestamp: u64,
+    }
+
+    #[contractevent]
+    pub struct WalletResumed {
+        #[topic]
+        pub wallet: Address,
+        pub timestamp: u64,
+    }
+
     #[contractevent]
     #[allow(dead_code)]
     pub struct TxExpired {
@@ -2232,6 +2345,22 @@ mod events {
     pub fn withdrawal_limit_removed(env: &Env, token: &Address) {
         WithdrawalLimitRemoved {
             token: token.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn wallet_paused(env: &Env) {
+        WalletPaused {
+            wallet: env.current_contract_address(),
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(env);
+    }
+
+    pub fn wallet_resumed(env: &Env) {
+        WalletResumed {
+            wallet: env.current_contract_address(),
+            timestamp: env.ledger().timestamp(),
         }
         .publish(env);
     }
@@ -2415,7 +2544,120 @@ mod tests {
     fn initialize_sets_threshold() {
         let (_env, client, accounts) = setup!();
         assert_eq!(client.get_threshold(), 2_u32);
+        assert!(!client.is_paused());
         let _ = owner_vec(&client.env, &accounts);
+    }
+
+    #[test]
+    fn pause_and_resume_require_threshold_owner_approvals_and_emit_events() {
+        let (env, client, accounts) = setup!();
+        let one_approver = soroban_sdk::vec![&env, accounts.user1.clone()];
+        let err = client.try_pause_wallet(&one_approver).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+
+        let duplicate_approvers =
+            soroban_sdk::vec![&env, accounts.user1.clone(), accounts.user1.clone()];
+        let err = client
+            .try_pause_wallet(&duplicate_approvers)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+
+        let non_owner_approvers =
+            soroban_sdk::vec![&env, accounts.user1.clone(), accounts.arbiter.clone()];
+        let err = client
+            .try_pause_wallet(&non_owner_approvers)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::Unauthorized);
+        assert!(!client.is_paused());
+
+        let approvers = soroban_sdk::vec![&env, accounts.user1.clone(), accounts.user2.clone()];
+        client.pause_wallet(&approvers);
+        assert_eq!(
+            events_named(&env, &client.address, "wallet_paused").len(),
+            1
+        );
+        let auths = env.auths();
+        assert_eq!(auths.len(), 2);
+        assert!(auths.iter().any(|(address, _)| address == &accounts.user1));
+        assert!(auths.iter().any(|(address, _)| address == &accounts.user2));
+        assert!(client.is_paused());
+
+        let err = client
+            .try_resume_wallet(&one_approver)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert!(client.is_paused());
+
+        client.resume_wallet(&approvers);
+        assert_eq!(
+            events_named(&env, &client.address, "wallet_resumed").len(),
+            1
+        );
+        let auths = env.auths();
+        assert_eq!(auths.len(), 2);
+        assert!(auths.iter().any(|(address, _)| address == &accounts.user1));
+        assert!(auths.iter().any(|(address, _)| address == &accounts.user2));
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn paused_wallet_blocks_execution_until_threshold_owners_resume_it() {
+        let (env, client, accounts) = setup!();
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, MockTarget, ());
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env), &None);
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+
+        let approvers = soroban_sdk::vec![&env, accounts.user1.clone(), accounts.user2.clone()];
+        client.pause_wallet(&approvers);
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+
+        client.resume_wallet(&approvers);
+        client.execute(&tx_id);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Executed);
+    }
+
+    #[test]
+    fn submissions_confirmations_and_rejections_remain_available_while_paused() {
+        let (env, client, accounts) = setup!();
+        let approvers = soroban_sdk::vec![&env, accounts.user1.clone(), accounts.user2.clone()];
+        client.pause_wallet(&approvers);
+
+        let target_id = target(&env);
+        let tx_id = client.submit(&accounts.user1, &target_id, &payload(&env), &None);
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        assert_eq!(client.get_tx(&tx_id).confirmations.len(), 2);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+
+        let call_tx_id = client.submit_call(
+            &accounts.user1,
+            &target_id,
+            &Symbol::new(&env, "run"),
+            &Vec::new(&env),
+            &None,
+        );
+        client.confirm(&call_tx_id, &accounts.user2);
+        client.confirm(&call_tx_id, &accounts.user3);
+        assert_eq!(client.get_tx(&call_tx_id).confirmations.len(), 2);
+
+        let token = Address::generate(&env);
+        let withdrawal_tx_id =
+            client.submit_withdrawal(&accounts.user1, &token, &accounts.user2, &1_i128);
+        client.confirm(&withdrawal_tx_id, &accounts.user2);
+        client.confirm(&withdrawal_tx_id, &accounts.user3);
+        assert_eq!(client.get_tx(&withdrawal_tx_id).confirmations.len(), 2);
+
+        let rejected_tx_id = client.submit(&accounts.user2, &target_id, &payload(&env), &None);
+        client.reject(&rejected_tx_id, &accounts.user3);
+        assert_eq!(client.get_tx(&rejected_tx_id).status, TxStatus::Rejected);
+        assert!(client.is_paused());
     }
 
     /// A fresh, uninitialized wallet for `initialize` validation tests. The

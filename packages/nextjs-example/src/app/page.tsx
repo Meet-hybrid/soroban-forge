@@ -1048,6 +1048,27 @@ export default function Home() {
     txState.stage === "submitting";
 
   return (
+    <main className="mx-auto max-w-5xl p-6">
+      <div className="mb-1 flex items-center justify-between gap-4">
+        <h1 className="text-3xl font-bold">Soroban Forge — Escrow Testnet Demo</h1>
+        <a href="/ui/index.html" className="shrink-0 rounded border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
+          Dashboard screens
+        </a>
+      </div>
+      <p className="text-sm text-gray-500 mb-6">
+        Contract{" "}
+        <code className="break-all">{CONTRACT_ID}</code> ·{" "}
+        {NETWORK_PASSPHRASE}
+      </p>
+
+      {/* Wallet */}
+      <section className="rounded-xl border border-gray-300 p-4 mb-6">
+        <h2 className="text-lg font-semibold mb-2">1 · Wallet</h2>
+        {account ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="font-mono text-sm break-all">{account}</span>
+            <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-800">
+              connected
     <main className="mx-auto max-w-5xl p-6 font-sans text-gray-900">
       {/* Testnet-Only & Unaudited Banner */}
       <div className="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-4 shadow-sm">
