@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `refund_expired_returns_only_what_is_left_after_partial_releases`).
 
 ### Added
+- **Next.js example local demo state tools** (`packages/nextjs-example`):
+  versioned JSON export, validated import, state inspection, and a confirmed
+  reset flow for browser-only form state. Exports exclude chain-derived escrow
+  IDs, secrets, signed transactions, wallet state, and network settings.
+  Includes storage utility tests and a boundary note in the package README.
 - **Marketplace settlement preview** (`preview_settlement`): returns royalty
   payments in registration order, total royalties, seller proceeds, and split
   rounding residue in a read-only query. Includes TypeScript bindings (#603).

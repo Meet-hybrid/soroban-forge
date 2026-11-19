@@ -1,6 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+  type ChangeEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { Networks } from "@stellar/stellar-sdk";
 import { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit/sdk";
 import { defaultModules } from "@creit.tech/stellar-wallets-kit/modules/utils";
@@ -37,6 +45,21 @@ import {
   upsertReceipt,
   type PendingReceipt,
 } from "./receipt-recovery";
+import {
+  DEMO_STATE_SCHEMA,
+  DEMO_STATE_STORAGE_KEY,
+  DEMO_STATE_VERSION,
+  DemoStateValidationError,
+  browserDemoStorage,
+  emptyDemoState,
+  importDemoState,
+  loadDemoState,
+  resetDemoState,
+  saveDemoState,
+  serializeDemoStateExport,
+  validateDemoState,
+  type DemoState,
+} from "../lib/demo-state";
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE = networks.testnet.networkPassphrase;
@@ -183,6 +206,13 @@ export default function Home() {
   const [receipts, setReceipts] = useState<PendingReceipt[]>([]);
   const resumedReceipts = useRef<Set<string>>(new Set());
 
+  // Local demo state (browser-only form values)
+  const demoHydrated = useRef(false);
+  const suppressNextPersist = useRef(false);
+  const cancelResetRef = useRef<HTMLButtonElement>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+
   const pushLog = useCallback(
     (text: string, kind: LogEntry["kind"] = "info", entryMode: ExecutionMode = mode) => {
       setLog((prev) => [
@@ -192,6 +222,149 @@ export default function Home() {
     },
     [mode]
   );
+
+  const applyDemoState = useCallback((state: DemoState) => {
+    setBuyer(state.buyer);
+    setSeller(state.seller);
+    setArbiter(state.arbiter);
+    setToken(state.token);
+    setAmount(state.amount);
+    setTimeoutSecs(state.timeoutSecs);
+    setResolveFavor(state.resolveFavor);
+  }, []);
+
+  const currentDemoState = useCallback(
+    (): DemoState => ({
+      buyer,
+      seller,
+      arbiter,
+      token,
+      amount,
+      timeoutSecs,
+      resolveFavor,
+    }),
+    [buyer, seller, arbiter, token, amount, timeoutSecs, resolveFavor]
+  );
+
+  const demoStatePreview = useMemo(
+    () => JSON.stringify(currentDemoState(), null, 2),
+    [currentDemoState]
+  );
+
+  const persistIssue = useMemo(() => {
+    try {
+      validateDemoState(currentDemoState());
+      return null;
+    } catch (error) {
+      return error instanceof DemoStateValidationError
+        ? `${error.code}: ${error.message}`
+        : (error as Error).message;
+    }
+  }, [currentDemoState]);
+
+  useEffect(() => {
+    const storage = browserDemoStorage();
+    queueMicrotask(() => {
+      try {
+        const stored = loadDemoState(storage);
+        if (stored !== null) applyDemoState(stored);
+      } catch (error) {
+        resetDemoState(storage);
+        pushLog(
+          `Stored demo state was invalid and was reset: ${(error as Error).message}`,
+          "err",
+          "demo"
+        );
+      } finally {
+        demoHydrated.current = true;
+      }
+    });
+  }, [applyDemoState, pushLog]);
+
+  useEffect(() => {
+    if (!demoHydrated.current) return;
+    if (suppressNextPersist.current) {
+      suppressNextPersist.current = false;
+      return;
+    }
+    if (persistIssue) return;
+    saveDemoState(browserDemoStorage(), currentDemoState());
+  }, [currentDemoState, persistIssue]);
+
+  useEffect(() => {
+    if (!confirmReset) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setConfirmReset(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    cancelResetRef.current?.focus();
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmReset]);
+
+  const exportDemoState = useCallback(() => {
+    try {
+      const json = serializeDemoStateExport(currentDemoState());
+      setImportError(null);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "soroban-forge-local-demo-state.json";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      pushLog("Exported local demo state as JSON (browser only).", "ok", "demo");
+    } catch (error) {
+      pushLog(`Export failed: ${(error as Error).message}`, "err", "demo");
+    }
+  }, [currentDemoState, pushLog]);
+
+  const handleDemoImport = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file) return;
+
+      try {
+        const raw = await file.text();
+        const state = importDemoState(browserDemoStorage(), raw);
+        const next = state ?? emptyDemoState();
+        suppressNextPersist.current = JSON.stringify(next) !== demoStatePreview;
+        applyDemoState(next);
+        setImportError(null);
+        pushLog(
+          state === null
+            ? "Imported empty local demo state."
+            : "Imported and validated local demo state.",
+          "ok",
+          "demo"
+        );
+      } catch (error) {
+        const message =
+          error instanceof DemoStateValidationError
+            ? `${error.code}: ${error.message}`
+            : (error as Error).message;
+        setImportError(message);
+        pushLog(`Import rejected: ${message}`, "err", "demo");
+      }
+    },
+    [applyDemoState, demoStatePreview, pushLog]
+  );
+
+  const confirmDemoReset = useCallback(() => {
+    const next = emptyDemoState();
+    resetDemoState(browserDemoStorage());
+    suppressNextPersist.current = JSON.stringify(next) !== demoStatePreview;
+    applyDemoState(next);
+    setConfirmReset(false);
+    setImportError(null);
+    pushLog(
+      "Reset local demo state. Wallet connection and network settings were unchanged.",
+      "ok",
+      "demo"
+    );
+  }, [applyDemoState, demoStatePreview, pushLog]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -206,7 +379,9 @@ export default function Home() {
   }, [pushLog]);
 
   useEffect(() => {
-    const restored = restoreReceipts(window.localStorage);
+    const storage = browserDemoStorage();
+    if (storage === null) return;
+    const restored = restoreReceipts(storage);
     queueMicrotask(() => setReceipts(restored));
   }, []);
 
@@ -1649,6 +1824,124 @@ export default function Home() {
           )}
         </section>
       </div>
+
+      <section className="mt-6 rounded-xl border border-gray-300 bg-white p-5 shadow-sm">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold">Local demo state</h2>
+          <span className="rounded-full border border-purple-300 bg-purple-100 px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wider text-purple-800">
+            Local browser demo state — not on-chain
+          </span>
+        </div>
+        <p className="mb-3 text-sm text-gray-600">
+          This panel covers browser-only form values. Escrow IDs produced by
+          live transactions stay in the panels above and are never exported.
+          Exports contain no wallet keys or signed transaction payloads.
+        </p>
+        <dl className="mb-3 grid gap-1 text-xs text-gray-500 sm:grid-cols-3">
+          <div>
+            <dt className="font-medium text-gray-500">Schema</dt>
+            <dd className="break-all font-mono">{DEMO_STATE_SCHEMA}</dd>
+          </div>
+          <div>
+            <dt className="font-medium text-gray-500">Version</dt>
+            <dd className="font-mono">{DEMO_STATE_VERSION}</dd>
+          </div>
+          <div>
+            <dt className="font-medium text-gray-500">Storage key</dt>
+            <dd className="break-all font-mono">{DEMO_STATE_STORAGE_KEY}</dd>
+          </div>
+        </dl>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div>
+            <h3 className="mb-2 text-sm font-semibold">
+              Current local form state
+            </h3>
+            <pre className="max-h-64 overflow-auto rounded-lg bg-gray-100 p-3 font-mono text-xs">
+              {demoStatePreview}
+            </pre>
+          </div>
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={exportDemoState}
+                className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-blue-700"
+              >
+                Export local demo state
+              </button>
+              <button
+                onClick={() => setConfirmReset(true)}
+                className="rounded-lg bg-gray-200 px-4 py-1.5 text-sm font-semibold hover:bg-gray-300"
+              >
+                Reset local demo state
+              </button>
+            </div>
+            <label className="block text-sm">
+              Import local demo state JSON
+              <input
+                type="file"
+                accept="application/json,.json"
+                onChange={(event) => void handleDemoImport(event)}
+                aria-label="Import local demo state JSON"
+                className="mt-1 block w-full text-sm"
+              />
+            </label>
+            {importError && (
+              <p role="alert" className="text-sm text-red-700">
+                {importError}
+              </p>
+            )}
+            {persistIssue && (
+              <p className="text-sm text-amber-700">
+                Current form state is not persisted: {persistIssue}
+              </p>
+            )}
+            <p className="text-sm text-gray-500">
+              Import validates the versioned document before applying it. The
+              preview shows current form values; only valid form state is
+              persisted. Reset keeps your wallet connection and network settings
+              unchanged.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {confirmReset && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="presentation"
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-demo-state-title"
+            className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl"
+          >
+            <h2 id="reset-demo-state-title" className="mb-2 text-lg font-semibold">
+              Reset local demo state?
+            </h2>
+            <p className="mb-4 text-sm text-gray-600">
+              This clears the browser-only form state stored by this demo. It
+              does not change the network, contract, wallet connection, or any
+              on-chain data.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                ref={cancelResetRef}
+                onClick={() => setConfirmReset(false)}
+                className="rounded-lg bg-gray-200 px-4 py-1.5 text-sm font-semibold hover:bg-gray-300"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDemoReset}
+                className="rounded-lg bg-red-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-red-700"
+              >
+                Reset local demo state
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <VestingDashboard
         client={vestingClient}
