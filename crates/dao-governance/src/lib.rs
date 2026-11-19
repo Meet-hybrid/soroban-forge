@@ -128,6 +128,11 @@ use soroban_sdk::{
     Env, IntoVal, Map, Symbol, Val,
 };
 
+#[contractclient(name = "SupplyTokenClient")]
+pub trait SupplyToken {
+    fn total_supply(env: Env) -> i128;
+}
+
 /// Public interface for the Soroban Forge DAO governance contract.
 #[contractclient(name = "SorobanForgeDaoGovernanceClient")]
 pub trait SorobanForgeDaoGovernance {
@@ -303,6 +308,15 @@ pub trait SorobanForgeDaoGovernance {
 
     /// Read how many active proposals `proposer` currently has in flight (read-only view).
     fn get_active_proposal_count(env: Env, proposer: Address) -> u32;
+
+    /// Configure the minimum participation quorum percentage (in basis points, where 10000 = 100%).
+    ///
+    /// Requires deployer/governance authorization.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — `quorum_bps > 10000`.
+    fn set_quorum(env: Env, quorum_bps: u32) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Lifecycle state of a governance proposal.
@@ -337,6 +351,9 @@ pub enum BondState {
     /// (terminal).
     Forfeited,
 }
+
+#[contract]
+pub struct MockTarget;
 
 /// The one-time proposal-bond configuration.
 ///
@@ -430,6 +447,8 @@ enum DataKey {
     GovernanceToken,
     /// Number of concurrent active proposals currently in flight for a proposer.
     ActiveProposalCount(Address),
+    /// Minimum participation quorum percentage in basis points (instance storage).
+    Quorum,
 }
 
 /// Maximum number of concurrent active proposals a single proposer may have by default.
@@ -481,6 +500,20 @@ impl DaoGovernance {
             },
         );
         env.storage().instance().set(&DataKey::BondHeld, &0i128);
+        Ok(())
+    }
+
+    /// Configure the minimum participation quorum percentage (in basis points, where 10000 = 100%).
+    ///
+    /// Validates that `quorum_bps <= 10000`. Emits a `QuorumUpdated` event.
+    pub fn set_quorum(env: Env, quorum_bps: u32) -> Result<(), ForgeError> {
+        if quorum_bps > 10000 {
+            return Err(ForgeError::InvalidInput);
+        }
+        let storage = env.storage().instance();
+        let old_quorum_bps: u32 = storage.get(&DataKey::Quorum).unwrap_or(0);
+        storage.set(&DataKey::Quorum, &quorum_bps);
+        events::quorum_updated(&env, old_quorum_bps, quorum_bps);
         Ok(())
     }
 
@@ -711,7 +744,38 @@ impl DaoGovernance {
         match proposal.state {
             ProposalState::Active => {
                 let key = DataKey::Proposal(proposal_id);
-                if proposal.for_votes > proposal.against_votes {
+
+                // Query governance token total supply and quorum configuration
+                let governance_token: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::GovernanceToken)
+                    .ok_or(ForgeError::NotInitialized)?;
+                let total_supply = match env.try_invoke_contract::<i128, soroban_sdk::Error>(
+                    &governance_token,
+                    &Symbol::new(&env, "total_supply"),
+                    soroban_sdk::vec![&env],
+                ) {
+                    Ok(Ok(supply)) => supply,
+                    _ => 0, // Fallback if token contract does not implement total_supply
+                };
+                let quorum_bps: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap_or(0);
+
+                let total_votes = proposal
+                    .for_votes
+                    .checked_add(proposal.against_votes)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+
+                let required_votes = total_supply
+                    .checked_mul(quorum_bps as i128)
+                    .ok_or(ForgeError::ArithmeticOverflow)?
+                    .checked_div(10000)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+
+                let has_majority = proposal.for_votes > proposal.against_votes;
+                let meets_quorum = total_votes >= required_votes;
+
+                if has_majority && meets_quorum {
                     proposal.state = ProposalState::Succeeded;
                     env.storage().persistent().set(&key, &proposal);
                     bump_entry(&env, &key);
@@ -724,9 +788,8 @@ impl DaoGovernance {
                     );
                     Ok(())
                 } else {
-                    // Defeat: forfeit the bond to the treasury. Custody
-                    // arithmetic and the transfer both run before the state
-                    // write, so a failure leaves the proposal `Active`.
+                    // Defeat: either lacked majority or failed quorum threshold.
+                    // Forfeit the bond to the treasury.
                     let bond = Self::bond_config_impl(&env)?;
                     let next_held = Self::bond_held(&env)
                         .checked_sub(proposal.bond_amount)
@@ -1122,6 +1185,20 @@ mod events {
         pub forfeited: bool,
     }
 
+    #[contractevent]
+    pub struct QuorumUpdated {
+        pub old_quorum_bps: u32,
+        pub new_quorum_bps: u32,
+    }
+
+    pub fn quorum_updated(env: &Env, old_quorum_bps: u32, new_quorum_bps: u32) {
+        QuorumUpdated {
+            old_quorum_bps,
+            new_quorum_bps,
+        }
+        .publish(env);
+    }
+
     pub fn proposed(env: &Env, proposal: &Proposal) {
         Proposed {
             proposal_id: proposal.proposal_id,
@@ -1198,6 +1275,35 @@ mod tests {
     const BOND: i128 = 100;
     /// Starting balance minted to each account that proposes in a test.
     const FUNDS: i128 = 10_000;
+
+    #[contract]
+    pub struct MockTokenContract;
+
+    #[contractimpl]
+    impl MockTokenContract {
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            10_000
+        }
+        pub fn total_supply(_env: Env) -> i128 {
+            100_000 // e.g., 100k total supply, so 10k votes is only 10% (< 90% quorum)
+        }
+    }
+
+    #[contract]
+    pub struct QuorumMockToken;
+
+    #[contractimpl]
+    impl QuorumMockToken {
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            10_000
+        }
+        pub fn total_supply(_env: Env) -> i128 {
+            100_000
+        }
+        pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {
+            // Mock transfer does nothing
+        }
+    }
 
     /// Fresh env with a real Stellar Asset Contract and a configured bond:
     /// mocked auths, the DAO contract, a `BOND` bond (treasury =
@@ -3138,6 +3244,90 @@ mod tests {
         assert_eq!(
             client.get_active_proposal_count(&accounts.user1),
             DEFAULT_MAX_ACTIVE_PROPOSALS - 1
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Quorum configuration and validation tests (Issue #632)
+    // -------------------------------------------------------------------
+    #[test]
+    fn set_quorum_validates_boundary() {
+        let (_env, client, _accounts, _target_id) = unbonded!();
+        // Valid bounds: 0 to 10000
+        client.set_quorum(&0);
+        client.set_quorum(&10000);
+
+        // Invalid bound: > 10000
+        let err = client.try_set_quorum(&10001).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn execute_respects_quorum_satisfaction_and_shortfall() {
+        let (env, _token, _tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+
+        // Set quorum to 50% (5000 basis points)
+        client.set_quorum(&5000);
+
+        // Create proposal
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+
+        // Total supply is FUNDS (10_000). 50% quorum = 5_000 required votes.
+        // User2 votes with FUNDS (10_000), satisfying quorum and majority.
+        client.vote(&proposal_id, &accounts.user2, &true);
+
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Succeeded
+        );
+    }
+
+    #[test]
+    fn execute_defeats_proposal_on_quorum_shortfall() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(START);
+
+        let token_address = env.register(QuorumMockToken, ());
+        let contract_id = env.register(DaoGovernance, ());
+        let client = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+
+        client.initialize(&token_address);
+        client.configure_bond(&token_address, &BOND, &accounts.deployer);
+
+        // Set quorum to 90% (9000 basis points). Total supply is 100,000 -> required votes = 90,000.
+        client.set_quorum(&9000);
+
+        let target_id = env.register(MockTarget, ());
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+
+        // User2 votes for, but weight is 10,000 (total votes = 10,000 < 90,000 required).
+        client.vote(&proposal_id, &accounts.user2, &true);
+
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+
+        // Should transition to Defeated due to quorum shortfall despite having a majority
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Defeated
         );
     }
 }
