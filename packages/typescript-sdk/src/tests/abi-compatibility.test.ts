@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
-import { xdr } from "@stellar/stellar-sdk";
+import { StrKey, xdr } from "@stellar/stellar-sdk";
+import type { Result } from "@stellar/stellar-sdk/contract";
 import {
   dao,
   escrow,
@@ -250,6 +251,42 @@ test("escrow action summaries have stable query signatures", () => {
   assert.deepEqual(summaries, expected);
   assert.equal(typeof clients.escrow.get_action_summary, "function");
   assert.equal(typeof clients.escrow.get_basket_action_summary, "function");
+});
+
+test("marketplace settlement preview decodes ordered royalty payments and conserves gross", () => {
+  const client = clients.marketplace;
+  const method = "preview_settlement";
+  assert.equal(typeof client[method], "function");
+  const args = client.spec.funcArgsToScVals(method, {
+    collection: CONTRACT_ID,
+    amount: 101n,
+  });
+  assert.deepEqual(args.map((arg) => arg.switch().name), [
+    "scvAddress",
+    "scvI128",
+  ]);
+
+  const second = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 1));
+  const preview: MarketplaceTypes.SettlementPreview = {
+    gross: 101n,
+    recipients: [[CONTRACT_ID, 33n], [second, 33n]],
+    royalty_amount: 66n,
+    seller_net: 35n,
+    rounding_residue: 1n,
+  };
+  const [output] = client.spec.getFunc(method).outputs();
+  assert.ok(output);
+  const encoded = client.spec.nativeToScVal(preview, output.result().okType());
+  const result: Result<MarketplaceTypes.SettlementPreview> =
+    client.spec.funcResToNative(method, encoded.toXDR("base64"));
+  const decoded = result.unwrap();
+  assert.deepEqual(decoded, preview);
+  const paid = decoded.recipients.reduce(
+    (total, [, amount]) => total + amount,
+    0n,
+  );
+  assert.equal(paid, decoded.royalty_amount);
+  assert.equal(paid + decoded.seller_net, decoded.gross);
 });
 
 // These aliases compile only if every generated contract namespace keeps its

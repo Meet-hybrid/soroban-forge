@@ -98,8 +98,16 @@ pub(crate) fn contract_build_args(package: Option<&str>) -> Vec<String> {
 /// be built by stellar-cli v25.2.0+. Without a package, every contract crate
 /// (the workspace's cdylib crates) is built.
 pub(crate) fn build_contract_wasm(package: Option<&str>) -> Result<()> {
+    build_contract_wasm_with_stdout(package, std::process::Stdio::inherit())
+}
+
+pub(crate) fn build_contract_wasm_with_stdout(
+    package: Option<&str>,
+    stdout: std::process::Stdio,
+) -> Result<()> {
     let status = match Command::new("stellar")
         .args(contract_build_args(package))
+        .stdout(stdout)
         .status()
     {
         Ok(status) => status,

@@ -26,8 +26,8 @@ pub use model::{
     ModelStepRecord, ModelTrace, ModelTraceFor, OpGenerator,
 };
 pub use ttl::{
-    advance_ledger, assert_no_violations, chaos_drive, entry_is_live, entry_ttl, ChaosStep,
-    ChaosTarget, ChaosTrace, StepOutcome, BUMP_AMOUNT, BUMP_THRESHOLD, DAY_IN_LEDGERS,
+    advance_ledger, advance_ledger_to, assert_no_violations, chaos_drive, entry_is_live, entry_ttl,
+    ChaosStep, ChaosTarget, ChaosTrace, StepOutcome, BUMP_AMOUNT, BUMP_THRESHOLD, DAY_IN_LEDGERS,
 };
 
 /// Create a [`Env`] configured for contract testing.

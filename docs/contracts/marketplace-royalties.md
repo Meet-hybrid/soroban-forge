@@ -18,6 +18,7 @@ fn settle_sales(collection, token, payer, sales: Vec<(seller, amount)>) -> Resul
 fn get_royalty(collection) -> Result<Royalty, ForgeError>
 fn get_settlement_summary(collection) -> Result<SettlementSummary, ForgeError>
 fn quote_sale(collection, amount) -> Result<SaleQuote, ForgeError>
+fn preview_settlement(collection, amount) -> Result<SettlementPreview, ForgeError>
 fn touch_ttl(collection) -> Result<(), ForgeError>
 ```
 
@@ -82,6 +83,25 @@ marketplace UI can display "you will pay X, royalty is Y, seller receives
 Z" from the contract's own math instead of a parallel off-chain
 implementation.
 
+### Settlement preview
+
+`preview_settlement(collection, amount)` returns `gross`, `recipients`
+(ordered address/amount pairs, including zero payments), `royalty_amount`,
+`seller_net`, and `rounding_residue`. The recipient amounts sum to
+`royalty_amount`, and that total plus `seller_net` equals `gross`.
+
+The residue is the royalty floored once at the effective aggregate rate
+minus the sum of the independently floored recipient amounts. It is already
+included in seller proceeds. For example, two 3,333 bps entries on a sale of
+101 each receive 33. The seller receives 35, including 1 unit of split
+rounding residue. Disabled and zero-rate configurations pay no royalties.
+Legacy single-recipient configurations return one entry.
+
+This query reads the registered recipient list, which is validated when set.
+It requires no authorization and does not change balances, events, storage,
+or TTL. An unregistered collection returns `NotFound` and a non-positive
+amount returns `InvalidInput`.
+
 ### Batch settlement
 
 `settle_sales` settles a batch of sales of one collection in one invocation
@@ -92,10 +112,8 @@ against one payer authorization, with per-sale semantics identical to
    whole batch before any token moves: `sales` must be non-empty and at
    most `MAX_SETTLE_SALES` (20) long, and every `amount` must be positive
    (`InvalidInput` for either). The cap bounds one transaction's worst case
-   to at most `2 * MAX_SETTLE_SALES` nested token transfers, keeping a
-   batched settlement inside Soroban's per-transaction instruction budget
-   and ledger bandwidth; larger sets issue several calls, each still
-   atomic.
+   to at most `(1 + MAX_ROYALTY_RECIPIENTS) * MAX_SETTLE_SALES` nested
+   token transfers. Larger sets use several calls, each atomic.
 2. Require the collection's and the payer's authorization once — the
    payer's single `require_auth` covers every nested token transfer in the
    batch.
@@ -103,9 +121,11 @@ against one payer authorization, with per-sale semantics identical to
    arithmetic, then stage the updated settlement totals by adding the
    aggregate to the stored summary (`ArithmeticOverflow` — checked against
    the existing totals, still before any transfer).
-4. Transfer each sale in order, seller first and royalty recipient last,
-   skipping the recipient transfer when the share floors to zero — exactly
-   the `settle_sale` order, sale after sale.
+4. Transfer each sale in order, seller first and then each royalty entry in
+   registration order. Duplicate addresses are accepted and receive the sum
+   of their independently floored payments. A zero-rate entry or a payment
+   that floors to zero produces no transfer. The sum paid to all recipients
+   equals the batch's `royalties_paid` delta.
 5. Only after every transfer succeeds, commit the summary once with the
    batch's aggregate deltas (`sales`, `gross_volume`, `royalties_paid`) and
    return the per-sale `Settlement`s in sale order.

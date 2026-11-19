@@ -203,6 +203,29 @@ mod tests {
     }
 
     #[test]
+    fn verify_json_is_a_manifest_output_mode() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "verify",
+            "--manifest",
+            "local.json",
+            "--json",
+        ])
+        .unwrap();
+        let Commands::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert!(args.json);
+        assert_eq!(args.manifest, "local.json");
+        for option in ["--wasm", "--expected"] {
+            assert!(
+                Cli::try_parse_from(["soroban-forge", "verify", "--json", option, "value"])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn verify_help_documents_flags() {
         let mut command = Cli::command();
         let help = command
@@ -213,6 +236,7 @@ mod tests {
         assert!(help.contains("--wasm"));
         assert!(help.contains("--expected"));
         assert!(help.contains("--manifest"));
+        assert!(help.contains("--json"));
     }
 
     #[test]

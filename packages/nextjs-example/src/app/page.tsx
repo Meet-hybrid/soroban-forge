@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Networks } from "@stellar/stellar-sdk";
 import { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit/sdk";
 import { defaultModules } from "@creit.tech/stellar-wallets-kit/modules/utils";
@@ -16,11 +16,27 @@ import {
   initialTransactionState,
   transactionReducer,
   transitionDemoEscrow,
+  transitionDemoVesting,
   type DemoAccount,
   type DemoEscrowRecord,
+  type DemoVestingRecord,
   type ExecutionMode,
+  type ContractType,
 } from "./state";
 import VestingDashboard from "./vesting-dashboard";
+import { Server } from "@stellar/stellar-sdk/rpc";
+import {
+  createPendingReceipt,
+  isSafeToResume,
+  MAX_RECEIPT_ATTEMPTS,
+  RECEIPT_POLL_INTERVAL_MS,
+  receiptStatusLabel,
+  recordPollAttempt,
+  removeReceipt,
+  restoreReceipts,
+  upsertReceipt,
+  type PendingReceipt,
+} from "./receipt-recovery";
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE = networks.testnet.networkPassphrase;
@@ -114,6 +130,23 @@ export default function Home() {
   });
   const [nextDemoId, setNextDemoId] = useState(2);
 
+  // Contract selector state
+  const [selectedContract, setSelectedContract] = useState<ContractType>("escrow");
+
+  // Demo / Local state for all six contracts
+  const [demoVestingSchedules, setDemoVestingSchedules] = useState<
+    Record<string, DemoVestingRecord>
+  >({});
+  const [multisigThreshold, setMultisigThreshold] = useState("2");
+  const [multisigOwners, setMultisigOwners] = useState(
+    "GDEMO_BUYER_7K4J3X9Q2W8M1N6P0R5T7V9X2Z4B6D8F,GDEMO_SELLER_8L5K4Y0R3X9N2P7Q1S6U8W0Y3A5C7E9G"
+  );
+  const [daoProposalId, setDaoProposalId] = useState("1");
+  const [subscriptionId, setSubscriptionId] = useState("1");
+  const [marketplaceRoyaltyBps, setMarketplaceRoyaltyBps] = useState("500");
+  const [marketplaceRecipient, setMarketplaceRecipient] =
+    "GDEMO_BENEFICIARY_8P7Q6R5S4T3U2V1W0X9Y8Z6A5B4C3D2";
+
   // Transaction State Machine
   const [txState, dispatchTx] = useReducer(
     transactionReducer,
@@ -146,6 +179,10 @@ export default function Home() {
   const [listTotal, setListTotal] = useState<number | null>(1);
   const [listBusy, setListBusy] = useState(false);
 
+  // Pending receipts (bounded recovery after reload)
+  const [receipts, setReceipts] = useState<PendingReceipt[]>([]);
+  const resumedReceipts = useRef<Set<string>>(new Set());
+
   const pushLog = useCallback(
     (text: string, kind: LogEntry["kind"] = "info", entryMode: ExecutionMode = mode) => {
       setLog((prev) => [
@@ -167,6 +204,92 @@ export default function Home() {
       "demo"
     );
   }, [pushLog]);
+
+  useEffect(() => {
+    const restored = restoreReceipts(window.localStorage);
+    queueMicrotask(() => setReceipts(restored));
+  }, []);
+
+  const updateReceipt = useCallback((receipt: PendingReceipt) => {
+    setReceipts(upsertReceipt(window.localStorage, receipt));
+  }, []);
+
+  const persistReceipt = useCallback(
+    (hash: string | undefined, action: string) => {
+      if (!hash || !account) return;
+      const receipt = createPendingReceipt({ hash, account, action });
+      setReceipts(upsertReceipt(window.localStorage, receipt));
+    },
+    [account]
+  );
+
+  const pollReceipt = useCallback(
+    async (start: PendingReceipt) => {
+      const server = new Server(RPC_URL);
+      let receipt = start;
+      while (receipt.status === "pending" && receipt.attempts < MAX_RECEIPT_ATTEMPTS) {
+        let status: string | null = null;
+        try {
+          const response = await server.getTransaction(receipt.hash);
+          status = response.status;
+        } catch {
+          status = null;
+        }
+        receipt = recordPollAttempt(receipt, status);
+        updateReceipt(receipt);
+        if (receipt.status !== "pending") break;
+        await delay(RECEIPT_POLL_INTERVAL_MS);
+      }
+      pushLog(
+        `Receipt ${receipt.hash.slice(0, 10)}… — ${receiptStatusLabel(receipt.status)}`,
+        receipt.status === "confirmed"
+          ? "ok"
+          : receipt.status === "pending"
+            ? "info"
+            : "err",
+        "testnet"
+      );
+    },
+    [pushLog, updateReceipt]
+  );
+
+  // Resume bounded polling for pending receipts once the right account is active.
+  useEffect(() => {
+    if (!account) return;
+    for (const receipt of receipts) {
+      if (receipt.status !== "pending" || resumedReceipts.current.has(receipt.hash)) {
+        continue;
+      }
+      if (isSafeToResume(receipt, "testnet", account) !== null) continue;
+      resumedReceipts.current.add(receipt.hash);
+      queueMicrotask(() => void pollReceipt(receipt));
+    }
+  }, [account, receipts, pollReceipt]);
+
+  const retryReceipt = useCallback(
+    (receipt: PendingReceipt) => {
+      const blocker = isSafeToResume(receipt, "testnet", account);
+      if (blocker) {
+        pushLog(blocker, "err", "testnet");
+        return;
+      }
+      const reset: PendingReceipt = {
+        ...receipt,
+        status: "pending",
+        attempts: 0,
+        timestamp: Date.now(),
+      };
+      resumedReceipts.current.add(reset.hash);
+      updateReceipt(reset);
+      void pollReceipt(reset);
+    },
+    [account, pollReceipt, pushLog, updateReceipt]
+  );
+
+  const dismissReceipt = useCallback((hash: string) => {
+    resumedReceipts.current.delete(hash);
+    setReceipts(removeReceipt(window.localStorage, hash));
+  }, []);
 
   // Evaluate prerequisites for live testnet
   const prerequisites = useMemo(
@@ -566,6 +689,7 @@ export default function Home() {
         type: "START_SUBMISSION",
         hash: txHash,
       });
+      persistReceipt(txHash, "create_escrow");
       pushLog(`Submitted to Testnet — tx hash ${txHash ?? "unknown"}`, "ok", "testnet");
 
       const escrowId = sent.result.unwrap();
@@ -603,6 +727,7 @@ export default function Home() {
     listMineDemo,
     listMineLive,
     account,
+    persistReceipt,
   ]);
 
   // Execute Action (Deposit, Release, Refund, Cancel, Dispute, Resolve)
@@ -712,6 +837,7 @@ export default function Home() {
           type: "START_SUBMISSION",
           hash: txHash,
         });
+        persistReceipt(txHash, actionName);
         pushLog(`${actionName} submitted to Testnet — tx hash ${txHash ?? "unknown"}`, "ok", "testnet");
 
         dispatchTx({
@@ -737,6 +863,7 @@ export default function Home() {
       account,
       fetchEscrow,
       pushLog,
+      persistReceipt,
     ]
   );
 
@@ -821,6 +948,23 @@ export default function Home() {
           </a>
         </div>
       </header>
+
+      {/* Contract Selector */}
+      <div className="mb-4">
+        <label className="sr-only">Contract</label>
+        <select
+          value={selectedContract}
+          onChange={(e) => setSelectedContract(e.target.value as ContractType)}
+          className="rounded border px-2 py-1 focus:border-blue-500 focus:outline-native"
+        >
+          <option value="escrow">Escrow</option>
+          <option value="vesting">Vesting</option>
+          <option value="multisig">Multi-Sig Wallet</option>
+          <option value="dao">DAO Governance</option>
+          <option value="subscription">Subscription Payments</option>
+          <option value="marketplace">Marketplace Royalties</option>
+        </select>
+      </div>
 
       {/* Transaction State Banner */}
       {txState.stage !== "idle" && (
@@ -927,6 +1071,87 @@ export default function Home() {
               </button>
             </div>
           </div>
+        </section>
+      )}
+
+      {/* Recovered transaction receipts */}
+      {receipts.length > 0 && (
+        <section className="mb-6 rounded-xl border border-gray-300 bg-white p-5 shadow-sm">
+          <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <h2 className="text-lg font-semibold">Submitted transactions</h2>
+            <span className="text-xs text-gray-500">
+              Saved locally · bounded polling after reload
+            </span>
+          </div>
+
+          <ul className="space-y-2">
+            {receipts.map((receipt) => {
+              const blocker =
+                receipt.status === "pending"
+                  ? isSafeToResume(receipt, "testnet", account)
+                  : null;
+              const tone =
+                receipt.status === "confirmed"
+                  ? "bg-emerald-100 text-emerald-800"
+                  : receipt.status === "failed"
+                    ? "bg-red-100 text-red-700"
+                    : receipt.status === "pending"
+                      ? "bg-amber-100 text-amber-800"
+                      : "bg-gray-200 text-gray-700";
+
+              return (
+                <li
+                  key={receipt.hash}
+                  className="rounded-lg border border-gray-200 bg-gray-50 p-3"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${tone}`}
+                    >
+                      {receiptStatusLabel(receipt.status)}
+                    </span>
+                    <span className="font-mono text-xs font-semibold text-gray-800">
+                      {receipt.action}
+                    </span>
+                    <span className="text-[11px] text-gray-500">
+                      {new Date(receipt.timestamp).toLocaleString()}
+                    </span>
+                  </div>
+
+                  <p className="mt-1 break-all font-mono text-[11px] text-gray-600">
+                    {receipt.hash}
+                  </p>
+                  <p className="mt-1 text-[11px] text-gray-500">
+                    Account: {receipt.account || "unknown"} · polls: {receipt.attempts}
+                  </p>
+
+                  {blocker && (
+                    <p className="mt-1 text-[11px] font-medium text-amber-700">
+                      {blocker}
+                    </p>
+                  )}
+
+                  <div className="mt-2 flex gap-2">
+                    {receipt.status !== "confirmed" && (
+                      <button
+                        onClick={() => retryReceipt(receipt)}
+                        disabled={Boolean(blocker)}
+                        className="rounded border border-blue-600 bg-white px-2 py-1 text-[11px] font-semibold text-blue-600 hover:bg-blue-50 disabled:opacity-50"
+                      >
+                        Retry polling
+                      </button>
+                    )}
+                    <button
+                      onClick={() => dismissReceipt(receipt.hash)}
+                      className="rounded border border-gray-300 bg-white px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-100"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
         </section>
       )}
 
