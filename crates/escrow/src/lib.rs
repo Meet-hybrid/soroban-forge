@@ -311,6 +311,9 @@ pub trait SorobanForgeEscrow {
     ///   token, or undeployed token contract).
     fn deposit(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
+    /// Read-only deposit preflight.
+    fn preflight_deposit(env: Env, escrow_id: u64) -> DepositPreflight;
+
     /// Release the full remaining balance to the seller now. Requires the
     /// **buyer**; only valid while `Funded`. A seller who wants to be paid
     /// calls [`Self::request_release`] instead.
@@ -1072,6 +1075,61 @@ pub struct Escrow;
 
 #[contractimpl]
 impl Escrow {
+    /// Read-only deposit preflight; this function performs no storage writes.
+    pub fn preflight_deposit(env: Env, escrow_id: u64) -> DepositPreflight {
+        let escrow = match Self::load_escrow(&env, escrow_id) {
+            Ok(value) => value,
+            Err(ForgeError::NotFound) => {
+                return DepositPreflight {
+                    status: DepositPreflightStatus::UnknownEscrow,
+                    escrow_id,
+                    token: None,
+                    buyer: None,
+                    required_amount: 0,
+                    buyer_balance: None,
+                    allowance: None,
+                }
+            }
+            Err(_) => {
+                return DepositPreflight {
+                    status: DepositPreflightStatus::Unavailable,
+                    escrow_id,
+                    token: None,
+                    buyer: None,
+                    required_amount: 0,
+                    buyer_balance: None,
+                    allowance: None,
+                }
+            }
+        };
+        if escrow.status != EscrowStatus::Pending || escrow.amount <= 0 {
+            return DepositPreflight {
+                status: DepositPreflightStatus::InvalidInput,
+                escrow_id,
+                token: Some(escrow.token),
+                buyer: Some(escrow.buyer),
+                required_amount: escrow.amount,
+                buyer_balance: None,
+                allowance: None,
+            };
+        }
+        let balance = preflight::read_balance(&env, &escrow.token, &escrow.buyer);
+        let status = match balance {
+            None => DepositPreflightStatus::Unavailable,
+            Some(value) if value >= escrow.amount => DepositPreflightStatus::Sufficient,
+            Some(_) => DepositPreflightStatus::InsufficientBalance,
+        };
+        DepositPreflight {
+            status,
+            escrow_id,
+            token: Some(escrow.token),
+            buyer: Some(escrow.buyer),
+            required_amount: escrow.amount,
+            buyer_balance: balance,
+            allowance: None,
+        }
+    }
+
     // -------------------------------------------------------------------
     // Lifecycle
     // -------------------------------------------------------------------
@@ -3169,6 +3227,10 @@ mod events {
         .publish(env);
     }
 }
+
+mod preflight;
+
+pub use preflight::{DepositPreflight, DepositPreflightStatus};
 
 #[cfg(test)]
 mod tests;

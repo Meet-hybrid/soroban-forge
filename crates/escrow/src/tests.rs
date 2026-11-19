@@ -215,6 +215,99 @@ fn create_rejects_zero_timeout() {
 }
 
 // -----------------------------------------------------------------------
+// Deposit preflight
+// -----------------------------------------------------------------------
+
+#[test]
+fn deposit_preflight_reports_sufficient_balance_without_mutation() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    let before = tc.balance(buyer);
+
+    let result = client.preflight_deposit(&id);
+
+    assert_eq!(result.status, crate::DepositPreflightStatus::Sufficient);
+    assert_eq!(result.required_amount, AMOUNT);
+    assert_eq!(result.buyer_balance, Some(before));
+    assert_eq!(tc.balance(buyer), before);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Pending);
+}
+
+#[test]
+fn deposit_preflight_reports_insufficient_balance_without_mutation() {
+    let (_env, token, tc, contract_id, client, accounts) = setup!();
+    let poor = &accounts.user3;
+    let (_, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, poor, seller, arbiter, TIMEOUT);
+
+    let result = client.preflight_deposit(&id);
+
+    assert_eq!(
+        result.status,
+        crate::DepositPreflightStatus::InsufficientBalance
+    );
+    assert_eq!(result.required_amount, AMOUNT);
+    assert_eq!(result.buyer_balance, Some(0));
+    assert_eq!(tc.balance(poor), 0);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Pending);
+}
+
+#[test]
+fn deposit_preflight_reports_unavailable_token_read() {
+    let (_env, _token, _tc, _contract_id, client, _accounts) = setup!();
+    let invalid_token = Address::generate(&_env);
+    let buyer = Address::generate(&_env);
+    let seller = Address::generate(&_env);
+    let arbiter = Address::generate(&_env);
+    let id = client.create_escrow(&buyer, &seller, &arbiter, &invalid_token, &AMOUNT, &TIMEOUT);
+
+    let result = client.preflight_deposit(&id);
+
+    assert_eq!(result.status, crate::DepositPreflightStatus::Unavailable);
+    assert_eq!(result.required_amount, AMOUNT);
+    assert_eq!(result.buyer_balance, None);
+}
+
+#[test]
+fn deposit_preflight_reports_invalid_amount_for_invalid_escrow_record() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = 42;
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(
+            &DataKey::Escrow(id),
+            &EscrowData {
+                escrow_id: id,
+                buyer: buyer.clone(),
+                seller: seller.clone(),
+                arbiter: arbiter.clone(),
+                token: token.clone(),
+                amount: 0,
+                released: 0,
+                timeout: TIMEOUT,
+                status: EscrowStatus::Pending,
+                created_at: START,
+            },
+        );
+    });
+
+    let result = client.preflight_deposit(&id);
+
+    assert_eq!(result.status, crate::DepositPreflightStatus::InvalidInput);
+    assert_eq!(result.required_amount, 0);
+}
+
+#[test]
+fn deposit_preflight_reports_unknown_escrow() {
+    let (_env, _token, _tc, _contract_id, client, _accounts) = setup!();
+    let result = client.preflight_deposit(&999);
+    assert_eq!(result.status, crate::DepositPreflightStatus::UnknownEscrow);
+    assert_eq!(result.required_amount, 0);
+}
+
 // Deposit
 // -----------------------------------------------------------------------
 
