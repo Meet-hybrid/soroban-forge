@@ -255,6 +255,10 @@ cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --since <LEDGE
 cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --jsonl
 # Compare two local WASM contract interfaces
 cargo run -p soroban-forge-cli -- compare old.wasm new.wasm --json
+# Follow live events, optionally filtering to a decoded topic name
+cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --stream --topic Transfer
+# Emit one decoded event object per line for machine processing
+cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --format jsonl
 ```
 
 Commands: `build`, `lint`, `test`, `deploy`, `new`, `scaffold-validate`,

@@ -219,11 +219,48 @@ for (const [module, client] of Object.entries(clients)) {
   });
 }
 
+test("escrow action summaries have stable query signatures", () => {
+  const expected = [
+    {
+      name: "get_action_summary",
+      inputs: [
+        { name: "escrow_id", type: "u64" },
+        { name: "caller", type: "address" },
+      ],
+    },
+    {
+      name: "get_basket_action_summary",
+      inputs: [
+        { name: "escrow_id", type: "u64" },
+        { name: "caller", type: "address" },
+      ],
+    },
+  ];
+  const summaries = clients.escrow.spec
+    .funcs()
+    .map((fn) => ({
+      name: fn.name().toString(),
+      inputs: fn.inputs().map((input) => ({
+        name: input.name().toString(),
+        type: typeName(input.type()),
+      })),
+    }))
+    .filter(({ name }) => name.endsWith("action_summary"));
+
+  assert.deepEqual(summaries, expected);
+  assert.equal(typeof clients.escrow.get_action_summary, "function");
+  assert.equal(typeof clients.escrow.get_basket_action_summary, "function");
+});
+
 // These aliases compile only if every generated contract namespace keeps its
 // public domain types exported from the unified SDK entrypoint.
 type _PublicContractTypes = [
   EscrowTypes.EscrowData,
   EscrowTypes.EscrowStatus,
+  EscrowTypes.EscrowAction,
+  EscrowTypes.ActionIneligibilityReason,
+  EscrowTypes.EscrowActionEligibility,
+  EscrowTypes.EscrowActionSummary,
   EscrowTypes.ParticipantEscrowsPage,
   VestingTypes.VestingSchedule,
   VestingTypes.VestingStatus,
