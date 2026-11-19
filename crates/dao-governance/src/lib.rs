@@ -3143,6 +3143,243 @@ mod tests {
             DEFAULT_MAX_ACTIVE_PROPOSALS - 1
         );
     }
+
+    // ------------------------------------------------------------------
+    // Quorum, voting-window, and terminal-state boundaries
+    //
+    // Each test isolates one lifecycle rule and asserts both the resulting
+    // proposal record and any external side effects (target dispatch), so a
+    // regression names the boundary it broke.
+    // ------------------------------------------------------------------
+
+    /// Below the required strict majority: the proposal is defeated, no
+    /// dispatch happens, and the tally is preserved.
+    #[test]
+    fn quorum_below_majority_is_defeated_without_dispatch() {
+        let (env, client, accounts, proposal_id, target_id) = setup!();
+        let target = MockTargetClient::new(&env, &target_id);
+
+        client.vote(&proposal_id, &accounts.user2, &false);
+        client.vote(&proposal_id, &accounts.user3, &true);
+        client.vote(&proposal_id, &accounts.validator, &false);
+        let before = client.get_proposal(&proposal_id);
+        assert!(before.for_votes < before.against_votes);
+
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+
+        let after = client.get_proposal(&proposal_id);
+        assert_eq!(after.state, ProposalState::Defeated);
+        assert_eq!(after.for_votes, before.for_votes);
+        assert_eq!(after.against_votes, before.against_votes);
+        assert_eq!(target.count(), 0, "defeated proposal must not dispatch");
+    }
+
+    /// Exactly at the threshold: a tie does not meet the strict majority,
+    /// so the proposal is defeated and stays non-executable.
+    #[test]
+    fn quorum_exactly_at_tie_is_defeated_and_never_executes() {
+        let (env, client, accounts, proposal_id, target_id) = setup!();
+        let target = MockTargetClient::new(&env, &target_id);
+
+        client.vote(&proposal_id, &accounts.user2, &true);
+        client.vote(&proposal_id, &accounts.user3, &false);
+        let before = client.get_proposal(&proposal_id);
+        assert_eq!(before.for_votes, before.against_votes);
+
+        env.ledger().set_timestamp(START + DURATION);
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Defeated
+        );
+        assert_eq!(target.count(), 0);
+
+        assert_eq!(
+            client.try_execute(&proposal_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(target.count(), 0);
+    }
+
+    /// Above the threshold: finalisation succeeds and dispatch happens
+    /// exactly once, after which the proposal is terminal.
+    #[test]
+    fn quorum_above_majority_finalises_and_dispatches_once() {
+        let (env, client, accounts, proposal_id, target_id) = setup!();
+        let target = MockTargetClient::new(&env, &target_id);
+
+        client.vote(&proposal_id, &accounts.user2, &true);
+        client.vote(&proposal_id, &accounts.user3, &true);
+        client.vote(&proposal_id, &accounts.validator, &false);
+        let before = client.get_proposal(&proposal_id);
+        assert!(before.for_votes > before.against_votes);
+
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Succeeded
+        );
+        assert_eq!(target.count(), 0, "finalisation alone must not dispatch");
+
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Executed
+        );
+        assert_eq!(target.count(), 1);
+    }
+
+    /// Voting is open until the deadline: the last ledger before
+    /// `voting_ends` is accepted, while the deadline ledger and any later
+    /// ledger are rejected with the tally untouched.
+    #[test]
+    fn voting_window_accepts_last_ledger_before_deadline_only() {
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
+
+        env.ledger().set_timestamp(START + DURATION - 1);
+        client.vote(&proposal_id, &accounts.user2, &true);
+        let after_last = client.get_proposal(&proposal_id);
+        assert_eq!(after_last.for_votes, FUNDS);
+
+        for timestamp in [START + DURATION, START + DURATION + 1] {
+            env.ledger().set_timestamp(timestamp);
+            assert_eq!(
+                client
+                    .try_vote(&proposal_id, &accounts.user3, &false)
+                    .unwrap_err()
+                    .unwrap(),
+                ForgeError::DeadlineReached
+            );
+            let unchanged = client.get_proposal(&proposal_id);
+            assert_eq!(unchanged.for_votes, after_last.for_votes);
+            assert_eq!(unchanged.against_votes, after_last.against_votes);
+            assert!(!client.has_voted(&proposal_id, &accounts.user3));
+        }
+    }
+
+    /// Terminal lifecycle states reject execution, voting, and cancellation
+    /// without mutating the stored proposal.
+    #[test]
+    fn terminal_states_reject_mutation_and_reexecution() {
+        let (env, client, accounts, proposal_id, target_id) = setup!();
+        let target = MockTargetClient::new(&env, &target_id);
+
+        // Executed.
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+        client.execute(&proposal_id);
+        let executed = client.get_proposal(&proposal_id);
+        assert_eq!(executed.state, ProposalState::Executed);
+        assert_rejections_leave_proposal_untouched(&client, &accounts, &executed);
+        assert_eq!(target.count(), 1);
+
+        // Defeated.
+        let defeated_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.vote(&defeated_id, &accounts.user2, &false);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + DURATION + 1);
+        client.execute(&defeated_id);
+        let defeated = client.get_proposal(&defeated_id);
+        assert_eq!(defeated.state, ProposalState::Defeated);
+        assert_rejections_leave_proposal_untouched(&client, &accounts, &defeated);
+        assert_eq!(target.count(), 1);
+
+        // Cancelled.
+        let cancelled_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.cancel_proposal(&cancelled_id, &accounts.user1);
+        let cancelled = client.get_proposal(&cancelled_id);
+        assert_eq!(cancelled.state, ProposalState::Cancelled);
+        assert_rejections_leave_proposal_untouched(&client, &accounts, &cancelled);
+        assert_eq!(target.count(), 1);
+    }
+
+    /// Shared assertion: every state-changing entrypoint rejects a terminal
+    /// proposal, and the stored record is byte-for-byte unchanged.
+    fn assert_rejections_leave_proposal_untouched(
+        client: &SorobanForgeDaoGovernanceClient<'_>,
+        accounts: &TestAccounts,
+        before: &Proposal,
+    ) {
+        assert_eq!(
+            client
+                .try_execute(&before.proposal_id)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(
+            client
+                .try_vote(&before.proposal_id, &accounts.user2, &true)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(
+            client
+                .try_cancel_proposal(&before.proposal_id, &before.proposer)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(&client.get_proposal(&before.proposal_id), before);
+    }
+
+    /// A reverted dispatch is retryable: the proposal stays `Succeeded` and
+    /// the same proposal can complete once the target stops reverting.
+    #[test]
+    fn retryable_dispatch_failure_keeps_proposal_succeeded_until_success() {
+        let (env, _token, _tc, _contract_id, client, accounts) = bonded_env!();
+        let target_id = env.register(MockTarget, ());
+        let target = MockTargetClient::new(&env, &target_id);
+        target.set_revert(&true);
+
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+
+        let before_failure = client.get_proposal(&proposal_id);
+        assert_eq!(before_failure.state, ProposalState::Succeeded);
+
+        assert_eq!(
+            client.try_execute(&proposal_id).unwrap_err().unwrap(),
+            ForgeError::ContractInvocationFailed
+        );
+        assert_eq!(&client.get_proposal(&proposal_id), &before_failure);
+        assert_eq!(target.count(), 0);
+
+        target.set_revert(&false);
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Executed
+        );
+        assert_eq!(target.count(), 1);
+    }
 }
 
 // Negative authorization coverage for the bond-bearing entrypoints

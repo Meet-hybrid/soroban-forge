@@ -10,6 +10,42 @@ import {
   type DemoEscrowRecord,
   type TransactionState,
 } from "./state.ts";
+import {
+  classifyTransactionStatus,
+  createPendingReceipt,
+  isSafeToResume,
+  loadReceipts,
+  MAX_RECEIPT_ATTEMPTS,
+  RECEIPT_TTL_MS,
+  receiptStatusLabel,
+  recordPollAttempt,
+  removeReceipt,
+  restoreReceipts,
+  saveReceipts,
+  upsertReceipt,
+  validateReceipt,
+  type PendingReceipt,
+  type ReceiptStorage,
+} from "./receipt-recovery.ts";
+
+function memoryStorage(initial: string | null = null): ReceiptStorage {
+  let value = initial;
+  return {
+    getItem: () => value,
+    setItem: (_key, next) => { value = next; },
+    removeItem: () => { value = null; },
+  };
+}
+
+const receipt: PendingReceipt = {
+  hash: "a".repeat(64),
+  network: "testnet",
+  account: "GACCOUNT",
+  action: "create_escrow",
+  timestamp: 1_700_000_000_000,
+  status: "pending",
+  attempts: 0,
+};
 
 test("initialTransactionState provides clean default values", () => {
   const demoInit = initialTransactionState("demo");
@@ -218,4 +254,84 @@ test("transitionDemoEscrow enforces valid escrow lifecycle transitions", () => {
   });
   assert.ok(resolveBuyer.success);
   assert.equal(resolveBuyer.updated.status.tag, "Refunded");
+});
+
+test("receipt persistence reload and cleanup validate minimal stored data", () => {
+  const storage = memoryStorage();
+  saveReceipts(storage, [receipt]);
+  assert.deepEqual(loadReceipts(storage), [receipt]);
+  assert.equal(validateReceipt({ ...receipt, network: "mainnet" }), null);
+  assert.deepEqual(removeReceipt(storage, receipt.hash), []);
+});
+
+test("network and account mismatch prevent unsafe receipt continuation", () => {
+  assert.match(isSafeToResume(receipt, "mainnet", "GACCOUNT") ?? "", /Network mismatch/);
+  assert.match(isSafeToResume(receipt, "testnet", "GOTHER") ?? "", /Account mismatch/);
+  assert.equal(isSafeToResume(receipt, "testnet", "GACCOUNT"), null);
+});
+
+test("receipt statuses support confirmed failed expired and unknown outcomes", () => {
+  for (const status of ["confirmed", "failed", "expired", "unknown"] as const) {
+    assert.ok(validateReceipt({ ...receipt, status }));
+    assert.notEqual(receiptStatusLabel(status), "");
+  }
+});
+
+test("reload recovery expires stale pending receipts and keeps fresh ones", () => {
+  const storage = memoryStorage();
+  const fresh = createPendingReceipt(
+    { hash: "b".repeat(64), account: "GACCOUNT", action: "release" },
+    RECEIPT_TTL_MS,
+  );
+  const stale = { ...receipt, timestamp: 0 };
+  saveReceipts(storage, [fresh, stale]);
+
+  const restored = restoreReceipts(storage, RECEIPT_TTL_MS + 1);
+  assert.equal(restored.find((item) => item.hash === fresh.hash)?.status, "pending");
+  assert.equal(restored.find((item) => item.hash === stale.hash)?.status, "expired");
+  assert.equal(loadReceipts(storage).length, 2);
+});
+
+test("upsert keeps receipts bounded and dismisses only the requested hash", () => {
+  const storage = memoryStorage();
+  for (let i = 0; i < 15; i += 1) {
+    upsertReceipt(storage, {
+      ...receipt,
+      hash: `${i}`.padStart(64, "0"),
+    });
+  }
+  const stored = loadReceipts(storage);
+  assert.equal(stored.length, 10);
+  assert.equal(removeReceipt(storage, stored[0].hash).length, 9);
+});
+
+test("poll outcomes classify and bound retries without exceeding the attempt limit", () => {
+  assert.equal(classifyTransactionStatus("SUCCESS"), "confirmed");
+  assert.equal(classifyTransactionStatus("FAILED"), "failed");
+  assert.equal(classifyTransactionStatus("NOT_FOUND"), "pending");
+  assert.equal(classifyTransactionStatus("SOMETHING_NEW"), "unknown");
+
+  let pending = createPendingReceipt(
+    { hash: "c".repeat(64), account: "GACCOUNT", action: "deposit" },
+    0,
+  );
+  for (let i = 0; i < MAX_RECEIPT_ATTEMPTS - 1; i += 1) {
+    pending = recordPollAttempt(pending, "NOT_FOUND", 1_000);
+    assert.equal(pending.status, "pending");
+  }
+  pending = recordPollAttempt(pending, "NOT_FOUND", 1_000);
+  assert.equal(pending.status, "expired");
+  assert.equal(pending.attempts, MAX_RECEIPT_ATTEMPTS);
+});
+
+test("poll stops early on confirmed and failed outcomes", () => {
+  const pending = createPendingReceipt(
+    { hash: "d".repeat(64), account: "GACCOUNT", action: "refund" },
+    0,
+  );
+  const confirmed = recordPollAttempt(pending, "SUCCESS", 1_000);
+  assert.equal(confirmed.status, "confirmed");
+  assert.equal(confirmed.attempts, 1);
+  const failed = recordPollAttempt(pending, "FAILED", 1_000);
+  assert.equal(failed.status, "failed");
 });

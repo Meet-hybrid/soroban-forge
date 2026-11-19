@@ -76,6 +76,10 @@ jobs:
           FORGEGUARD_REPO: ${{ github.repository }}
           FORGEGUARD_PR: ${{ inputs.pr }}
           FORGEGUARD_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          # Scan-only: merges made with GITHUB_TOKEN do not close linked issues,
+          # so contributors lost Drips credit. Maintainers merge by hand.
+          # Set to "1" to re-enable (only with a token that closes issues).
+          FORGEGUARD_AUTO_MERGE: "0"
           FORGEGUARD_BRANCHES: "main develop integration"
           FORGEGUARD_MERGE_METHOD: squash
           FORGEGUARD_REQUIRED_CHECKS: "Build,Test,Clippy,Rustfmt"

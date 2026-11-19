@@ -256,10 +256,16 @@ cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --since <LEDGE
 cargo run -p soroban-forge-cli -- validate-plan --plan crates/cli/fixtures/plans/valid-create-escrow.json --expected-network testnet
 # Stream events in JSONL format for machine processing
 cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --jsonl
+# Compare two local WASM contract interfaces
+cargo run -p soroban-forge-cli -- compare old.wasm new.wasm --json
+# Follow live events, optionally filtering to a decoded topic name
+cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --stream --topic Transfer
+# Emit one decoded event object per line for machine processing
+cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --format jsonl
 ```
 
 Commands: `build`, `lint`, `test`, `deploy`, `new`, `scaffold-validate`,
-`verify`, `invoke`, `decode-failure`, `events`, `inspect` and `doctor`. Run any
+`verify`, `invoke`, `decode-failure`, `events`, `inspect`, `compare` and `doctor`. Run any
 of them with `--help` for options.
 
 ### 5. Deploy to testnet

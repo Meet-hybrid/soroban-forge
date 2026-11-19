@@ -5,7 +5,8 @@
  * 1. Execution environment mode (Local Demo vs Live Testnet).
  * 2. Transaction lifecycle stages (idle -> simulating -> signing -> submitting -> confirmed / failed).
  * 3. Prerequisites evaluation for live transactions.
- * 4. In-memory demo escrow state transitions for local experimentation without network access.
+ * 4. In-memory demo state experimentation without network access.
+ * 5. Support for all six Soroban Forge contracts.
  */
 
 export type ExecutionMode = "demo" | "testnet";
@@ -26,13 +27,14 @@ export interface TransactionState {
   error: string | null;
   details: string | null;
   timestamp: number | null;
+  contract?: string;
 }
 
 export type TransactionAction =
-  | { type: "START_SIMULATION"; action: string; mode: ExecutionMode }
+  | { type: "START_SIMULATION"; action: string; mode: ExecutionMode; contract?: string }
   | { type: "START_SIGNING" }
   | { type: "START_SUBMISSION"; hash?: string }
-  | { type: "CONFIRM"; hash?: string; details?: string }
+  | { type: "CONFIRM"; hash?: string; details?: string; contract?: string }
   | { type: "FAIL"; error: string }
   | { type: "RESET" }
   | { type: "SET_MODE"; mode: ExecutionMode };
@@ -69,6 +71,7 @@ export function transactionReducer(
         error: null,
         details: null,
         timestamp: Date.now(),
+        contract: action.contract,
       };
 
     case "START_SIGNING":
@@ -116,6 +119,14 @@ export function transactionReducer(
       return state;
   }
 }
+
+export type ContractType =
+  | "escrow"
+  | "vesting"
+  | "multisig"
+  | "dao"
+  | "subscription"
+  | "marketplace";
 
 export interface NetworkPrerequisite {
   id: string;
@@ -176,13 +187,66 @@ export function evaluatePrerequisites(opts: {
   ];
 }
 
-export type EscrowStatusTag =
-  | "Pending"
-  | "Funded"
-  | "Completed"
-  | "Refunded"
-  | "Disputed"
-  | "Cancelled";
+// --- Contract-specific read result types ---
+
+export interface EscrowReadResult {
+  escrow_id: bigint;
+  buyer: string;
+  seller: string;
+  arbiter: string;
+  token: string;
+  amount: bigint;
+  timeout: bigint;
+  created_at: bigint;
+  status: {
+    tag: "Pending" | "Funded" | "Completed" | "Refunded" | "Disputed" | "Cancelled";
+    values: void;
+  };
+}
+
+export interface VestingReadResult {
+  schedule_id: bigint;
+  start: bigint;
+  total_amount: bigint;
+  claimed: bigint;
+  cliff: bigint;
+  duration: bigint;
+  beneficiary: string;
+  token: string;
+  status: "Locked" | "Vesting" | "Completed" | "Revoked";
+}
+
+export interface MultisigReadResult {
+  threshold: bigint;
+  owners: string[];
+  status: "Pending" | "Executed" | "Rejected" | "Expired";
+  tx_count: bigint;
+}
+
+export interface DaoReadResult {
+  proposal_count: bigint;
+  active_proposal_count: bigint;
+  bond_state: "Posted" | "Refunded" | "Forfeited";
+}
+
+export interface SubscriptionReadResult {
+  subscription_id: bigint;
+  status: "Active" | "Cancelled" | "PastDue" | "Paused";
+  provider: string;
+  subscriber: string;
+  amount: bigint;
+  period: bigint;
+  token: string;
+}
+
+export interface MarketplaceReadResult {
+  collection: string;
+  royalty_bps: bigint;
+  recipient: string;
+  status: "Active" | "Disabled";
+}
+
+// --- Demo record types for local simulation ---
 
 export interface DemoEscrowRecord {
   escrow_id: bigint;
@@ -194,19 +258,47 @@ export interface DemoEscrowRecord {
   timeout: bigint;
   created_at: bigint;
   status: {
-    tag: EscrowStatusTag;
-    values: void;
+    tag: "Pending" | "Funded" | "Completed" | "Refunded" | "Disputed" | "Cancelled";
+    values: undefined;
   };
 }
 
+export interface DemoVestingRecord {
+  schedule_id: bigint;
+  start: bigint;
+  total_amount: bigint;
+  claimed: bigint;
+  cliff: bigint;
+  duration: bigint;
+  beneficiary: string;
+  token: string;
+  status: "Locked" | "Vesting" | "Completed" | "Revoked";
+}
+
+export type DemoRecord = DemoEscrowRecord | DemoVestingRecord;
+
+// --- DEMO ACCOUNTS for all supported roles ---
+
 export interface DemoAccount {
-  role: "buyer" | "seller" | "arbiter";
+  role:
+    | "buyer"
+    | "seller"
+    | "arbiter"
+    | "funder"
+    | "beneficiary"
+    | "proposer"
+    | "voter"
+    | "subscriber"
+    | "provider";
   name: string;
   address: string;
   balanceXlm: number;
 }
 
-export const DEMO_ACCOUNTS: Record<"buyer" | "seller" | "arbiter", DemoAccount> = {
+export const DEMO_ACCOUNTS: Record<
+  "buyer" | "seller" | "arbiter" | "funder" | "beneficiary" | "proposer" | "voter" | "subscriber" | "provider",
+  DemoAccount
+> = {
   buyer: {
     role: "buyer",
     name: "Demo Buyer",
@@ -225,7 +317,61 @@ export const DEMO_ACCOUNTS: Record<"buyer" | "seller" | "arbiter", DemoAccount> 
     address: "GDEMO_ARBITER_9M6L5Z1S4Y0P3Q8R2T7V9X1Z4B6D8F0H",
     balanceXlm: 10,
   },
+  funder: {
+    role: "funder",
+    name: "Demo Funder",
+    address: "GDEMO_FUNDER_2A3B4C5D6E7F8G9H0I1J2K3L4M5N6O7P",
+    balanceXlm: 500,
+  },
+  beneficiary: {
+    role: "beneficiary",
+    name: "Demo Beneficiary",
+    address: "GDEMO_BENEFICIARY_8P7Q6R5S4T3U2V1W0X9Y8Z6A5B4C3D2",
+    balanceXlm: 100,
+  },
+  proposer: {
+    role: "proposer",
+    name: "Demo Proposer",
+    address: "GDEMO_PROPOSER_1F2E3D4C5B6A7Z8Y9X6W5V4U3T2S1",
+    balanceXlm: 50,
+  },
+  voter: {
+    role: "voter",
+    name: "Demo Voter",
+    address: "GDEMO_VOTER_9Z8Y7X6W5V4U3T2S1R0Q9P8O7N6M5L4K",
+    balanceXlm: 30,
+  },
+  subscriber: {
+    role: "subscriber",
+    name: "Demo Subscriber",
+    address: "GDEMO_SUBSCRIBER_5A4B3C2D1E0F9A8B7C6D5E4F3A2B1C0",
+    balanceXlm: 200,
+  },
+  provider: {
+    role: "provider",
+    name: "Demo Provider",
+    address: "GDEMO_PROVIDER_1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6",
+    balanceXlm: 300,
+  },
 };
+
+// --- Demo escrow state (in-memory) ---
+
+export const demoEscrows: Record<string, DemoEscrowRecord> = {
+  "1": {
+    escrow_id: BigInt(1),
+    buyer: DEMO_ACCOUNTS.buyer.address,
+    seller: DEMO_ACCOUNTS.seller.address,
+    arbiter: DEMO_ACCOUNTS.arbiter.address,
+    token: "CBJQ53EOHB5MWSS7CETN523WILLNVS7NQAQQAQIS5QAYTPRCZSGKL23O",
+    amount: BigInt(10000000),
+    timeout: BigInt(3600),
+    created_at: BigInt(1700000000),
+    status: { tag: "Pending", values: undefined },
+  },
+};
+
+// --- Contract transition functions for demo simulation ---
 
 export function transitionDemoEscrow(
   escrow: DemoEscrowRecord,
@@ -311,7 +457,7 @@ export function transitionDemoEscrow(
           error: `Cannot resolve: escrow ${escrow.escrow_id} is in status '${currentStatus}', expected 'Disputed'.`,
         };
       }
-      const targetTag: EscrowStatusTag = opts?.in_favor_of_seller ? "Completed" : "Refunded";
+      const targetTag: "Completed" | "Refunded" = opts?.in_favor_of_seller ? "Completed" : "Refunded";
       return {
         success: true,
         updated: { ...escrow, status: { tag: targetTag, values: undefined } },
@@ -320,4 +466,107 @@ export function transitionDemoEscrow(
     default:
       return { success: false, error: `Unknown action '${action}'` };
   }
+}
+
+// --- Vesting demo transitions ---
+
+export function transitionDemoVesting(
+  schedule: DemoVestingRecord,
+  action: "claim",
+  opts?: { beneficiary?: string }
+): { success: true; updated: DemoVestingRecord } | { success: false; error: string } {
+  const now = BigInt(Math.floor(Date.now() / 1000));
+  const status = schedule.status;
+
+  if (status === "Completed") {
+    return {
+      success: false,
+      error: `Cannot claim: schedule #${schedule.schedule_id} is already completed.`,
+    };
+  }
+
+  if (status === "Revoked") {
+    return {
+      success: false,
+      error: `Cannot claim: schedule #${schedule.schedule_id} has been revoked.`,
+    };
+  }
+
+  const cliffTime = schedule.start + schedule.cliff;
+  if (now < cliffTime) {
+    return {
+      success: false,
+      error: `Cannot claim: current time is before cliff (${cliffTime.toString()}).`,
+    };
+  }
+
+  const endTime = schedule.start + schedule.duration;
+  if (now >= endTime) {
+    return {
+      success: true,
+      updated: {
+        ...schedule,
+        claimed: schedule.total_amount,
+        status: "Completed",
+      },
+    };
+  }
+
+  const vestingPeriod = endTime - cliffTime;
+  if (vestingPeriod <= BigInt(0)) {
+    return {
+      success: true,
+      updated: {
+        ...schedule,
+        claimed: schedule.total_amount,
+        status: "Completed",
+      },
+    };
+  }
+
+  const amount = (schedule.total_amount * (now - cliffTime)) / vestingPeriod;
+  if (amount <= BigInt(0)) {
+    return {
+      success: false,
+      error: "No tokens claimable at this time.",
+    };
+  }
+
+return {
+    success: true,
+    updated: {
+      ...schedule,
+      claimed: schedule.claimed + amount,
+      status: "Vesting",
+    }
+  };
+}
+
+// --- Demo vesting state ---
+
+export const demoVestingSchedules: Record<string, DemoVestingRecord> = {};
+
+// --- Generic forge error utility ---
+
+export function formatForgeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "object" && error !== null && "message" in error) {
+    return String(error.message);
+  }
+  return String(error);
+}
+
+// --- Testnet-only warning helper ---
+
+export function testnetWarning(mode: ExecutionMode): string {
+  if (mode === "testnet") {
+    return (
+      "⚠️ **Testnet Only**: This action interacts with Stellar Testnet. " +
+      "No real funds are involved in this demonstration. " +
+      "Do not use mainnet keys or real SEP-41 tokens."
+    );
+  }
+  return "";
 }
