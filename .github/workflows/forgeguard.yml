@@ -14,11 +14,6 @@ name: ForgeGuard
 # default branch.
 
 on:
-  # Re-evaluate as soon as CI finishes on a pull request.
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-  # Approvals arrive after CI, so sweep open PRs periodically as well.
   # Re-evaluate as soon as CI finishes on a pull request, or a maintainer
   # approves one (relayed by forgeguard-trigger.yml).
   workflow_run:
