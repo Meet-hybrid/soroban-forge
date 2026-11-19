@@ -253,6 +253,67 @@ test("escrow action summaries have stable query signatures", () => {
   assert.equal(typeof clients.escrow.get_basket_action_summary, "function");
 });
 
+test("dao vote receipt query has a typed no-vote-capable result", () => {
+  const client = clients.dao;
+  assert.equal(typeof client.get_vote_receipt, "function");
+  const fn = client.spec
+    .funcs()
+    .find((entry) => entry.name().toString() === "get_vote_receipt");
+  assert.ok(fn, "DAO spec must expose get_vote_receipt");
+  assert.deepEqual(
+    fn.inputs().map((input) => ({
+      name: input.name().toString(),
+      type: typeName(input.type()),
+    })),
+    [
+      { name: "proposal_id", type: "u64" },
+      { name: "voter", type: "address" },
+    ],
+  );
+  assert.deepEqual(fn.outputs().map(typeName), [
+    "result<udt:VoteReceipt,udt:ForgeError>",
+  ]);
+
+  const receiptEntry = client.spec.entries.find(
+    (entry) =>
+      entry.switch().name === "scSpecEntryUdtStructV0" &&
+      entry.udtStructV0().name().toString() === "VoteReceipt",
+  );
+  assert.ok(receiptEntry, "VoteReceipt UDT must be in the DAO spec");
+  assert.deepEqual(
+    receiptEntry
+      .udtStructV0()
+      .fields()
+      .map((field) => ({
+        name: field.name().toString(),
+        type: typeName(field.type()),
+      })),
+    [
+      { name: "has_voted", type: "bool" },
+      { name: "support", type: "option<bool>" },
+      { name: "weight", type: "i128" },
+    ],
+  );
+
+  const args = client.spec.funcArgsToScVals("get_vote_receipt", {
+    proposal_id: 42n,
+    voter: CONTRACT_ID,
+  });
+  assert.deepEqual(
+    args.map((arg) => arg.switch().name),
+    ["scvU64", "scvAddress"],
+  );
+
+  // A malformed account string is rejected while encoding, before any
+  // simulation, so it can never be reported as a successful no-vote receipt.
+  assert.throws(() =>
+    client.spec.funcArgsToScVals("get_vote_receipt", {
+      proposal_id: 42n,
+      voter: "not-a-valid-address",
+    }),
+  );
+});
+
 test("marketplace settlement preview decodes ordered royalty payments and conserves gross", () => {
   const client = clients.marketplace;
   const method = "preview_settlement";
@@ -311,6 +372,7 @@ type _PublicContractTypes = [
   DaoTypes.ProposalState,
   DaoTypes.BondState,
   DaoTypes.BondConfig,
+  DaoTypes.VoteReceipt,
   MarketplaceTypes.Royalty,
   MarketplaceTypes.RoyaltyStatus,
   MarketplaceTypes.Settlement,
