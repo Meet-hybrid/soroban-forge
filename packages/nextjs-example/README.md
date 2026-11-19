@@ -50,6 +50,27 @@ When in Live mode, a dedicated checklist verifies:
 - **Account funding**: Sufficient testnet XLM for fees (includes one-click Friendbot button).
 - **Asset trustline**: SEP-41 testnet demo token (`CBJQ53EOHB…`).
 
+### 4. Local Demo State Tools
+
+The **Local demo state** panel manages only browser-only form values under
+`localStorage` key `soroban-forge:nextjs-demo-state:v1`.
+
+- **Export** produces a versioned JSON document using schema
+  `soroban-forge/demo-state@1`, with `schema`, `kind`, `version`, `label`,
+  `exportedAt`, and `state`. The UI labels the download as local browser demo
+  state. `state` is `null` when nothing is saved.
+- **Import** validates the document (schema, version, unknown fields,
+  secret-looking values, address/contract-id shape, integer fields, and ISO
+  timestamps) before applying or persisting it. Rejected input leaves stored
+  state unchanged; an empty export clears it.
+- **Reset** requires explicit confirmation (Cancel or `Escape` aborts). It
+  restores demo form defaults without disconnecting wallets, changing the
+  network/contract, or touching on-chain data.
+- Exports never contain escrow IDs from live transactions, private keys,
+  signed transaction payloads, wallet state, or network configuration. Legacy
+  stored objects with old escrow-id fields remain readable, but those fields
+  are ignored and never exported.
+
 ---
 
 ## Getting Started
@@ -81,7 +102,10 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ## Testing & Verification
 
-The state machine, environment switching, prerequisite evaluation, and escrow lifecycle transitions are covered by deterministic tests using Node's native test runner:
+The state machine, environment switching, prerequisite evaluation, escrow
+lifecycle transitions, and demo-state validation (valid export, malformed data,
+version mismatch, reset, and empty state) are covered by deterministic tests
+using Node's native test runner:
 
 ```bash
 npm test

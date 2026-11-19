@@ -92,11 +92,11 @@ machine.
 | `vote` | ✅ Implemented | One-vote-per-voter; adds the voter's current governance-token balance to the selected tally; zero-balance votes rejected |
 | `execute` | ✅ Implemented | Permissionless majority finalisation and dependency-gated dispatch; unmet requirements return `DeadlineReached`, executed conflicts return `InvalidInput`, and cancelled/defeated requirements permanently strand dependents in `Succeeded`; target failure remains retryable; terminal transitions decrement proposer active count |
 | `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; bond refund; decrements proposer active count |
-| `get_proposal` / `get_dependencies` / `get_proposal_count` / `get_proposals` / `has_voted` / `get_active_proposal_count` | ✅ Implemented | Read-only proposal and dependency-edge views; pagination with bounds clamping and proposer active count |
+| `get_proposal` / `get_dependencies` / `get_proposal_count` / `get_proposals` / `has_voted` / `get_vote_receipt` / `get_active_proposal_count` | ✅ Implemented | Read-only proposal, dependency-edge and vote-receipt views; pagination with bounds clamping and proposer active count |
 | `get_bond_config` | ✅ Implemented | Read-only; `NotInitialized` when no bond is configured |
 | `touch_ttl` | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a proposal; `NotFound` for unknown ids |
 | Events | ✅ Implemented | `Proposed` data includes dependency edges; event names/topics otherwise stable; `VoteCast`, `Finalised`, `BondPosted`, `BondReleased` |
-| Storage | ✅ Persistent + TTL | Dependencies live on persistent proposal records; no new top-level keys; count, config, custody, vote markers, and proposer active counts remain in instance storage |
+| Storage | ✅ Persistent + TTL | Dependencies live on persistent proposal records; count, config, custody, vote markers, proposer active counts, and vote receipts remain in instance storage. `DataKey::VoteReceipt` was appended last so existing key discriminants are unchanged |
 | Tests | ✅ 85+ | Bond custody, weighted voting and cooldown coverage; dependency ordering/conflicts/cancellation, malformed graph validation, dependency view/events, randomized execution-order mirror property; negative-auth suite retained |
 | Weighted voting | ✅ Implemented | Balance-weighted voting powered by immutable SEP-41 governance token configured at `initialize` |
 
