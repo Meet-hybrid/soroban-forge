@@ -151,10 +151,8 @@ pub trait SorobanForgeMarketplaceRoyalties {
     /// invocation against one payer authorization.
     ///
     /// Each element of `sales` is `(seller, amount)` and settles exactly as
-    /// `settle_sale` settles it — identical split math, identical
-    /// seller-then-recipient transfer order — with the per-sale
-    /// [`Settlement`]s returned in sale order, so clients can share the
-    /// `Settlement` type between both entrypoints.
+    /// `settle_sale` settles it, with the seller paid before the configured
+    /// royalty entries and the per-sale [`Settlement`]s returned in sale order.
     ///
     /// Atomicity is all-or-nothing for the whole batch: configuration load,
     /// the cap, every `amount > 0`, and the aggregate split math (checked
@@ -215,6 +213,13 @@ pub trait SorobanForgeMarketplaceRoyalties {
         collection: Address,
         amount: i128,
     ) -> Result<SaleQuote, soroban_forge_shared_utils::ForgeError>;
+
+    /// Preview seller proceeds and each royalty payment in registration order.
+    fn preview_settlement(
+        env: Env,
+        collection: Address,
+        amount: i128,
+    ) -> Result<SettlementPreview, soroban_forge_shared_utils::ForgeError>;
 
     /// Permissionless keeper entrypoint: extend the persistent storage TTL of a collection's royalty configuration and settlement summary.
     ///
@@ -299,6 +304,23 @@ pub struct SaleQuote {
     /// Seller's net: `gross - royalty_amount` — the exact amount a
     /// settlement would transfer to the seller.
     pub seller_net: i128,
+}
+
+/// Read-only breakdown of a sale using the currently registered split.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementPreview {
+    /// Sale amount before royalties.
+    pub gross: i128,
+    /// Recipients and their floored payments in registration order, including zero payments.
+    pub recipients: soroban_sdk::Vec<(Address, i128)>,
+    /// Sum of all recipient payments.
+    pub royalty_amount: i128,
+    /// Gross amount minus royalty payments.
+    pub seller_net: i128,
+    /// Aggregate-rate floored royalty minus the sum of individually floored payments.
+    /// This amount is already included in seller_net.
+    pub rounding_residue: i128,
 }
 
 /// Bump a persistent entry's TTL to the workspace policy's 30-day horizon
@@ -567,24 +589,15 @@ impl MarketplaceRoyalties {
 
     /// Settle a batch of sales of `collection` atomically in `token`.
     ///
-    /// Same trust model as `settle_sale`: the collection's authorization and
-    /// the `payer`'s are each required once, and the payer's single
-    /// authorization covers **every** nested token transfer in the batch —
-    /// there is no per-sale re-authorization.
+    /// The collection and payer each authorize once. The payer's authorization
+    /// covers every nested token transfer. Each sale pays its seller, followed
+    /// by nonzero royalty shares in registration order. Duplicate addresses
+    /// receive each independently floored share.
     ///
-    /// Validation runs to completion before the first transfer: the
-    /// configuration must exist ([`ForgeError::NotFound`]), `sales` must be
-    /// non-empty and at most [`MAX_SETTLE_SALES`] long
-    /// ([`ForgeError::InvalidInput`]), every `amount` must be positive
-    /// ([`ForgeError::InvalidInput`]), and every split plus the batch
-    /// aggregate — including the checked add against the stored summary —
-    /// must be overflow-free ([`ForgeError::ArithmeticOverflow`]). Only
-    /// then do transfers run, in sale order, each sale seller-then-recipient
-    /// with the recipient skipped when its share is zero, exactly as
-    /// `settle_sale` does. A failure in any sale rolls the whole invocation
-    /// back: no sale is half-settled, no balance moves, and the summary is
-    /// untouched. On success the summary is committed exactly once with the
-    /// batch's aggregate deltas and the per-sale [`Settlement`]s come back
+    /// Missing configuration returns `NotFound`. Empty or oversized batches
+    /// and non-positive amounts return `InvalidInput`. All inputs and totals
+    /// are checked before transfers. A failure rolls back the whole batch.
+    /// On success the summary is committed once and settlements are returned
     /// in sale order.
     pub fn settle_sales(
         env: Env,
@@ -638,8 +651,8 @@ impl MarketplaceRoyalties {
         let summary = next_summary(&env, &collection, count, gross_volume, royalties_paid)?;
 
         // Transfer-before-state (escrow pattern), per sale in sale order:
-        // each sale pays its seller first and the royalty recipient last,
-        // and the summary is still not committed — a failure in any sale,
+        // each sale pays its seller first, then the nonzero royalty shares.
+        // The summary is still not committed — a failure in any sale,
         // including a later one, rolls the entire invocation back.
         for i in 0..count {
             // Both `get`s are in range by construction: `sales` has `count`
@@ -741,25 +754,39 @@ impl MarketplaceRoyalties {
         collection: Address,
         amount: i128,
     ) -> Result<SaleQuote, ForgeError> {
-        let royalty: Royalty = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Royalty(collection.clone()))
-            .ok_or(ForgeError::NotFound)?;
-        if amount <= 0 {
-            return Err(ForgeError::InvalidInput);
-        }
-        // The same resolution the settlement entrypoints run — there is no
-        // second derivation to drift from.
-        let royalty_bps = effective_bps(&royalty);
-        let recipients = royalty_splits(&env, &royalty)?;
+        let (royalty, recipients) = quote_inputs(&env, collection, amount)?;
         let (_, royalty_amount, seller_net) =
             split_recipients(&env, amount, &royalty, &recipients)?;
         Ok(SaleQuote {
             gross: amount,
-            royalty_bps,
+            royalty_bps: effective_bps(&royalty),
             royalty_amount,
             seller_net,
+        })
+    }
+
+    /// Preview the stored split without authorization, transfers, events, or storage writes.
+    /// Each payment is floored independently. The residue is the difference from flooring
+    /// once at the aggregate rate and is already included in seller_net.
+    pub fn preview_settlement(
+        env: Env,
+        collection: Address,
+        amount: i128,
+    ) -> Result<SettlementPreview, ForgeError> {
+        let (royalty, recipients) = quote_inputs(&env, collection, amount)?;
+        let (shares, royalty_amount, seller_net) =
+            split_recipients(&env, amount, &royalty, &recipients)?;
+        let (aggregate_royalty, _) = split(amount, effective_bps(&royalty))?;
+        let mut payments = soroban_sdk::Vec::new(&env);
+        for (recipient, share) in recipients.iter().zip(shares.iter()) {
+            payments.push_back((recipient.recipient, share));
+        }
+        Ok(SettlementPreview {
+            gross: amount,
+            recipients: payments,
+            royalty_amount,
+            seller_net,
+            rounding_residue: aggregate_royalty - royalty_amount,
         })
     }
 
@@ -783,6 +810,23 @@ impl MarketplaceRoyalties {
         }
         Ok(())
     }
+}
+
+fn quote_inputs(
+    env: &Env,
+    collection: Address,
+    amount: i128,
+) -> Result<(Royalty, soroban_sdk::Vec<RoyaltyShare>), ForgeError> {
+    let royalty = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Royalty(collection))
+        .ok_or(ForgeError::NotFound)?;
+    if amount <= 0 {
+        return Err(ForgeError::InvalidInput);
+    }
+    let recipients = royalty_splits(env, &royalty)?;
+    Ok((royalty, recipients))
 }
 
 /// The rate actually applied to sales under `royalty`: zero once the
@@ -1006,7 +1050,8 @@ mod model_check;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_forge_test_utils::TestAccounts;
+    use soroban_forge_shared_utils::ttl::{BUMP_AMOUNT, BUMP_THRESHOLD};
+    use soroban_forge_test_utils::{advance_ledger_to, entry_ttl, TestAccounts};
     use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::Env;
@@ -1955,6 +2000,8 @@ mod tests {
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
         assert_eq!(tc.balance(payer), 1_000);
+        assert_eq!(tc.balance(&accounts.user2), 0);
+        assert_eq!(tc.balance(&accounts.user3), 0);
         assert_eq!(
             client
                 .try_get_settlement_summary(collection)
@@ -2156,6 +2203,86 @@ mod tests {
     }
 
     #[test]
+    fn batch_pays_duplicate_entries_independently_and_skips_zero_shares() {
+        let (env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let payer = &accounts.user1;
+        let seller = &accounts.user3;
+        let recipient = &accounts.user2;
+        let other = &accounts.deployer;
+        let zero = &accounts.validator;
+        let splits = soroban_sdk::vec![
+            &env,
+            RoyaltyShare {
+                recipient: recipient.clone(),
+                bps: 333
+            },
+            RoyaltyShare {
+                recipient: other.clone(),
+                bps: 500
+            },
+            RoyaltyShare {
+                recipient: recipient.clone(),
+                bps: 333
+            },
+            RoyaltyShare {
+                recipient: zero.clone(),
+                bps: 0
+            },
+        ];
+        client.set_royalty_splits(collection, &splits);
+        let batch = sales_of(&env, &[(seller.clone(), 111), (seller.clone(), 222)]);
+        let settled = client.settle_sales(collection, &token, payer, &batch);
+        // Each sale emits one seller transfer and three nonzero royalty transfers.
+        assert_eq!(
+            env.events().all().filter_by_contract(&token).events().len(),
+            8
+        );
+        assert_eq!(
+            settled.get(0).unwrap(),
+            Settlement {
+                royalty_share: 11,
+                seller_net: 100
+            }
+        );
+        assert_eq!(
+            settled.get(1).unwrap(),
+            Settlement {
+                royalty_share: 25,
+                seller_net: 197
+            }
+        );
+        // The first address receives 3 + 3 + 7 + 7, with each leg floored separately.
+        assert_eq!(tc.balance(recipient), 20);
+        assert_eq!(tc.balance(other), 16);
+        assert_eq!(tc.balance(zero), 0);
+        assert_eq!(tc.balance(seller), 297);
+        let royalties = tc.balance(recipient) + tc.balance(other) + tc.balance(zero);
+        assert_eq!(royalties + tc.balance(seller), 1_000 - tc.balance(payer));
+        assert_eq!(
+            client.get_settlement_summary(collection),
+            SettlementSummary {
+                sales: 2,
+                gross_volume: 333,
+                royalties_paid: royalties,
+            }
+        );
+
+        let invalid = sales_of(&env, &[(seller.clone(), 100), (seller.clone(), 0)]);
+        let before = client.get_settlement_summary(collection);
+        assert_eq!(
+            client.try_settle_sales(collection, &token, payer, &invalid),
+            Err(Ok(ForgeError::InvalidInput))
+        );
+        assert_eq!(client.get_settlement_summary(collection), before);
+        assert_eq!(tc.balance(payer), 667);
+        assert_eq!(tc.balance(seller), 297);
+        assert_eq!(tc.balance(recipient), 20);
+        assert_eq!(tc.balance(other), 16);
+        assert_eq!(tc.balance(zero), 0);
+    }
+
+    #[test]
     fn settle_sales_zero_bps_batch_skips_the_recipient() {
         let (env, token, tc, _contract_id, client, accounts) = setup_settlement!();
         let payer = &accounts.user1;
@@ -2223,7 +2350,7 @@ mod tests {
 
     #[test]
     fn touch_ttl_extends_and_keeps_state_intact() {
-        let (_env, token, _tc, _contract_id, client, accounts) = setup_settlement!();
+        let (env, token, _tc, contract_id, client, accounts) = setup_settlement!();
         let collection = &accounts.arbiter;
         client.settle_sale(
             collection,
@@ -2233,7 +2360,17 @@ mod tests {
             &1_000_i128,
         );
 
-        assert_eq!(client.touch_ttl(collection), ());
+        let key = DataKey::Summary(collection.clone());
+        let ttl = entry_ttl(&env, &contract_id, &key);
+        let elapsed = ttl - BUMP_THRESHOLD;
+        advance_ledger_to(
+            &env,
+            env.ledger().sequence() + elapsed,
+            env.ledger().timestamp() + u64::from(elapsed) * 5,
+        );
+        assert_eq!(entry_ttl(&env, &contract_id, &key), BUMP_THRESHOLD);
+        client.touch_ttl(collection);
+        assert_eq!(entry_ttl(&env, &contract_id, &key), BUMP_AMOUNT);
         let royalty = client.get_royalty(collection);
         assert_eq!(royalty.bps, 500);
         let summary = client.get_settlement_summary(collection);
@@ -2263,6 +2400,115 @@ mod tests {
 
         let events = env.events().all();
         assert!(!events.events().is_empty());
+    }
+
+    #[test]
+    fn settlement_preview_preserves_recipient_order_and_matches_settlement() {
+        let (env, token, tc, contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let first = &accounts.validator;
+        let second = &accounts.user2;
+        let splits = soroban_sdk::vec![
+            &env,
+            RoyaltyShare {
+                recipient: first.clone(),
+                bps: 3_333
+            },
+            RoyaltyShare {
+                recipient: second.clone(),
+                bps: 3_333
+            },
+        ];
+        client.set_royalty_splits(collection, &splits);
+        let splits_key = DataKey::Splits(collection.clone());
+        let ttl_before = entry_ttl(&env, &contract_id, &splits_key);
+        env.set_auths(&[]);
+        let preview = client.preview_settlement(collection, &101_i128);
+        assert_eq!(
+            preview.recipients,
+            soroban_sdk::vec![&env, (first.clone(), 33), (second.clone(), 33)]
+        );
+        assert_eq!(preview.rounding_residue, 1);
+        assert_eq!(preview.seller_net, 35);
+        assert_eq!(preview.royalty_amount, 66);
+        assert_eq!(
+            preview
+                .recipients
+                .iter()
+                .map(|(_, amount)| amount)
+                .sum::<i128>()
+                + preview.seller_net,
+            preview.gross
+        );
+        assert!(env.events().all().events().is_empty());
+        assert_eq!(entry_ttl(&env, &contract_id, &splits_key), ttl_before);
+        env.as_contract(&contract_id, || {
+            let stored: soroban_sdk::Vec<RoyaltyShare> =
+                env.storage().persistent().get(&splits_key).unwrap();
+            assert_eq!(stored, splits);
+        });
+        assert_eq!(
+            client.try_get_settlement_summary(collection),
+            Err(Ok(ForgeError::NotFound))
+        );
+        assert_eq!(tc.balance(&accounts.user1), 1_000);
+
+        env.mock_all_auths();
+        let settlement =
+            client.settle_sale(collection, &token, &accounts.user1, &accounts.user3, &101);
+        assert_eq!(settlement.royalty_share, preview.royalty_amount);
+        assert_eq!(settlement.seller_net, preview.seller_net);
+        assert_eq!(tc.balance(first), 33);
+        assert_eq!(tc.balance(second), 33);
+    }
+
+    #[test]
+    fn settlement_preview_handles_boundaries_and_legacy_configuration() {
+        let (env, _, _, contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let recipient = &accounts.user2;
+        client.set_royalty(collection, recipient, &0);
+        let zero = client.preview_settlement(collection, &1);
+        assert_eq!(zero.recipients.get(0), Some((recipient.clone(), 0)));
+        assert_eq!(
+            (zero.royalty_amount, zero.seller_net, zero.rounding_residue),
+            (0, 1, 0)
+        );
+
+        client.set_royalty(collection, recipient, &10_000);
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Splits(collection.clone()))
+        });
+        let max = client.preview_settlement(collection, &i128::MAX);
+        assert_eq!(max.recipients.get(0), Some((recipient.clone(), i128::MAX)));
+        assert_eq!(
+            (max.royalty_amount, max.seller_net, max.rounding_residue),
+            (i128::MAX, 0, 0)
+        );
+        let invalid = soroban_sdk::vec![
+            &env,
+            RoyaltyShare {
+                recipient: recipient.clone(),
+                bps: 10_001
+            }
+        ];
+        assert_eq!(
+            client.try_set_royalty_splits(collection, &invalid),
+            Err(Ok(ForgeError::InvalidInput))
+        );
+        assert_eq!(client.preview_settlement(collection, &i128::MAX), max);
+        for amount in [0, -1] {
+            assert_eq!(
+                client.try_preview_settlement(collection, &amount),
+                Err(Ok(ForgeError::InvalidInput))
+            );
+        }
+        assert_eq!(
+            client.try_preview_settlement(&accounts.validator, &1),
+            Err(Ok(ForgeError::NotFound))
+        );
     }
 
     /// The quote is the settlement's own math: quoting a sale and then
@@ -2395,6 +2641,12 @@ mod tests {
         assert_eq!(quote.royalty_bps, 0);
         assert_eq!(quote.royalty_amount, 0);
         assert_eq!(quote.seller_net, 1_000);
+
+        let preview = client.preview_settlement(collection, &1_000_i128);
+        assert_eq!(preview.recipients.get(0), Some((accounts.user2.clone(), 0)));
+        assert_eq!(preview.royalty_amount, 0);
+        assert_eq!(preview.seller_net, 1_000);
+        assert_eq!(preview.rounding_residue, 0);
 
         let settlement = client.settle_sale(
             collection,

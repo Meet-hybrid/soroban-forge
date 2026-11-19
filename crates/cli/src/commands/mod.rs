@@ -1,4 +1,5 @@
 pub mod build;
+pub mod compare;
 pub mod deploy;
 pub mod doctor;
 pub mod events;

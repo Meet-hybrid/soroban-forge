@@ -156,29 +156,39 @@ soroban_forge_vesting.wasm                       29836       29.13           150
 lowercase SHA-256 of every contract artifact built from a clean rebuild. The
 `verify` subcommand rebuilds a package with the same `stellar contract build`
 command as `scripts/provenance.sh` and compares the result against a supplied
-hash, the manifest, or both:
+artifact, an expected hash, or the manifest.
 
 ```bash
-# Verify one artifact against the provenance manifest (default manifest path:
-# provenance-manifest.json in the current directory)
+# Compare a local artifact with a fresh rebuild of its inferred package
 cargo run -p soroban-forge-cli -- verify --wasm target/wasm32v1-none/release/soroban_forge_escrow.wasm
 
 # Rebuild a package and check its fresh artifact matches an expected hash
 cargo run -p soroban-forge-cli -- verify --expected <64-hex-sha256> --package soroban-forge-escrow
 
-# Check every artifact in the manifest
+# Check every artifact in the manifest (the default path is provenance-manifest.json)
 cargo run -p soroban-forge-cli -- verify --manifest provenance-manifest.json
 ```
 
-`--wasm <PATH>` hashes the given artifact on disk (SHA-256) and optionally
-compares it against `--expected` or the manifest entry for the package
-inferred from the file name (`soroban_forge_escrow.wasm` →
-`soroban-forge-escrow`). `--expected` triggers a deterministic rebuild of the
-selected package and compares the resulting artifact's hash. `--manifest`
-verifies every artifact listed in the manifest by rebuilding each package.
-All comparisons are exact; any mismatch (or a rebuild that fails) exits
-non-zero. `--package` selects a single package; without it, artifacts are
-matched by name inference.
+With `--wasm`, `--package` can override package inference from the artifact
+name, and `--expected` can require both hashes to match a known value.
+With `--expected` alone and no package, the command checks every contract.
+
+For offline release automation, run from the source checkout with the required
+Rust toolchain, WASM target, Stellar CLI, and Cargo dependencies already installed
+or cached. Use a local copy of the release manifest. No credentials are required.
+
+```bash
+CARGO_NET_OFFLINE=true soroban-forge verify --manifest provenance-manifest.json --json > verification.json
+```
+
+The command writes one JSON object to stdout with an overall boolean `ok` and an
+`artifacts` array in manifest order. Each entry has `name`, `status`,
+`expected_sha256`, `actual_sha256`, `expected_bytes`, `actual_bytes`, and
+`size_drift`. Status is `match`, `mismatch` (hash), `size_drift` (matching hash
+with different size), or `missing`. If both hash and size differ, the status is
+`mismatch` and `size_drift` is true. Unavailable hash or size fields are null.
+Artifact failures still produce the report and exit nonzero. Input or build
+errors exit nonzero with a diagnostic on stderr.
 
 ### Decode Failed Invocations
 
@@ -330,6 +340,20 @@ The mapping of contract → package directory lives in
 (the crate list is duplicated deliberately so the build stays explicit).
 
 ## Contract Testing Notes
+
+Use `soroban_forge_test_utils::advance_ledger_to` to drive TTL and timestamp
+boundaries on an existing Soroban test environment. Pass an absolute ledger
+sequence and a Unix timestamp in seconds. Both may stay equal to their
+current value, and either moving backwards panics before changing the ledger.
+
+```rust
+use soroban_forge_test_utils::{advance_ledger_to, new_env};
+
+let env = new_env();
+advance_ledger_to(&env, env.ledger().sequence() + 12, env.ledger().timestamp() + 60);
+```
+
+For sequence-only tests, `advance_ledger(&env, 12)` keeps the timestamp unchanged.
 
 ### Contract resource regression reports
 

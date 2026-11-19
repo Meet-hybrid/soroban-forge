@@ -32,6 +32,9 @@ await client.initialize({ owners, threshold });
 const txId = await client.add_owner({ submitter, new_owner });
 await client.confirm({ tx_id: txId.result, signer });
 await client.execute({ tx_id: txId.result });
+
+// Preview status and approval progress without changing wallet state:
+const preview = await client.get_tx_preview({ tx_id: txId.result });
 ```
 
 Signers/wallets are supplied per call via `MethodOptions` (`sign`, `simulate`,

@@ -21,6 +21,31 @@ jobs:
         run: bash scripts/forgeguard/test-scan.sh
       - name: ForgeReview regression tests
         run: bash scripts/forgereview/test-review.sh
+      - name: Testnet deployment script validation
+        run: |
+          bash -n scripts/deploy-testnet.sh scripts/demo-testnet.sh
+          receipt="$(mktemp)"
+          bash scripts/deploy-testnet.sh --dry-run --receipt "$receipt"
+          python3 - "$receipt" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              manifest = json.load(handle)
+
+          assert manifest["schema"] == "soroban-forge/testnet-deployment@1"
+          assert manifest["status"] == "dry_run"
+          assert len(manifest["contracts"]) == 6
+          assert {contract["key"] for contract in manifest["contracts"]} == {
+              "escrow",
+              "vesting",
+              "multi-sig-wallet",
+              "dao-governance",
+              "subscription-payments",
+              "marketplace-royalties",
+          }
+          PY
+          rm -f "$receipt"
 
   rustfmt:
     name: Rustfmt

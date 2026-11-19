@@ -79,7 +79,7 @@ function unlockedAmount(schedule: VestingSchedule, now: bigint): bigint {
     return schedule.total_amount;
   }
 
-  return (schedule.total_amount * (now - cliffTime)) / vestingPeriod;
+  return (schedule.total_amount * (now - cliffTime)) / BigInt(vestingPeriod);
 }
 
 function formatStart(timestamp: bigint): string {

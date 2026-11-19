@@ -19,8 +19,8 @@ mod decode_failure;
 
 use clap::{Parser, Subcommand};
 use cli::{
-    BuildArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs,
-    ScaffoldValidateArgs, TestArgs, VerifyArgs,
+    BuildArgs, CompareArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs,
+    NewArgs, ScaffoldValidateArgs, TestArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 
@@ -50,6 +50,7 @@ pub enum Commands {
     Events(EventsArgs),
     Inspect(InspectArgs),
     Doctor(DoctorArgs),
+    Compare(CompareArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -69,6 +70,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,
         Commands::Doctor(args) => commands::doctor::run(args)?,
+        Commands::Compare(args) => commands::compare::run(args)?,
     }
 
     Ok(())
@@ -109,6 +111,29 @@ mod tests {
             .to_string();
         assert!(help.contains("--wasm"));
         assert!(help.contains("--check-size"));
+    }
+
+    #[test]
+    fn events_follow_alias_topic_and_format_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "events",
+            "--contract",
+            "C123",
+            "--follow",
+            "--topic",
+            "Transfer",
+            "--format",
+            "jsonl",
+        ])
+        .unwrap();
+
+        let Commands::Events(args) = cli.command else {
+            panic!("expected events command");
+        };
+        assert!(args.stream);
+        assert_eq!(args.topic.as_deref(), Some("Transfer"));
+        assert_eq!(args.format, crate::cli::EventsFormat::Jsonl);
     }
 
     #[test]
@@ -178,6 +203,29 @@ mod tests {
     }
 
     #[test]
+    fn verify_json_is_a_manifest_output_mode() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "verify",
+            "--manifest",
+            "local.json",
+            "--json",
+        ])
+        .unwrap();
+        let Commands::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert!(args.json);
+        assert_eq!(args.manifest, "local.json");
+        for option in ["--wasm", "--expected"] {
+            assert!(
+                Cli::try_parse_from(["soroban-forge", "verify", "--json", option, "value"])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn verify_help_documents_flags() {
         let mut command = Cli::command();
         let help = command
@@ -188,6 +236,7 @@ mod tests {
         assert!(help.contains("--wasm"));
         assert!(help.contains("--expected"));
         assert!(help.contains("--manifest"));
+        assert!(help.contains("--json"));
     }
 
     #[test]
@@ -232,5 +281,28 @@ mod tests {
             ))
         );
         assert_eq!(args.expected.as_deref(), Some("a".repeat(64).as_str()));
+    }
+
+    #[test]
+    fn inspect_contract_json_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "inspect",
+            "CA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAXE",
+            "--json",
+            "--network",
+            "testnet",
+        ])
+        .unwrap();
+
+        let Commands::Inspect(args) = cli.command else {
+            panic!("expected inspect command");
+        };
+        assert_eq!(
+            args.contract.as_deref(),
+            Some("CA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAXE")
+        );
+        assert!(args.json);
+        assert_eq!(args.network, "testnet");
     }
 }
