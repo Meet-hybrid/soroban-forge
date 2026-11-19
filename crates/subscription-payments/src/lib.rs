@@ -1665,6 +1665,8 @@ mod events {
 #[cfg(test)]
 mod authz;
 #[cfg(test)]
+mod conservation;
+#[cfg(test)]
 mod metering;
 #[cfg(test)]
 mod prepaid;
