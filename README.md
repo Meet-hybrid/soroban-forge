@@ -251,6 +251,9 @@ cargo run -p soroban-forge-cli -- doctor        # check your toolchain and envir
 # Contract interaction
 cargo run -p soroban-forge-cli -- invoke --contract <CONTRACT_ID> --function balance --network testnet
 cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --since <LEDGER> --network testnet
+
+# Validate a transaction plan offline (text or --json report)
+cargo run -p soroban-forge-cli -- validate-plan --plan crates/cli/fixtures/plans/valid-create-escrow.json --expected-network testnet
 # Stream events in JSONL format for machine processing
 cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --jsonl
 # Compare two local WASM contract interfaces
