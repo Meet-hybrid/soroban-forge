@@ -1,5 +1,6 @@
 use crate::cli::DoctorArgs;
 use anyhow::Result;
+use serde::Serialize;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -7,7 +8,7 @@ use std::process::{Command, Output};
 
 const WASM_TARGET: &str = "wasm32v1-none";
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct CheckResult {
     pub name: &'static str,
     pub ok: bool,
@@ -45,7 +46,11 @@ fn command_output(output: Output) -> CommandOutput {
 
 pub fn run(args: DoctorArgs) -> Result<()> {
     let results = collect_checks(&SystemCommandRunner, args.wasm.as_deref());
-    print_report(&results);
+    if args.json {
+        print_json_report(&results)?;
+    } else {
+        print_report(&results);
+    }
     if results.iter().all(|result| result.ok) {
         Ok(())
     } else {
@@ -190,6 +195,19 @@ fn print_report(results: &[CheckResult]) {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct JsonDoctorReport<'a> {
+    checks: &'a [CheckResult],
+}
+
+fn print_json_report(results: &[CheckResult]) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string(&JsonDoctorReport { checks: results })?
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +286,33 @@ mod tests {
         fs::write(&valid, [1_u8]).unwrap();
         assert!(check_wasm_artifact(&valid).ok);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn json_report_has_stable_fields_for_missing_tool_and_target() {
+        let root = std::env::temp_dir().join(format!("soroban-doctor-json-{}", std::process::id()));
+        let missing_target = root.join("missing.wasm");
+        let runner = SequenceRunner(std::cell::RefCell::new(
+            vec![
+                Err(io::Error::new(io::ErrorKind::NotFound, "missing stellar")),
+                output("cargo 1.0", true),
+                output("wasm32v1-none\n", true),
+            ]
+            .into(),
+        ));
+        let results = collect_checks(&runner, Some(&missing_target));
+        let json = serde_json::to_string(&JsonDoctorReport { checks: &results }).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let checks = value["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 4);
+        assert_eq!(checks[0]["name"], "stellar");
+        assert_eq!(checks[0]["ok"], false);
+        assert_eq!(checks[0]["fix_hint"], "cargo install --locked stellar-cli");
+        assert_eq!(checks[3]["name"], "WASM artifact");
+        assert_eq!(checks[3]["ok"], false);
+        assert_eq!(
+            checks[3]["detail"],
+            format!("{} does not exist", missing_target.display())
+        );
     }
 }
