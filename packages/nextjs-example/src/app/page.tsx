@@ -8,6 +8,7 @@ import {
   Client,
   networks,
   type EscrowData,
+  vesting,
 } from "@soroban-forge/escrow-client";
 import {
   DEMO_ACCOUNTS,
@@ -19,10 +20,25 @@ import {
   type DemoEscrowRecord,
   type ExecutionMode,
 } from "./state";
+import VestingDashboard from "./vesting-dashboard";
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE = networks.testnet.networkPassphrase;
 const CONTRACT_ID = networks.testnet.contractId;
+const VESTING_CONTRACT_ID =
+  "CCSBFC3YMSGREWJ65RWR6TT3YPH3AJ7UDTJBMWUJCOLUEBELUJBXH2ZT";
+
+function doesNotSupportNetworkCheck(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === -3 &&
+    "message" in error &&
+    typeof error.message === "string" &&
+    error.message.includes('does not support the "getNetwork" function')
+  );
+}
 
 // 7-decimal demo token (SAC "credit" asset) used by the repo's testnet demo
 const DEFAULT_TOKEN =
@@ -56,8 +72,28 @@ export default function Home() {
   // Live Testnet state
   const [account, setAccount] = useState<string | null>(null);
   const [client, setClient] = useState<Client | null>(null);
+  const [vestingClient, setVestingClient] = useState<
+    InstanceType<typeof vesting.Client> | null
+  >(null);
   const [walletBusy, setWalletBusy] = useState(false);
   const [friendbotBusy, setFriendbotBusy] = useState(false);
+
+  const ensureTestnetWallet = useCallback(async (): Promise<boolean> => {
+    try {
+      const walletNetwork = await StellarWalletsKit.getNetwork();
+      if (walletNetwork.networkPassphrase !== NETWORK_PASSPHRASE) {
+        throw new Error(
+          `Wallet network mismatch: the connected wallet is set to ${walletNetwork.network}; this example requires Stellar Testnet.`
+        );
+      }
+      return true;
+    } catch (error) {
+      if (doesNotSupportNetworkCheck(error)) {
+        return false;
+      }
+      throw error;
+    }
+  }, []);
 
   // Demo / Local state
   const [selectedDemoRole, setSelectedDemoRole] =
@@ -251,46 +287,63 @@ export default function Home() {
         throw new Error("Wallet connectors are still loading; try again shortly.");
       }
       const { address: pubkey } = await StellarWalletsKit.authModal();
+      const networkVerified = await ensureTestnetWallet();
       setAccount(pubkey);
       setBuyer((current) => current || pubkey);
 
-      const c = new Client({
+      const signTransaction = async (
+        xdr: string,
+        opts?: { networkPassphrase?: string; address?: string }
+      ) => {
+        const result = await StellarWalletsKit.signTransaction(xdr, {
+          networkPassphrase: opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
+          address: opts?.address ?? pubkey,
+        });
+        if (!result.signedTxXdr) {
+          throw new Error("The selected wallet did not return a signed transaction.");
+        }
+        return { signedTxXdr: result.signedTxXdr };
+      };
+
+      const clientOptions = {
         rpcUrl: RPC_URL,
         networkPassphrase: NETWORK_PASSPHRASE,
-        contractId: CONTRACT_ID,
         publicKey: pubkey,
-        signTransaction: async (
-          xdr: string,
-          opts?: { networkPassphrase?: string; address?: string }
-        ) => {
-          const result = await StellarWalletsKit.signTransaction(xdr, {
-            networkPassphrase: opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
-            address: opts?.address ?? pubkey,
-          });
-          if (!result.signedTxXdr) {
-            throw new Error("The selected wallet did not return a signed transaction.");
-          }
-          return { signedTxXdr: result.signedTxXdr };
-        },
-      });
+        signTransaction,
+      };
+      const c = new Client({ ...clientOptions, contractId: CONTRACT_ID });
       setClient(c);
+      setVestingClient(
+        new vesting.Client({
+          ...clientOptions,
+          contractId: VESTING_CONTRACT_ID,
+        }),
+      );
       pushLog(
         `Connected to ${pubkey.slice(0, 6)}…${pubkey.slice(-4)} on Stellar Testnet`,
         "ok",
         "testnet"
       );
+      if (!networkVerified) {
+        pushLog(
+          "This wallet cannot report its selected network. Confirm it is set to Stellar Testnet; transactions will use the Testnet RPC.",
+          "info",
+          "testnet"
+        );
+      }
       void listMineLive(c, pubkey);
     } catch (e) {
       pushLog(`Wallet connect failed: ${(e as Error).message}`, "err", "testnet");
     } finally {
       setWalletBusy(false);
     }
-  }, [mounted, listMineLive, pushLog]);
+  }, [mounted, listMineLive, pushLog, ensureTestnetWallet]);
 
   const disconnectLive = useCallback(() => {
     void StellarWalletsKit.disconnect();
     setAccount(null);
     setClient(null);
+    setVestingClient(null);
     setEscrow(null);
     setMyIds([]);
     setListTotal(null);
@@ -717,7 +770,7 @@ export default function Home() {
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold tracking-tight text-gray-900 sm:text-3xl">
-              Soroban Forge — Escrow Explorer
+              Soroban Forge — Escrow &amp; Vesting Explorer
             </h1>
             <span
               className={`rounded-full px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wider ${
@@ -1350,6 +1403,13 @@ export default function Home() {
           )}
         </section>
       </div>
+
+      <VestingDashboard
+        client={vestingClient}
+        account={account}
+        enabled={mode === "testnet"}
+        ensureTestnetWallet={ensureTestnetWallet}
+      />
 
       {/* Transaction Log */}
       <section className="mt-6 rounded-xl border border-gray-300 bg-white p-5 shadow-sm">
