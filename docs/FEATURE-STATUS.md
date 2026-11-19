@@ -151,7 +151,7 @@ machine.
 | TypeScript SDK | ✅ Generated | Six generated clients build from the contract ABIs; dedicated SDK test suites remain follow-up work |
 | CLI | ✅ Implemented | Developer CLI includes `build`, `test`, `lint`, `deploy`, `invoke`, and `events` commands |
 | ForgeError registry | ✅ Generated | Machine-readable error registry and TypeScript module are generated from Rust sources |
-| Next.js demo | ✅ Example | `packages/nextjs-example` provides a testnet escrow UI with Freighter connection and live contract actions |
+| Next.js demo | ✅ Example | `packages/nextjs-example` provides a testnet escrow UI with demo/local simulation, live testnet transaction state indicators, and Freighter connection (testnet-only, unaudited) |
 | CI | ✅ Enforced | fmt, clippy, workspace tests, audit, WASM size, and provenance checks run with locked dependencies |
 | External audit | ❌ Not performed | Planned before any mainnet value custody |
 | Soroban SDK version | ✅ 28.0.0 | Stable Rust, `wasm32v1-none`; macros package remains pinned to 27.0.6 |
