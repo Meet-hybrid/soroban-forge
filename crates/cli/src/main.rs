@@ -20,7 +20,7 @@ mod decode_failure;
 use clap::{Parser, Subcommand};
 use cli::{
     BuildArgs, CompareArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs,
-    NewArgs, ScaffoldValidateArgs, TestArgs, VerifyArgs,
+    NewArgs, ScaffoldValidateArgs, TestArgs, ValidatePlanArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 
@@ -50,6 +50,11 @@ pub enum Commands {
     Events(EventsArgs),
     Inspect(InspectArgs),
     Doctor(DoctorArgs),
+    #[command(
+        about = "Validate a transaction plan and emit a structured report",
+        visible_alias = "plan"
+    )]
+    ValidatePlan(ValidatePlanArgs),
     Compare(CompareArgs),
 }
 
@@ -70,6 +75,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,
         Commands::Doctor(args) => commands::doctor::run(args)?,
+        Commands::ValidatePlan(args) => commands::plan::run(args)?,
         Commands::Compare(args) => commands::compare::run(args)?,
     }
 
@@ -255,6 +261,32 @@ mod tests {
             args.path,
             std::path::PathBuf::from("crates/example-contract")
         );
+    }
+
+    #[test]
+    fn validate_plan_flags_and_alias_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "validate-plan",
+            "--plan",
+            "plan.json",
+            "--expected-network",
+            "testnet",
+            "--json",
+        ])
+        .unwrap();
+        let Commands::ValidatePlan(args) = cli.command else {
+            panic!("expected validate-plan command");
+        };
+        assert_eq!(
+            args.plan.as_deref(),
+            Some(std::path::Path::new("plan.json"))
+        );
+        assert_eq!(args.expected_network.as_deref(), Some("testnet"));
+        assert!(args.json);
+
+        let aliased = Cli::try_parse_from(["soroban-forge", "plan", "plan.json"]).unwrap();
+        assert!(matches!(aliased.command, Commands::ValidatePlan(_)));
     }
 
     #[test]
