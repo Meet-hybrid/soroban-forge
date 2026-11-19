@@ -155,6 +155,16 @@ pub struct InspectArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct StorageDiffArgs {
+    #[arg(long, value_name = "PATH")]
+    pub source: PathBuf,
+    #[arg(long, value_name = "PATH")]
+    pub target: PathBuf,
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
     /// Optional WASM artifact to validate as a regular, non-empty file.
     #[arg(long, value_name = "PATH")]

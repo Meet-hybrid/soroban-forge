@@ -261,6 +261,15 @@ cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network test
 cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --format jsonl
 ```
 
+### Compare contract storage schemas
+
+```bash
+soroban-forge storage-diff --source source.wasm --target target.wasm
+soroban-forge storage-diff --source source.wasm --target target.wasm --json
+```
+
+The command reads `contractspecv0` and reports struct/enum changes. It does not prove complete instance/persistent key layout. Exit code 0 means extraction/comparison completed; non-zero means missing/invalid files or malformed XDR.
+
 Commands: `build`, `lint`, `test`, `deploy`, `new`, `scaffold-validate`,
 `verify`, `invoke`, `decode-failure`, `events`, `inspect`, `compare` and `doctor`. Run any
 of them with `--help` for options.
