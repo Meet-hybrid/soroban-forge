@@ -479,6 +479,16 @@ pub trait SorobanForgeEscrow {
     /// The escrow's review window in seconds.
     fn review_period(env: Env, escrow_id: u64) -> u64;
 
+    /// Read-only summary of every caller-facing action on a single-token escrow.
+    ///
+    /// The summary is keyed by the supplied caller and never authorizes or
+    /// mutates storage. Unknown ids return [`ForgeError::NotFound`].
+    fn get_action_summary(
+        env: Env,
+        escrow_id: u64,
+        caller: Address,
+    ) -> Result<EscrowActionSummary, ForgeError>;
+
     /// Cancel a `Pending` escrow before it is funded. Requires the buyer and
     /// removes its id from each distinct party's participant index.
     ///
@@ -628,6 +638,17 @@ pub trait SorobanForgeEscrow {
     ///   kinds are distinct types, and [`Self::get_escrow`] is the view for the
     ///   single-token one. [`Self::get_status`] covers either kind.
     fn get_basket(env: Env, escrow_id: u64) -> Result<BasketEscrowData, ForgeError>;
+
+    /// Read-only summary of every caller-facing action on a basket escrow.
+    ///
+    /// Basket action names are the basket counterparts of the single-token
+    /// actions in [`Self::get_action_summary`]. Unknown ids return
+    /// [`ForgeError::NotFound`].
+    fn get_basket_action_summary(
+        env: Env,
+        escrow_id: u64,
+        caller: Address,
+    ) -> Result<EscrowActionSummary, ForgeError>;
 
     /// Read the current lifecycle status of **either** record kind.
     ///
@@ -909,6 +930,68 @@ pub struct ReleaseRequest {
     /// From this time anyone may execute the release, unless the buyer
     /// disputed first (ledger timestamp, seconds).
     pub release_at: u64,
+}
+
+/// Stable machine-readable eligibility marker or ineligibility reason.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ActionIneligibilityReason {
+    Eligible,
+    WrongRole,
+    WrongStatus,
+    BeforeDeadline,
+    AfterDeadline,
+    ReviewWindowNotEnded,
+    ReleasePending,
+    NoPendingRequest,
+}
+
+/// The caller-facing escrow actions represented in an action summary.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EscrowAction {
+    Deposit,
+    RequestRelease,
+    ApproveRelease,
+    ExecuteRelease,
+    Release,
+    ReleasePartial,
+    Refund,
+    RefundExpired,
+    Dispute,
+    Resolve,
+    ResolveSplit,
+    Cancel,
+    DepositBasket,
+    RequestReleaseBasket,
+    ReleaseBasket,
+    ReleasePartialBasket,
+    RefundBasket,
+    DisputeBasket,
+    ResolveBasket,
+    CancelBasket,
+}
+
+/// Eligibility of one action for the caller supplied to the summary query.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowActionEligibility {
+    pub action: EscrowAction,
+    pub eligible: bool,
+    pub reason: ActionIneligibilityReason,
+}
+
+/// Read-only, caller-specific view of all actions allowed on an escrow.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowActionSummary {
+    pub escrow_id: u64,
+    pub status: EscrowStatus,
+    pub deadline: u64,
+    pub has_pending_request: bool,
+    pub pending_request_amount: Option<i128>,
+    pub pending_release_at: Option<u64>,
+    pub actions: Vec<EscrowActionEligibility>,
 }
 
 /// A page of escrow ids involving a participant.
@@ -1274,15 +1357,15 @@ impl Escrow {
         }
 
         let now = env.ledger().timestamp();
-        let deadline = escrow
-            .created_at
-            .checked_add(escrow.timeout)
-            .ok_or(ForgeError::ArithmeticOverflow)?;
-        if now <= deadline {
-            return Err(ForgeError::DeadlineReached);
-        }
-        if has_request(&env, escrow_id) {
-            return Err(ForgeError::ReleasePending);
+        let deadline = escrow_deadline(escrow.created_at, escrow.timeout)?;
+        if let Some(reason) =
+            expired_refund_ineligibility(now, deadline, has_request(&env, escrow_id))
+        {
+            return Err(match reason {
+                ActionIneligibilityReason::BeforeDeadline => ForgeError::DeadlineReached,
+                ActionIneligibilityReason::ReleasePending => ForgeError::ReleasePending,
+                _ => ForgeError::InvalidInput,
+            });
         }
 
         // Only what is still in custody: earlier partial releases already
@@ -1776,6 +1859,65 @@ impl Escrow {
         Err(ForgeError::NotFound)
     }
 
+    /// Return the caller-specific read-only action summary for a single-token
+    /// escrow. This method performs no storage writes or TTL extensions.
+    pub fn get_action_summary(
+        env: Env,
+        escrow_id: u64,
+        caller: Address,
+    ) -> Result<EscrowActionSummary, ForgeError> {
+        if let Ok(escrow) = Self::load_escrow(&env, escrow_id) {
+            return build_action_summary(
+                &env,
+                escrow_id,
+                escrow.status,
+                escrow.created_at,
+                escrow.timeout,
+                escrow.buyer,
+                escrow.seller,
+                escrow.arbiter,
+                caller,
+                true,
+            );
+        }
+        if let Ok(basket) = Self::load_basket(&env, escrow_id) {
+            return build_action_summary(
+                &env,
+                escrow_id,
+                basket.status,
+                basket.created_at,
+                basket.timeout,
+                basket.buyer,
+                basket.seller,
+                basket.arbiter,
+                caller,
+                false,
+            );
+        }
+        Err(ForgeError::NotFound)
+    }
+
+    /// Return the caller-specific read-only action summary for a basket.
+    pub fn get_basket_action_summary(
+        env: Env,
+        escrow_id: u64,
+        caller: Address,
+    ) -> Result<EscrowActionSummary, ForgeError> {
+        let basket = Self::load_basket(&env, escrow_id)?;
+        build_action_summary(
+            &env,
+            escrow_id,
+            basket.status,
+            basket.created_at,
+            basket.timeout,
+            basket.buyer,
+            basket.seller,
+            basket.arbiter,
+            caller,
+            false,
+        )
+    }
+
     /// Read the full escrow record. The returned `EscrowData` exposes
     /// `released` (cumulative seller payments) and `remaining()` (balance
     /// in custody). For records created before the partial-release feature
@@ -2030,6 +2172,256 @@ impl Escrow {
     }
 }
 
+/// Build a caller-specific action summary without touching persistent state.
+#[allow(clippy::too_many_arguments)]
+fn build_action_summary(
+    env: &Env,
+    escrow_id: u64,
+    status: EscrowStatus,
+    created_at: u64,
+    timeout: u64,
+    buyer: Address,
+    seller: Address,
+    arbiter: Address,
+    caller: Address,
+    single_token: bool,
+) -> Result<EscrowActionSummary, ForgeError> {
+    let deadline = escrow_deadline(created_at, timeout)?;
+    let now = env.ledger().timestamp();
+    let pending_request = env
+        .storage()
+        .persistent()
+        .get::<_, ReleaseRequest>(&DataKey::ReleaseRequest(escrow_id));
+    let mut actions = Vec::new(env);
+
+    fn add(
+        _env: &Env,
+        actions: &mut Vec<EscrowActionEligibility>,
+        action: EscrowAction,
+        eligible: bool,
+        reason: Option<ActionIneligibilityReason>,
+    ) {
+        actions.push_back(EscrowActionEligibility {
+            action,
+            eligible,
+            reason: reason.unwrap_or(ActionIneligibilityReason::Eligible),
+        });
+    }
+
+    let (allowed, reason) = if status != EscrowStatus::Pending {
+        (false, Some(ActionIneligibilityReason::WrongStatus))
+    } else if caller != buyer {
+        (false, Some(ActionIneligibilityReason::WrongRole))
+    } else {
+        (true, None)
+    };
+    add(
+        env,
+        &mut actions,
+        if single_token {
+            EscrowAction::Deposit
+        } else {
+            EscrowAction::DepositBasket
+        },
+        allowed,
+        reason,
+    );
+
+    let (allowed, reason) = if status != EscrowStatus::Funded {
+        (false, Some(ActionIneligibilityReason::WrongStatus))
+    } else if caller != seller {
+        (false, Some(ActionIneligibilityReason::WrongRole))
+    } else {
+        match request_release_ineligibility(now, deadline, pending_request.is_some()) {
+            Some(reason) => (false, Some(reason)),
+            None => (true, None),
+        }
+    };
+    add(
+        env,
+        &mut actions,
+        if single_token {
+            EscrowAction::RequestRelease
+        } else {
+            EscrowAction::RequestReleaseBasket
+        },
+        allowed,
+        reason,
+    );
+
+    let (allowed, reason) = if status != EscrowStatus::Funded {
+        (false, Some(ActionIneligibilityReason::WrongStatus))
+    } else if pending_request.is_none() {
+        (false, Some(ActionIneligibilityReason::NoPendingRequest))
+    } else if caller != buyer {
+        (false, Some(ActionIneligibilityReason::WrongRole))
+    } else {
+        (true, None)
+    };
+    add(
+        env,
+        &mut actions,
+        EscrowAction::ApproveRelease,
+        allowed,
+        reason,
+    );
+
+    let (allowed, reason) = if status != EscrowStatus::Funded {
+        (false, Some(ActionIneligibilityReason::WrongStatus))
+    } else {
+        match pending_request.as_ref() {
+            None => (false, Some(ActionIneligibilityReason::NoPendingRequest)),
+            Some(request) if now < request.release_at => {
+                (false, Some(ActionIneligibilityReason::ReviewWindowNotEnded))
+            }
+            Some(_) => (true, None),
+        }
+    };
+    add(
+        env,
+        &mut actions,
+        EscrowAction::ExecuteRelease,
+        allowed,
+        reason,
+    );
+
+    for action in if single_token {
+        [EscrowAction::Release, EscrowAction::ReleasePartial]
+    } else {
+        [
+            EscrowAction::ReleaseBasket,
+            EscrowAction::ReleasePartialBasket,
+        ]
+    } {
+        let (allowed, reason) = if status != EscrowStatus::Funded {
+            (false, Some(ActionIneligibilityReason::WrongStatus))
+        } else if caller != buyer {
+            (false, Some(ActionIneligibilityReason::WrongRole))
+        } else {
+            (true, None)
+        };
+        add(env, &mut actions, action, allowed, reason);
+    }
+
+    let (allowed, reason) = if status != EscrowStatus::Funded {
+        (false, Some(ActionIneligibilityReason::WrongStatus))
+    } else {
+        let refund_party = refund_authorizer(env, created_at, timeout, &buyer, &seller)?;
+        if caller != refund_party {
+            (false, Some(ActionIneligibilityReason::WrongRole))
+        } else if refund_party == buyer && pending_request.is_some() {
+            (false, Some(ActionIneligibilityReason::ReleasePending))
+        } else {
+            (true, None)
+        }
+    };
+    add(
+        env,
+        &mut actions,
+        if single_token {
+            EscrowAction::Refund
+        } else {
+            EscrowAction::RefundBasket
+        },
+        allowed,
+        reason,
+    );
+
+    if single_token {
+        let (allowed, reason) = if status != EscrowStatus::Funded {
+            (false, Some(ActionIneligibilityReason::WrongStatus))
+        } else {
+            match expired_refund_ineligibility(now, deadline, pending_request.is_some()) {
+                Some(reason) => (false, Some(reason)),
+                None => (true, None),
+            }
+        };
+        add(
+            env,
+            &mut actions,
+            EscrowAction::RefundExpired,
+            allowed,
+            reason,
+        );
+    }
+
+    let (allowed, reason) = if status != EscrowStatus::Funded {
+        (false, Some(ActionIneligibilityReason::WrongStatus))
+    } else if caller != buyer && caller != seller {
+        (false, Some(ActionIneligibilityReason::WrongRole))
+    } else {
+        (true, None)
+    };
+    add(
+        env,
+        &mut actions,
+        if single_token {
+            EscrowAction::Dispute
+        } else {
+            EscrowAction::DisputeBasket
+        },
+        allowed,
+        reason,
+    );
+
+    let (allowed, reason) = if status != EscrowStatus::Disputed {
+        (false, Some(ActionIneligibilityReason::WrongStatus))
+    } else if caller != arbiter {
+        (false, Some(ActionIneligibilityReason::WrongRole))
+    } else {
+        (true, None)
+    };
+    add(
+        env,
+        &mut actions,
+        if single_token {
+            EscrowAction::Resolve
+        } else {
+            EscrowAction::ResolveBasket
+        },
+        allowed,
+        reason.clone(),
+    );
+    if single_token {
+        add(
+            env,
+            &mut actions,
+            EscrowAction::ResolveSplit,
+            allowed,
+            reason.clone(),
+        );
+    }
+
+    let (allowed, reason) = if status != EscrowStatus::Pending {
+        (false, Some(ActionIneligibilityReason::WrongStatus))
+    } else if caller != buyer {
+        (false, Some(ActionIneligibilityReason::WrongRole))
+    } else {
+        (true, None)
+    };
+    add(
+        env,
+        &mut actions,
+        if single_token {
+            EscrowAction::Cancel
+        } else {
+            EscrowAction::CancelBasket
+        },
+        allowed,
+        reason,
+    );
+
+    Ok(EscrowActionSummary {
+        escrow_id,
+        status,
+        deadline,
+        has_pending_request: pending_request.is_some(),
+        pending_request_amount: pending_request.as_ref().map(|request| request.amount),
+        pending_release_at: pending_request.as_ref().map(|request| request.release_at),
+        actions,
+    })
+}
+
 /// Record a seller's release request: one at a time, only up to the escrow's
 /// deadline, paying out after the escrow's review window. Returns `release_at`.
 fn open_request(
@@ -2039,17 +2431,15 @@ fn open_request(
     timeout: u64,
     amount: i128,
 ) -> Result<u64, ForgeError> {
-    if has_request(env, escrow_id) {
-        return Err(ForgeError::ReleasePending);
-    }
     let now = env.ledger().timestamp();
-    let deadline = created_at
-        .checked_add(timeout)
-        .ok_or(ForgeError::ArithmeticOverflow)?;
-    // After the deadline the funds are the buyer's to reclaim; a late request
-    // must not be able to block that.
-    if now > deadline {
-        return Err(ForgeError::DeadlineReached);
+    let deadline = escrow_deadline(created_at, timeout)?;
+    if let Some(reason) = request_release_ineligibility(now, deadline, has_request(env, escrow_id))
+    {
+        return Err(match reason {
+            ActionIneligibilityReason::ReleasePending => ForgeError::ReleasePending,
+            ActionIneligibilityReason::AfterDeadline => ForgeError::DeadlineReached,
+            _ => ForgeError::InvalidInput,
+        });
     }
     let release_at = now
         .checked_add(review_period_of(env, escrow_id))
@@ -2178,13 +2568,45 @@ fn refund_authorizer(
     buyer: &Address,
     seller: &Address,
 ) -> Result<Address, ForgeError> {
-    let deadline = created_at
-        .checked_add(timeout)
-        .ok_or(ForgeError::ArithmeticOverflow)?;
+    let deadline = escrow_deadline(created_at, timeout)?;
     if env.ledger().timestamp() >= deadline {
         Ok(buyer.clone())
     } else {
         Ok(seller.clone())
+    }
+}
+
+fn escrow_deadline(created_at: u64, timeout: u64) -> Result<u64, ForgeError> {
+    created_at
+        .checked_add(timeout)
+        .ok_or(ForgeError::ArithmeticOverflow)
+}
+
+fn request_release_ineligibility(
+    now: u64,
+    deadline: u64,
+    request_pending: bool,
+) -> Option<ActionIneligibilityReason> {
+    if request_pending {
+        Some(ActionIneligibilityReason::ReleasePending)
+    } else if now > deadline {
+        Some(ActionIneligibilityReason::AfterDeadline)
+    } else {
+        None
+    }
+}
+
+fn expired_refund_ineligibility(
+    now: u64,
+    deadline: u64,
+    request_pending: bool,
+) -> Option<ActionIneligibilityReason> {
+    if now <= deadline {
+        Some(ActionIneligibilityReason::BeforeDeadline)
+    } else if request_pending {
+        Some(ActionIneligibilityReason::ReleasePending)
+    } else {
+        None
     }
 }
 
@@ -2759,6 +3181,9 @@ mod authz;
 
 #[cfg(test)]
 mod review_tests;
+
+#[cfg(test)]
+mod action_summary_tests;
 
 #[cfg(test)]
 mod props;

@@ -127,6 +127,11 @@ token: string;
 }
 
 /**
+ * The caller-facing escrow actions represented in an action summary.
+ */
+export type EscrowAction = {tag: "Deposit", values: void} | {tag: "RequestRelease", values: void} | {tag: "ApproveRelease", values: void} | {tag: "ExecuteRelease", values: void} | {tag: "Release", values: void} | {tag: "ReleasePartial", values: void} | {tag: "Refund", values: void} | {tag: "RefundExpired", values: void} | {tag: "Dispute", values: void} | {tag: "Resolve", values: void} | {tag: "ResolveSplit", values: void} | {tag: "Cancel", values: void} | {tag: "DepositBasket", values: void} | {tag: "RequestReleaseBasket", values: void} | {tag: "ReleaseBasket", values: void} | {tag: "ReleasePartialBasket", values: void} | {tag: "RefundBasket", values: void} | {tag: "DisputeBasket", values: void} | {tag: "ResolveBasket", values: void} | {tag: "CancelBasket", values: void};
+
+/**
  * Lifecycle state of an escrow.
  */
 export type EscrowStatus = {tag: "Pending", values: void} | {tag: "Funded", values: void} | {tag: "Completed", values: void} | {tag: "Refunded", values: void} | {tag: "Disputed", values: void} | {tag: "Cancelled", values: void};
@@ -206,6 +211,20 @@ timeout: u64;
 
 
 /**
+ * Read-only, caller-specific view of all actions allowed on an escrow.
+ */
+export interface EscrowActionSummary {
+  actions: Array<EscrowActionEligibility>;
+  deadline: u64;
+  escrow_id: u64;
+  has_pending_request: boolean;
+  pending_release_at: Option<u64>;
+  pending_request_amount: Option<i128>;
+  status: EscrowStatus;
+}
+
+
+/**
  * A page of escrow ids involving a participant.
  *
  * Returned by [`SorobanForgeEscrow::escrows_for_participant`]; powered by
@@ -226,6 +245,21 @@ next_cursor: Option<u32>;
  */
 total: u32;
 }
+
+
+/**
+ * Eligibility of one action for the caller supplied to the summary query.
+ */
+export interface EscrowActionEligibility {
+  action: EscrowAction;
+  eligible: boolean;
+  reason: ActionIneligibilityReason;
+}
+
+/**
+ * Stable machine-readable eligibility marker or ineligibility reason.
+ */
+export type ActionIneligibilityReason = {tag: "Eligible", values: void} | {tag: "WrongRole", values: void} | {tag: "WrongStatus", values: void} | {tag: "BeforeDeadline", values: void} | {tag: "AfterDeadline", values: void} | {tag: "ReviewWindowNotEnded", values: void} | {tag: "ReleasePending", values: void} | {tag: "NoPendingRequest", values: void};
 
 
 
@@ -569,6 +603,13 @@ export interface Client {
   request_release: ({escrow_id, amount}: {escrow_id: u64, amount: i128}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
 
   /**
+   * Construct and simulate a get_action_summary transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Return the caller-specific read-only action summary for a single-token
+   * escrow. This method performs no storage writes or TTL extensions.
+   */
+  get_action_summary: ({escrow_id, caller}: {escrow_id: u64, caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<EscrowActionSummary>>>
+
+  /**
    * Construct and simulate a get_release_request transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * The pending release request of an escrow, if any.
    */
@@ -612,6 +653,12 @@ export interface Client {
    */
   create_escrow_with_review: ({buyer, seller, arbiter, token, amount, timeout, review_period}: {buyer: string, seller: string, arbiter: string, token: string, amount: i128, timeout: u64, review_period: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
 
+  /**
+   * Construct and simulate a get_basket_action_summary transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Return the caller-specific read-only action summary for a basket.
+   */
+  get_basket_action_summary: ({escrow_id, caller}: {escrow_id: u64, caller: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<EscrowActionSummary>>>
+
 }
 export class Client extends ContractClient {
   static async deploy<T = Client>(
@@ -643,6 +690,7 @@ export class Client extends ContractClient {
         "AAAAAAAAADhSZWFkIHRoZSBjdXJyZW50IGxpZmVjeWNsZSBzdGF0dXMgb2YgZWl0aGVyIHJlY29yZCBraW5kLgAAAApnZXRfc3RhdHVzAAAAAAABAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAQAAA+kAAAfQAAAADEVzY3Jvd1N0YXR1cwAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAQAAAv5BIHNpbmdsZSB0aHJlZS1wYXJ0eSBlc2Nyb3cgcmVjb3JkLgoKIyMgQWNjb3VudGluZyBmaWVsZHMKCiogYGFtb3VudGAg4oCUIHRvdGFsIHRva2VucyBkZXBvc2l0ZWQgYnkgdGhlIGJ1eWVyOyBuZXZlciBjaGFuZ2VzIGFmdGVyCmBkZXBvc2l0YC4KKiBgcmVsZWFzZWRgIOKAlCBjdW11bGF0aXZlIHRva2VucyBhbHJlYWR5IHRyYW5zZmVycmVkIHRvIHRoZSBzZWxsZXIgdmlhCmByZWxlYXNlX3BhcnRpYWxgOyBgMGAgYmVmb3JlIGFueSBwYXJ0aWFsIHJlbGVhc2UgaXMgbWFkZS4KKiBgcmVtYWluaW5nYCAoZGVyaXZlZCkg4oCUIGBhbW91bnQgLSByZWxlYXNlZGA7IHRoZSBiYWxhbmNlIGN1cnJlbnRseQpoZWxkIGluIGN1c3RvZHkuIGByZWZ1bmRgIGFuZCBgcmVzb2x2ZWAgcGF5IHRoaXMgYW1vdW50OyBgcmVsZWFzZWAKYW5kIHRoZSBmaW5hbCBgcmVsZWFzZV9wYXJ0aWFsYCBtdXN0IGNvbnN1bWUgaXQgZW50aXJlbHkuCgojIyBTdG9yYWdlIGNvbXBhdGliaWxpdHkKClJlY29yZHMgd3JpdHRlbiBieSBjb250cmFjdCB2ZXJzaW9ucyBwcmlvciB0byB0aGUgcGFydGlhbC1yZWxlYXNlIGZlYXR1cmUKZG8gbm90IGNvbnRhaW4gYSBgcmVsZWFzZWRgIGZpZWxkLiBUaGV5IGFyZSBsb2FkZWQgdmlhIGEgYmFja3dhcmQtY29tcGF0CmRlY29kZSBwYXRoIHRoYXQgZGVmYXVsdHMgYHJlbGVhc2VkYCB0byBgMGAgKHNlZSBgbG9hZF9lc2Nyb3dgIGludGVybmFscwphbmQgdGhlIG1vZHVsZS1sZXZlbCBzdG9yYWdlIGNvbXBhdGliaWxpdHkgbm90ZSkuAAAAAAAAAAAACkVzY3Jvd0RhdGEAAAAAAAoAAABOVG90YWwgYW1vdW50IG9mIGB0b2tlbmAgZGVwb3NpdGVkIGJ5IHRoZSBidXllci4gTmV2ZXIgY2hhbmdlcyBhZnRlcgpgZGVwb3NpdGAuAAAAAAAGYW1vdW50AAAAAAALAAAAUU5ldXRyYWwgcGFydHkgZGVjaWRpbmcgZGlzcHV0ZXMuIFJlY29yZGVkIGF0IGNyZWF0aW9uOyBhdXRob3JpemVzCm9ubHkgYHJlc29sdmVgLgAAAAAAAAdhcmJpdGVyAAAAABMAAAA6UGFydHkgZnVuZGluZyB0aGUgZXNjcm93IGFuZCB0aGUgZGVmYXVsdCByZWZ1bmQgcmVjaXBpZW50LgAAAAAABWJ1eWVyAAAAAAAAEwAAABtVbml4IHRpbWVzdGFtcCBvZiBjcmVhdGlvbi4AAAAACmNyZWF0ZWRfYXQAAAAAAAYAAAAYU3RhYmxlIGlkLCBuZXZlciByZXVzZWQuAAAACWVzY3Jvd19pZAAAAAAAAAYAAABvQ3VtdWxhdGl2ZSBhbW91bnQgYWxyZWFkeSB0cmFuc2ZlcnJlZCB0byB0aGUgc2VsbGVyIHZpYQpgcmVsZWFzZV9wYXJ0aWFsYC4gYDBgIHVudGlsIHRoZSBmaXJzdCBwYXJ0aWFsIHJlbGVhc2UuAAAAAAhyZWxlYXNlZAAAAAsAAAAWUGFydHkgcGFpZCBvbiByZWxlYXNlLgAAAAAABnNlbGxlcgAAAAAAEwAAABhDdXJyZW50IGxpZmVjeWNsZSBzdGF0ZS4AAAAGc3RhdHVzAAAAAAfQAAAADEVzY3Jvd1N0YXR1cwAAAD5TZWNvbmRzIGFmdGVyIGBjcmVhdGVkX2F0YCBhdCB3aGljaCB0aGUgYnV5ZXIgbWF5IHNlbGYtcmVmdW5kLgAAAAAAB3RpbWVvdXQAAAAABgAAAC9TRVAtNDEgdG9rZW4gY29udHJhY3QgY3VzdG9kaWVkIGJ5IHRoaXMgZXNjcm93LgAAAAAFdG9rZW4AAAAAAAAT",
         "AAAAAQAAATBPbmUgbGVnIG9mIGEgYmFza2V0IGVzY3JvdzogYSBzaW5nbGUgU0VQLTQxIHRva2VuIGFuZCBpdHMgYWNjb3VudGluZy4KClRoZSBmaWVsZCBuYW1lcyBtaXJyb3IgW2BFc2Nyb3dEYXRhYF0ncyBzaW5nbGUtdG9rZW4gYWNjb3VudGluZyBleGFjdGx5IHNvCnRoZSB0d28gcmVjb3JkIGtpbmRzIGV4cHJlc3Mgb25lIHJ1bGUgcmF0aGVyIHRoYW4gdHdvOiBgcmVtYWluaW5nYCBpcwpgYW1vdW50IC0gcmVsZWFzZWRgLCBgcmVmdW5kYC9gcmVzb2x2ZWAgcGF5IGByZW1haW5pbmdgLCBhbmQgYSBmdWxsIHJlbGVhc2UKY29uc3VtZXMgaXQuAAAAAAAAAAtFc2Nyb3dBc3NldAAAAAADAAAAXlRvdGFsIGFtb3VudCBvZiBgdG9rZW5gIHRoaXMgbGVnIGVzY3Jvd3MuIEZpeGVkIGF0IGNyZWF0aW9uIGFuZAp1bmNoYW5nZWQgYnkgYGRlcG9zaXRfYmFza2V0YC4AAAAAAAZhbW91bnQAAAAAAAsAAAB6Q3VtdWxhdGl2ZSBhbW91bnQgb2YgYHRva2VuYCBhbHJlYWR5IHBhaWQgdG8gdGhlIHNlbGxlciB2aWEKYHJlbGVhc2VfcGFydGlhbF9iYXNrZXRgLiBgMGAgdW50aWwgdGhlIGZpcnN0IHBhcnRpYWwgcmVsZWFzZS4AAAAAAAhyZWxlYXNlZAAAAAsAAAAjU0VQLTQxIHRva2VuIGNvbnRyYWN0IGZvciB0aGlzIGxlZy4AAAAABXRva2VuAAAAAAAAEw==",
+        "AAAAAgAAAEJUaGUgY2FsbGVyLWZhY2luZyBlc2Nyb3cgYWN0aW9ucyByZXByZXNlbnRlZCBpbiBhbiBhY3Rpb24gc3VtbWFyeS4AAAAAAAAAAAAMRXNjcm93QWN0aW9uAAAAFAAAAAAAAAAAAAAAB0RlcG9zaXQAAAAAAAAAAAAAAAAOUmVxdWVzdFJlbGVhc2UAAAAAAAAAAAAAAAAADkFwcHJvdmVSZWxlYXNlAAAAAAAAAAAAAAAAAA5FeGVjdXRlUmVsZWFzZQAAAAAAAAAAAAAAAAAHUmVsZWFzZQAAAAAAAAAAAAAAAA5SZWxlYXNlUGFydGlhbAAAAAAAAAAAAAAAAAAGUmVmdW5kAAAAAAAAAAAAAAAAAA1SZWZ1bmRFeHBpcmVkAAAAAAAAAAAAAAAAAAAHRGlzcHV0ZQAAAAAAAAAAAAAAAAdSZXNvbHZlAAAAAAAAAAAAAAAADFJlc29sdmVTcGxpdAAAAAAAAAAAAAAABkNhbmNlbAAAAAAAAAAAAAAAAAANRGVwb3NpdEJhc2tldAAAAAAAAAAAAAAAAAAAFFJlcXVlc3RSZWxlYXNlQmFza2V0AAAAAAAAAAAAAAANUmVsZWFzZUJhc2tldAAAAAAAAAAAAAAAAAAAFFJlbGVhc2VQYXJ0aWFsQmFza2V0AAAAAAAAAAAAAAAMUmVmdW5kQmFza2V0AAAAAAAAAAAAAAANRGlzcHV0ZUJhc2tldAAAAAAAAAAAAAAAAAAADVJlc29sdmVCYXNrZXQAAAAAAAAAAAAAAAAAAAxDYW5jZWxCYXNrZXQ=",
         "AAAAAgAAAB1MaWZlY3ljbGUgc3RhdGUgb2YgYW4gZXNjcm93LgAAAAAAAAAAAAAMRXNjcm93U3RhdHVzAAAABgAAAAAAAAAXQ3JlYXRlZCBidXQgbm90IGZ1bmRlZC4AAAAAB1BlbmRpbmcAAAAAAAAAABxUb2tlbnMgaGVsZCBieSB0aGUgY29udHJhY3QuAAAABkZ1bmRlZAAAAAAAAAAAAD9SZWxlYXNlZCB0byB0aGUgc2VsbGVyIChmdWxsIHJlbGVhc2Ugb3IgZmluYWwgcGFydGlhbCByZWxlYXNlKS4AAAAACUNvbXBsZXRlZAAAAAAAAAAAAAAWUmVmdW5kZWQgdG8gdGhlIGJ1eWVyLgAAAAAACFJlZnVuZGVkAAAAAAAAADxBIHBhcnR5IHJhaXNlZCBhIGRpc3B1dGU7IGZyb3plbiB1bnRpbCB0aGUgYXJiaXRlciByZXNvbHZlcy4AAAAIRGlzcHV0ZWQAAAAAAAAAGUNhbmNlbGxlZCBiZWZvcmUgZnVuZGluZy4AAAAAAAAJQ2FuY2VsbGVkAAAA",
         "AAAAAAAAAFZDYW5jZWwgYSBgUGVuZGluZ2AgYmFza2V0LiBCdXllci1hdXRob3JpemVkOyBub3RoaW5nIGhhcyBtb3ZlZCwgc28gbm8KdHJhbnNmZXIgb2NjdXJzLgAAAAAADWNhbmNlbF9iYXNrZXQAAAAAAAABAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAQAAA+kAAAACAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAAHFDcmVhdGUgYSBiYXNrZXQgZXNjcm93LiBCdXllci1hdXRob3JpemVkIG9ubHksIGV4YWN0bHkgYXMKYGNyZWF0ZV9lc2Nyb3dgLCBhbmQgZHJhd2luZyBmcm9tIHRoZSBzYW1lIGlkIHNlcXVlbmNlLgAAAAAAAA1jcmVhdGVfYmFza2V0AAAAAAAABQAAAAAAAAAFYnV5ZXIAAAAAAAATAAAAAAAAAAZzZWxsZXIAAAAAABMAAAAAAAAAB2FyYml0ZXIAAAAAEwAAAAAAAAAGYXNzZXRzAAAAAAPqAAAH0AAAAAtFc2Nyb3dBc3NldAAAAAAAAAAAB3RpbWVvdXQAAAAABgAAAAEAAAPpAAAABgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
@@ -661,12 +709,17 @@ export class Client extends ContractClient {
         "AAAAAAAAAfVSZWxlYXNlIGEgcGFydGlhbCBgYW1vdW50YCB0byB0aGUgc2VsbGVyIG5vdy4gQnV5ZXItYXV0aG9yaXplZCwgbGlrZQpgcmVsZWFzZWA7IHNlbGxlcnMgdXNlIGByZXF1ZXN0X3JlbGVhc2VgLiBDbGVhcnMgYW55CnBlbmRpbmcgcmVsZWFzZSByZXF1ZXN0ICh0aGUgc2VsbGVyIG1heSByZXF1ZXN0IGFnYWluKS4KCk9ubHkgdmFsaWQgd2hpbGUgYEZ1bmRlZGAuIGBhbW91bnRgIG11c3QgYmUgcG9zaXRpdmUgYW5kIG11c3Qgbm90CmV4Y2VlZCB0aGUgcmVtYWluaW5nIGJhbGFuY2UuIFdoZW4gYGFtb3VudCA9PSByZW1haW5pbmdgLCB0aGUgZXNjcm93CnRyYW5zaXRpb25zIHRvIGBDb21wbGV0ZWRgIGluIHRoZSBzYW1lIGNhbGwuCgpUcmFuc2Zlci1iZWZvcmUtc3RhdGUgb3JkZXJpbmcgaXMgcHJlc2VydmVkOiB0aGUgdG9rZW4gcGF5b3V0IGhhcHBlbnMKYmVmb3JlIGFueSBzdG9yYWdlIHdyaXRlLCBzbyBhIGZhaWxlZCB0cmFuc2ZlciBsZWF2ZXMgbm8gcGFydGlhbCBzdGF0ZS4AAAAAAAAPcmVsZWFzZV9wYXJ0aWFsAAAAAAIAAAAAAAAACWVzY3Jvd19pZAAAAAAAAAYAAAAAAAAABmFtb3VudAAAAAAACwAAAAEAAAPpAAAAAgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAAAAAV9TZWxsZXIgYXNrcyB0byBiZSBwYWlkIGBhbW91bnRgIG9mIGEgc2luZ2xlLXRva2VuIGVzY3JvdyAoYWxsIG9mIHRoZQpyZW1haW5pbmcgYmFsYW5jZSwgb3IgcGFydCBvZiBpdCBmb3IgYSBtaWxlc3RvbmUpLiBOb3RoaW5nIG1vdmVzIHlldDoKdGhlIGJ1eWVyIGhhcyB0aGUgZXNjcm93J3MgcmV2aWV3IHdpbmRvdyB0byBhcHByb3ZlIG9yIGRpc3B1dGUsIGFmdGVyCndoaWNoIGFueW9uZSBtYXkgY2FsbCBgZXhlY3V0ZV9yZWxlYXNlYC4KClNlbGxlci1hdXRob3JpemVkLCBvbmx5IHdoaWxlIGBGdW5kZWRgLCBvbmx5IHVwIHRvIHRoZSBlc2Nyb3cncwpkZWFkbGluZSwgYW5kIG9uZSByZXF1ZXN0IGF0IGEgdGltZS4AAAAAD3JlcXVlc3RfcmVsZWFzZQAAAAACAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAAAAAAZhbW91bnQAAAAAAAsAAAABAAAD6QAAAAYAAAfQAAAACkZvcmdlRXJyb3IAAA==",
         "AAAAAQAAAZFBIGJhc2tldCBlc2Nyb3cgcmVjb3JkOiB0aGUgc2FtZSB0aHJlZS1wYXJ0eSBsaWZlY3ljbGUgYXMgW2BFc2Nyb3dEYXRhYF0sCndpdGggYW4gb3JkZXJlZCBsaXN0IG9mIGxlZ3MgaW5zdGVhZCBvZiBvbmUgdG9rZW4uCgpTdG9yZWQgYXQgW2BEYXRhS2V5OjpCYXNrZXRgXSwgYSBzZXBhcmF0ZSBrZXkgY2xhc3MgZnJvbQpbYERhdGFLZXk6OkVzY3Jvd2BdLCBzbyB0aGUgc2luZ2xlLXRva2VuIHJlY29yZCdzIHN0b3JlZCBzaGFwZSBhbmQgdGhlCmV2ZW50cyB0aGF0IGNhcnJ5IGl0IGFyZSB1bnRvdWNoZWQuIElkcyBjb21lIGZyb20gdGhlIHNhbWUKW2BEYXRhS2V5OjpDb3VudGBdIHNlcXVlbmNlLCBzbyBhbiBpZCBiZWxvbmdzIHRvIGV4YWN0bHkgb25lIGVzY3JvdyBvZgpleGFjdGx5IG9uZSBraW5kLgAAAAAAAAAAAAAQQmFza2V0RXNjcm93RGF0YQAAAAgAAABYTmV1dHJhbCBwYXJ0eSBkZWNpZGluZyBkaXNwdXRlcy4gUmVjb3JkZWQgYXQgY3JlYXRpb247IGF1dGhvcml6ZXMgb25seQpgcmVzb2x2ZV9iYXNrZXRgLgAAAAdhcmJpdGVyAAAAABMAAABgVGhlIGJhc2tldDogb25lIGxlZyBwZXIgdG9rZW4sIGluIHRoZSBvcmRlciB0aGUgYnV5ZXIgZGVjbGFyZWQuIE5vIHR3bwpsZWdzIG5hbWUgdGhlIHNhbWUgdG9rZW4uAAAABmFzc2V0cwAAAAAD6gAAB9AAAAALRXNjcm93QXNzZXQAAAAAOlBhcnR5IGZ1bmRpbmcgdGhlIGJhc2tldCBhbmQgdGhlIGRlZmF1bHQgcmVmdW5kIHJlY2lwaWVudC4AAAAAAAVidXllcgAAAAAAABMAAAAbVW5peCB0aW1lc3RhbXAgb2YgY3JlYXRpb24uAAAAAApjcmVhdGVkX2F0AAAAAAAGAAAAR1N0YWJsZSBpZCwgbmV2ZXIgcmV1c2VkLiBTaGFyZXMgdGhlIHNlcXVlbmNlIHdpdGggc2luZ2xlLXRva2VuIGVzY3Jvd3MuAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAFlBhcnR5IHBhaWQgb24gcmVsZWFzZS4AAAAAAAZzZWxsZXIAAAAAABMAAABBQ3VycmVudCBsaWZlY3ljbGUgc3RhdGUuIElkZW50aWNhbCBzZW1hbnRpY3MgdG8gW2BFc2Nyb3dTdGF0dXNgXS4AAAAAAAAGc3RhdHVzAAAAAAfQAAAADEVzY3Jvd1N0YXR1cwAAAD5TZWNvbmRzIGFmdGVyIGBjcmVhdGVkX2F0YCBhdCB3aGljaCB0aGUgYnV5ZXIgbWF5IHNlbGYtcmVmdW5kLgAAAAAAB3RpbWVvdXQAAAAABg==",
+        "AAAAAAAAAIhSZXR1cm4gdGhlIGNhbGxlci1zcGVjaWZpYyByZWFkLW9ubHkgYWN0aW9uIHN1bW1hcnkgZm9yIGEgc2luZ2xlLXRva2VuCmVzY3Jvdy4gVGhpcyBtZXRob2QgcGVyZm9ybXMgbm8gc3RvcmFnZSB3cml0ZXMgb3IgVFRMIGV4dGVuc2lvbnMuAAAAEmdldF9hY3Rpb25fc3VtbWFyeQAAAAAAAgAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAQAAA+kAAAfQAAAAE0VzY3Jvd0FjdGlvblN1bW1hcnkAAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAADFUaGUgcGVuZGluZyByZWxlYXNlIHJlcXVlc3Qgb2YgYW4gZXNjcm93LCBpZiBhbnkuAAAAAAAAE2dldF9yZWxlYXNlX3JlcXVlc3QAAAAAAQAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAEAAAPoAAAH0AAAAA5SZWxlYXNlUmVxdWVzdAAA",
+        "AAAAAQAAAERSZWFkLW9ubHksIGNhbGxlci1zcGVjaWZpYyB2aWV3IG9mIGFsbCBhY3Rpb25zIGFsbG93ZWQgb24gYW4gZXNjcm93LgAAAAAAAAATRXNjcm93QWN0aW9uU3VtbWFyeQAAAAAHAAAAAAAAAAdhY3Rpb25zAAAAA+oAAAfQAAAAF0VzY3Jvd0FjdGlvbkVsaWdpYmlsaXR5AAAAAAAAAAAIZGVhZGxpbmUAAAAGAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAAAAABNoYXNfcGVuZGluZ19yZXF1ZXN0AAAAAAEAAAAAAAAAEnBlbmRpbmdfcmVsZWFzZV9hdAAAAAAD6AAAAAYAAAAAAAAAFnBlbmRpbmdfcmVxdWVzdF9hbW91bnQAAAAAA+gAAAALAAAAAAAAAAZzdGF0dXMAAAAAB9AAAAAMRXNjcm93U3RhdHVz",
         "AAAAAAAAALJQYXkgYGFtb3VudGAgb2Ygb25lIGxlZyB0byB0aGUgc2VsbGVyIG5vdy4gQnV5ZXItYXV0aG9yaXplZC4gQ2xlYXJzIGFueQpwZW5kaW5nIHJlbGVhc2UgcmVxdWVzdC4KCkFsbCB2YWxpZGF0aW9uIGJlZm9yZSBhbnkgc3RhdGUgY2hhbmdlIG9yIHRyYW5zZmVyLCBtaXJyb3JpbmcKYHJlbGVhc2VfcGFydGlhbGAuAAAAAAAWcmVsZWFzZV9wYXJ0aWFsX2Jhc2tldAAAAAAAAwAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAAAAAAFdG9rZW4AAAAAAAATAAAAAAAAAAZhbW91bnQAAAAAAAsAAAABAAAD6QAAAAIAAAfQAAAACkZvcmdlRXJyb3IAAA==",
         "AAAAAAAAAGJTZWxsZXIgYXNrcyB0byBiZSBwYWlkIGV2ZXJ5IGxlZydzIHJlbWFpbmluZyBiYWxhbmNlIG9mIGEgYmFza2V0LiBTYW1lCnJ1bGVzIGFzIGByZXF1ZXN0X3JlbGVhc2VgLgAAAAAAFnJlcXVlc3RfcmVsZWFzZV9iYXNrZXQAAAAAAAEAAAAAAAAACWVzY3Jvd19pZAAAAAAAAAYAAAABAAAD6QAAAAYAAAfQAAAACkZvcmdlRXJyb3IAAA==",
         "AAAAAQAAAKpBIHBhZ2Ugb2YgZXNjcm93IGlkcyBpbnZvbHZpbmcgYSBwYXJ0aWNpcGFudC4KClJldHVybmVkIGJ5IFtgU29yb2JhbkZvcmdlRXNjcm93Ojplc2Nyb3dzX2Zvcl9wYXJ0aWNpcGFudGBdOyBwb3dlcmVkIGJ5CnRoZSBwZXItcGFydHkgcGVyc2lzdGVudCBpbmRleCB3cml0dGVuIGF0IGNyZWF0aW9uLgAAAAAAAAAAABZQYXJ0aWNpcGFudEVzY3Jvd3NQYWdlAAAAAAADAAAAK0VzY3JvdyBpZHMgb24gdGhpcyBwYWdlLCBpbiBjcmVhdGlvbiBvcmRlci4AAAAAA2lkcwAAAAPqAAAABgAAAH1PZmZzZXQgZm9yIHRoZSBuZXh0IHBhZ2UsIG9yIGBOb25lYCB3aGVuIGBpZHNgIGVuZHMgdGhlIHBhcnRpY2lwYW50J3MKbGlzdC4gUmVwbGF5IGl0IHVudGlsIGBOb25lYCB0byBpdGVyYXRlIHRoZSB3aG9sZSBsaXN0LgAAAAAAAAtuZXh0X2N1cnNvcgAAAAPoAAAABAAAADlUb3RhbCBlc2Nyb3dzIGludm9sdmluZyB0aGUgcGFydGljaXBhbnQgYWNyb3NzIGFsbCBwYWdlcy4AAAAAAAAFdG90YWwAAAAAAAAE",
         "AAAAAAAAAc9SZWFkIHRoZSBjdXJyZW50IGNyZWF0aW9uLW9yZGVyIGVzY3JvdyBpZHMgZm9yIGEgcGFydGljaXBhbnQgb25lIHBhZ2UKYXQgYSB0aW1lLiBDYW5jZWxsYXRpb24gcmVtb3ZlcyBpZHMgZnJvbSB0aGUgY29tcGFjdGVkIGluZGV4LiBBIGN1cnNvcgppcyBhbiBvZmZzZXQgaW50byB0aGUgY3VycmVudCBsaXN0OyBpZiBhbiBlYXJsaWVyIGlkIGlzIHJlbW92ZWQgYmV0d2VlbgpwYWdlcywgbGF0ZXIgaWRzIG1heSBzaGlmdCBiZWZvcmUgdGhlIGN1cnNvci4gUmVzdGFydCBhdCB6ZXJvIGFmdGVyCm11dGF0aW9ucyB0byBlbnVtZXJhdGUgdGhlIGN1cnJlbnQgbGlzdCBjb21wbGV0ZWx5LiBUaGlzIHZpZXcgaXRzZWxmCm5ldmVyIG11dGF0ZXMgc3RvcmFnZSBhbmQgbmV2ZXIgZXJyb3JzIOKAlCBhbiB1bmtub3duIGFkZHJlc3Mgb3Igb25lIHdpdGgKbm8gZXNjcm93cyBzaW1wbHkgeWllbGRzIGFuIGVtcHR5IHBhZ2UuAAAAABdlc2Nyb3dzX2Zvcl9wYXJ0aWNpcGFudAAAAAADAAAAAAAAAAtwYXJ0aWNpcGFudAAAAAATAAAAAAAAAAZjdXJzb3IAAAAAAAQAAAAAAAAABWxpbWl0AAAAAAAABAAAAAEAAAfQAAAAFlBhcnRpY2lwYW50RXNjcm93c1BhZ2UAAA==",
+        "AAAAAQAAAEdFbGlnaWJpbGl0eSBvZiBvbmUgYWN0aW9uIGZvciB0aGUgY2FsbGVyIHN1cHBsaWVkIHRvIHRoZSBzdW1tYXJ5IHF1ZXJ5LgAAAAAAAAAAF0VzY3Jvd0FjdGlvbkVsaWdpYmlsaXR5AAAAAAMAAAAAAAAABmFjdGlvbgAAAAAH0AAAAAxFc2Nyb3dBY3Rpb24AAAAAAAAACGVsaWdpYmxlAAAAAQAAAAAAAAAGcmVhc29uAAAAAAfQAAAAGUFjdGlvbkluZWxpZ2liaWxpdHlSZWFzb24AAAA=",
         "AAAAAAAAAPJDcmVhdGUgYW4gZXNjcm93IHdpdGggaXRzIG93biByZXZpZXcgd2luZG93OiBob3cgbG9uZyB0aGUgYnV5ZXIgaGFzCnRvIGRpc3B1dGUgYWZ0ZXIgdGhlIHNlbGxlciByZXF1ZXN0cyByZWxlYXNlLiBCdXllci1hdXRob3JpemVkLCBsaWtlCmBjcmVhdGVfZXNjcm93YC4gYHJldmlld19wZXJpb2RgIG11c3QgYmUgYmV0d2VlbgpbYE1JTl9SRVZJRVdfUEVSSU9EYF0gYW5kIFtgTUFYX1JFVklFV19QRVJJT0RgXSBzZWNvbmRzLgAAAAAAGWNyZWF0ZV9lc2Nyb3dfd2l0aF9yZXZpZXcAAAAAAAAHAAAAAAAAAAVidXllcgAAAAAAABMAAAAAAAAABnNlbGxlcgAAAAAAEwAAAAAAAAAHYXJiaXRlcgAAAAATAAAAAAAAAAV0b2tlbgAAAAAAABMAAAAAAAAABmFtb3VudAAAAAAACwAAAAAAAAAHdGltZW91dAAAAAAGAAAAAAAAAA1yZXZpZXdfcGVyaW9kAAAAAAAABgAAAAEAAAPpAAAABgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
+        "AAAAAAAAAEFSZXR1cm4gdGhlIGNhbGxlci1zcGVjaWZpYyByZWFkLW9ubHkgYWN0aW9uIHN1bW1hcnkgZm9yIGEgYmFza2V0LgAAAAAAABlnZXRfYmFza2V0X2FjdGlvbl9zdW1tYXJ5AAAAAAAAAgAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAQAAA+kAAAfQAAAAE0VzY3Jvd0FjdGlvblN1bW1hcnkAAAAH0AAAAApGb3JnZUVycm9yAAA=",
+        "AAAAAgAAAENTdGFibGUgbWFjaGluZS1yZWFkYWJsZSBlbGlnaWJpbGl0eSBtYXJrZXIgb3IgaW5lbGlnaWJpbGl0eSByZWFzb24uAAAAAAAAAAAZQWN0aW9uSW5lbGlnaWJpbGl0eVJlYXNvbgAAAAAAAAgAAAAAAAAAAAAAAAhFbGlnaWJsZQAAAAAAAAAAAAAACVdyb25nUm9sZQAAAAAAAAAAAAAAAAAAC1dyb25nU3RhdHVzAAAAAAAAAAAAAAAADkJlZm9yZURlYWRsaW5lAAAAAAAAAAAAAAAAAA1BZnRlckRlYWRsaW5lAAAAAAAAAAAAAAAAAAAUUmV2aWV3V2luZG93Tm90RW5kZWQAAAAAAAAAAAAAAA5SZWxlYXNlUGVuZGluZwAAAAAAAAAAAAAAAAAQTm9QZW5kaW5nUmVxdWVzdA==",
         "AAAABQAAAAAAAAAAAAAACERpc3B1dGVkAAAAAQAAAAhkaXNwdXRlZAAAAAIAAAAAAAAACWVzY3Jvd19pZAAAAAAAAAYAAAABAAAAAAAAAARkYXRhAAAH0AAAAApFc2Nyb3dEYXRhAAAAAAAAAAAAAg==",
         "AAAABQAAAAAAAAAAAAAACFJlZnVuZGVkAAAAAQAAAAhyZWZ1bmRlZAAAAAIAAAAAAAAACWVzY3Jvd19pZAAAAAAAAAYAAAABAAAAAAAAAARkYXRhAAAH0AAAAApFc2Nyb3dEYXRhAAAAAAAAAAAAAg==",
         "AAAABQAAAAAAAAAAAAAACFJlbGVhc2VkAAAAAQAAAAhyZWxlYXNlZAAAAAIAAAAAAAAACWVzY3Jvd19pZAAAAAAAAAYAAAABAAAAAAAAAARkYXRhAAAH0AAAAApFc2Nyb3dEYXRhAAAAAAAAAAAAAg==",
@@ -717,11 +770,13 @@ export class Client extends ContractClient {
         execute_release: this.txFromJSON<Result<void>>,
         release_partial: this.txFromJSON<Result<void>>,
         request_release: this.txFromJSON<Result<u64>>,
+        get_action_summary: this.txFromJSON<Result<EscrowActionSummary>>,
         get_release_request: this.txFromJSON<Option<ReleaseRequest>>,
         release_partial_basket: this.txFromJSON<Result<void>>,
         request_release_basket: this.txFromJSON<Result<u64>>,
         escrows_for_participant: this.txFromJSON<ParticipantEscrowsPage>,
-        create_escrow_with_review: this.txFromJSON<Result<u64>>
+        create_escrow_with_review: this.txFromJSON<Result<u64>>,
+        get_basket_action_summary: this.txFromJSON<Result<EscrowActionSummary>>
   }
 }
 
