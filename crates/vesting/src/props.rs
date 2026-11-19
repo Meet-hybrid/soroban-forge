@@ -4,7 +4,7 @@
 //! module systematically tests the contract's fund-safety, arithmetic conservation,
 //! and monotonicity invariants over large spaces of generated inputs.
 //!
-//! Six property invariants are exercised:
+//! Seven property invariants are exercised:
 //!
 //! **P1 — Total Conservation & Residue Safety.** For random amounts, cliffs,
 //! and durations: across arbitrary sequences of timestamps and interleaved claims,
@@ -40,6 +40,11 @@
 //! over time and equals the exact partial sum of unlocked-but-unclaimed
 //! tranches — 0 before the first offset, exact step sums between offsets,
 //! and the full unlockable total at/after the last reachable offset.
+//!
+//! **P7 — Revoke, Claim, and Reassignment Conservation.** For random linear
+//! schedules: claims before and after revocation plus reassigned-beneficiary
+//! payouts never exceed the original allocation; revoked value never becomes
+//! claimable, and repeated terminal operations do not release more value.
 //!
 //! Runs are deterministic with reproducible seeds. Override the case count with
 //! `PROPTEST_CASES=n cargo test -p soroban-forge-vesting props`.
@@ -137,6 +142,10 @@ impl World {
     fn pool_total(&self) -> i128 {
         let (b, c) = self.pool();
         b + c
+    }
+
+    fn balance(&self, account: &Address) -> i128 {
+        self.token_client().balance(account)
     }
 }
 
@@ -356,6 +365,237 @@ proptest! {
             w.vesting_client().get_status(&id),
             VestingStatus::Completed,
             "status must be Completed after full claim"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// P7 — Revoke, Claim, and Reassignment Conservation
+// -----------------------------------------------------------------------
+//
+// These scenarios intentionally assert value conservation, not vesting
+// rounding behavior; floor-division residue remains covered by P1 and tests.rs.
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn p7_revoke_claim_and_reassignment_conservation(
+        (total_amount, cliff, duration) in arb_schedule_params(),
+        claim_sample in 0u64..=MAX_DURATION,
+        revoke_sample in 0u64..=MAX_DURATION,
+        reassign_sample in 0u64..=MAX_DURATION,
+    ) {
+        let revoke_elapsed = revoke_sample.min(duration.saturating_sub(1));
+        let claim_elapsed = claim_sample.min(revoke_elapsed);
+        let reassign_elapsed = reassign_sample.min(duration.saturating_sub(1));
+
+        // Claim before revocation, then claim the frozen remainder later.
+        let revoked_after_claim = setup_world();
+        revoked_after_claim.mint_to_contract(total_amount);
+        let revoked_after_claim_id =
+            revoked_after_claim.create(total_amount, cliff, duration);
+
+        revoked_after_claim.env.ledger().set_timestamp(START + claim_elapsed);
+        let claimed_before_revoke = revoked_after_claim
+            .vesting_client()
+            .claim(&revoked_after_claim_id);
+        prop_assert!(
+            claimed_before_revoke <= total_amount,
+            "a pre-revocation claim must not exceed the allocation"
+        );
+
+        revoked_after_claim.env.ledger().set_timestamp(START + revoke_elapsed);
+        revoked_after_claim
+            .vesting_client()
+            .revoke(&revoked_after_claim_id);
+        let frozen_vested = revoked_after_claim
+            .vesting_client()
+            .get_schedule(&revoked_after_claim_id)
+            .revoked_vested
+            .expect("successful revocation must freeze a vested amount");
+        prop_assert!(
+            frozen_vested >= claimed_before_revoke && frozen_vested <= total_amount,
+            "frozen vested value must include prior claims and stay within the allocation"
+        );
+
+        revoked_after_claim
+            .env
+            .ledger()
+            .set_timestamp(START + duration + 1);
+        let claim_after_revoke = revoked_after_claim
+            .vesting_client()
+            .claim(&revoked_after_claim_id);
+        prop_assert_eq!(
+            claim_after_revoke,
+            frozen_vested - claimed_before_revoke,
+            "a later claim may release only the vested amount frozen at revocation"
+        );
+        let paid_after_revoke = claimed_before_revoke + claim_after_revoke;
+        prop_assert!(
+            paid_after_revoke <= total_amount,
+            "total released value must never exceed the original allocation"
+        );
+        prop_assert_eq!(
+            revoked_after_claim.balance(&revoked_after_claim.beneficiary)
+                + revoked_after_claim.balance(&revoked_after_claim.vesting),
+            total_amount,
+            "beneficiary and contract balances must conserve the allocation"
+        );
+
+        let revoked_schedule = revoked_after_claim
+            .vesting_client()
+            .get_schedule(&revoked_after_claim_id);
+        prop_assert_eq!(
+            revoked_after_claim
+                .vesting_client()
+                .claim(&revoked_after_claim_id),
+            0,
+            "a repeated post-revocation claim must release nothing"
+        );
+        prop_assert_eq!(
+            revoked_after_claim
+                .vesting_client()
+                .try_revoke(&revoked_after_claim_id)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput,
+            "a repeated revoke must be rejected"
+        );
+        let revoked_schedule_after_repeat = revoked_after_claim
+            .vesting_client()
+            .get_schedule(&revoked_after_claim_id);
+        prop_assert_eq!(
+            revoked_schedule_after_repeat.revoked_vested,
+            revoked_schedule.revoked_vested,
+            "a repeated revoke must not change the frozen amount"
+        );
+        prop_assert_eq!(revoked_schedule_after_repeat.claimed, paid_after_revoke);
+        prop_assert_eq!(
+            revoked_after_claim.balance(&revoked_after_claim.beneficiary)
+                + revoked_after_claim.balance(&revoked_after_claim.vesting),
+            total_amount,
+            "repeated terminal operations must not change the conserved pool"
+        );
+
+        // Revoke first, then advance beyond the original schedule: only the
+        // frozen value can ever be claimed.
+        let revoked_before_claim = setup_world();
+        revoked_before_claim.mint_to_contract(total_amount);
+        let revoked_before_claim_id =
+            revoked_before_claim.create(total_amount, cliff, duration);
+        revoked_before_claim
+            .env
+            .ledger()
+            .set_timestamp(START + revoke_elapsed);
+        revoked_before_claim
+            .vesting_client()
+            .revoke(&revoked_before_claim_id);
+        let frozen_without_prior_claims = revoked_before_claim
+            .vesting_client()
+            .get_schedule(&revoked_before_claim_id)
+            .revoked_vested
+            .expect("successful revocation must freeze a vested amount");
+        revoked_before_claim
+            .env
+            .ledger()
+            .set_timestamp(START + duration + 1);
+        let first_post_revoke_claim = revoked_before_claim
+            .vesting_client()
+            .claim(&revoked_before_claim_id);
+        prop_assert_eq!(first_post_revoke_claim, frozen_without_prior_claims);
+        prop_assert_eq!(
+            revoked_before_claim
+                .vesting_client()
+                .claim(&revoked_before_claim_id),
+            0,
+            "a repeated claim after draining revoked value must be a no-op"
+        );
+        prop_assert!(
+            revoked_before_claim.balance(&revoked_before_claim.beneficiary)
+                <= total_amount,
+            "a post-revocation claim must not release revoked value"
+        );
+        prop_assert_eq!(
+            revoked_before_claim.balance(&revoked_before_claim.beneficiary)
+                + revoked_before_claim.balance(&revoked_before_claim.vesting),
+            total_amount,
+            "revoke-first flow must conserve the allocation"
+        );
+
+        // Reassignment preserves the old beneficiary's claimed and vested
+        // amounts while leaving only the future remainder to the new one.
+        let reassigned = setup_world();
+        reassigned.mint_to_contract(total_amount);
+        let reassigned_id = reassigned.create(total_amount, cliff, duration);
+        let new_beneficiary = Address::generate(&reassigned.env);
+
+        let prior_claim_elapsed = claim_elapsed.min(reassign_elapsed);
+        reassigned
+            .env
+            .ledger()
+            .set_timestamp(START + prior_claim_elapsed);
+        let claimed_before_reassignment =
+            reassigned.vesting_client().claim(&reassigned_id);
+
+        reassigned
+            .env
+            .ledger()
+            .set_timestamp(START + reassign_elapsed);
+        let remaining_for_old_beneficiary =
+            reassigned.vesting_client().claimable(&reassigned_id);
+        let old_beneficiary_vested =
+            claimed_before_reassignment + remaining_for_old_beneficiary;
+        reassigned
+            .vesting_client()
+            .reassign_beneficiary(&reassigned_id, &new_beneficiary);
+        prop_assert_eq!(
+            reassigned.vesting_client().claimable(&reassigned_id),
+            0,
+            "reassignment must not give the new beneficiary the old beneficiary's accrued value"
+        );
+
+        let old_beneficiary_claim = reassigned
+            .vesting_client()
+            .claim_for(&reassigned_id, &reassigned.beneficiary);
+        prop_assert_eq!(old_beneficiary_claim, remaining_for_old_beneficiary);
+        prop_assert_eq!(
+            reassigned.balance(&reassigned.beneficiary),
+            old_beneficiary_vested,
+            "the former beneficiary must retain all value vested before reassignment"
+        );
+
+        reassigned
+            .env
+            .ledger()
+            .set_timestamp(START + duration + 1);
+        let new_beneficiary_claim = reassigned
+            .vesting_client()
+            .claim(&reassigned_id);
+        prop_assert_eq!(
+            new_beneficiary_claim,
+            total_amount - old_beneficiary_vested,
+            "the new beneficiary receives only the allocation remaining after reassignment"
+        );
+        prop_assert_eq!(
+            reassigned
+                .vesting_client()
+                .claim(&reassigned_id),
+            0,
+            "a repeated claim after reassignment must be a no-op"
+        );
+        prop_assert_eq!(
+            reassigned.balance(&reassigned.beneficiary)
+                + reassigned.balance(&new_beneficiary)
+                + reassigned.balance(&reassigned.vesting),
+            total_amount,
+            "old, new, and contract balances must conserve the original allocation"
+        );
+        prop_assert_eq!(
+            reassigned.balance(&reassigned.beneficiary)
+                + reassigned.balance(&new_beneficiary),
+            total_amount,
+            "total released value across both beneficiaries must equal the allocation"
         );
     }
 }

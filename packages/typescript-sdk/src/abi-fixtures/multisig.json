@@ -188,6 +188,18 @@
       ]
     },
     {
+      "name": "get_tx_preview",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:TxPreview,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_window_usage",
       "inputs": [
         {
@@ -742,6 +754,28 @@
           "types": [
             "udt:Call"
           ]
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "TxPreview",
+      "fields": [
+        {
+          "name": "approvals",
+          "type": "u32"
+        },
+        {
+          "name": "approvals_remaining",
+          "type": "u32"
+        },
+        {
+          "name": "status",
+          "type": "udt:TxStatus"
+        },
+        {
+          "name": "threshold",
+          "type": "u32"
         }
       ]
     },
