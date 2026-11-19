@@ -10,10 +10,14 @@ repository.workspace = true
 name = "composition_tests"
 doctest = false
 
-# Only include minimal dependencies needed for basic testing
 [dev-dependencies]
 soroban-sdk.workspace = true
 soroban-forge-dao-governance = { path = "../dao-governance" }
+soroban-forge-escrow = { path = "../escrow" }
+soroban-forge-marketplace-royalties = { path = "../marketplace-royalties" }
+soroban-forge-multi-sig-wallet = { path = "../multi-sig-wallet" }
 soroban-forge-shared-utils = { path = "../shared-utils" }
+soroban-forge-subscription-payments = { path = "../subscription-payments" }
 soroban-forge-test-utils = { path = "../test-utils" }
+soroban-forge-vesting = { path = "../vesting" }
 proptest = "1.0"
