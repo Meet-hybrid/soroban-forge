@@ -25,6 +25,7 @@ fn resolve(escrow_id, in_favor_of_seller) -> Result<(), ForgeError>
 fn cancel(escrow_id) -> Result<(), ForgeError>
 fn get_status(escrow_id) -> Result<EscrowStatus, ForgeError>   // either record kind
 fn get_escrow(escrow_id) -> Result<EscrowData, ForgeError>     // single-token records
+fn get_action_summary(escrow_id, caller) -> Result<EscrowActionSummary, ForgeError>
 fn escrows_for_participant(participant, cursor, limit) -> ParticipantEscrowsPage
 fn touch_ttl(escrow_id) -> Result<(), ForgeError>              // either record kind
 
@@ -39,7 +40,37 @@ fn dispute_basket(escrow_id, claimant) -> Result<(), ForgeError>
 fn resolve_basket(escrow_id, in_favor_of_seller) -> Result<(), ForgeError>
 fn cancel_basket(escrow_id) -> Result<(), ForgeError>
 fn get_basket(escrow_id) -> Result<BasketEscrowData, ForgeError> // basket records
+fn get_basket_action_summary(escrow_id, caller) -> Result<EscrowActionSummary, ForgeError>
 ```
+
+## Action Eligibility Summary
+
+`get_action_summary(escrow_id, caller)` returns a read-only, caller-specific
+summary of the actions available on an escrow. It accepts either record kind;
+`get_basket_action_summary` is the basket-specific query and returns `NotFound`
+for a single-token id. Both queries return `NotFound` for unknown or expired
+ids and do not write storage, extend TTLs, or move tokens.
+
+The response includes the lifecycle status, `created_at + timeout` deadline,
+`has_pending_request`, and the optional `pending_request_amount` and
+`pending_release_at` fields. It also includes one
+`{ action, eligible, reason }` entry for each action offered by that record
+kind. Single-token action identifiers match the entrypoints:
+`Deposit`, `RequestRelease`, `ApproveRelease`, `ExecuteRelease`, `Release`,
+`ReleasePartial`, `Refund`, `RefundExpired`, `Dispute`, `Resolve`,
+`ResolveSplit`, and `Cancel`. Basket-only entrypoints use their
+`...Basket` identifiers; `ApproveRelease` and `ExecuteRelease` are shared by
+both record kinds.
+
+An eligible action has `reason: Eligible`. Ineligible actions have a stable
+reason identifier: `WrongRole`, `WrongStatus`, `BeforeDeadline`,
+`AfterDeadline`, `ReviewWindowNotEnded`, `ReleasePending`, or
+`NoPendingRequest`. The summary uses the contract's same deadline,
+refund-authorizer, pending-request, and review-window checks as the
+state-changing entrypoints. It describes contract-level eligibility only; it
+cannot indicate whether a caller has provided the required authorization
+signature or whether an action-specific argument (such as a partial amount) is
+valid.
 
 ## Multi-Asset Baskets
 

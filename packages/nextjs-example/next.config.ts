@@ -5,7 +5,7 @@ const nextConfig = {
   reactStrictMode: true,
   transpilePackages: ["@soroban-forge/escrow-client"],
   turbopack: {
-    root: path.resolve(__dirname, ".."),
+    root: path.resolve(__dirname, "../.."),
   },
 };
 

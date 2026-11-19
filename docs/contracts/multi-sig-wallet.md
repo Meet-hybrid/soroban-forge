@@ -16,6 +16,7 @@ fn confirm(tx_id: u64, signer: Address) -> Result<(), ForgeError>
 fn reject(tx_id: u64, signer: Address) -> Result<(), ForgeError>
 fn execute(tx_id: u64) -> Result<(), ForgeError>
 fn get_tx(tx_id: u64) -> Result<WalletTx, ForgeError>
+fn get_tx_preview(tx_id: u64) -> Result<TxPreview, ForgeError>
 fn is_live(tx_id: u64) -> bool
 fn is_tx_live(tx_id: u64) -> bool
 fn add_owner(proposer: Address, new_owner: Address) -> Result<u64, ForgeError>
@@ -67,6 +68,7 @@ fn get_transactions_by_status(
     offset: u32,
     limit: u32,
 ) -> Result<Vec<WalletTx>, ForgeError>
+fn get_tx_preview(tx_id: u64) -> Result<TxPreview, ForgeError>
 ```
 
 Both return transactions in ascending `tx_id` order. For
@@ -78,6 +80,12 @@ past the end return an empty vector or the remaining records. A `limit` of
 zero returns `ForgeError::InvalidInput`. An uninitialized or empty wallet
 returns an empty vector for a positive limit. These views do not require
 authorization and do not modify contract state.
+
+`get_tx_preview` returns a `TxPreview` with the transaction `status`, current
+wallet `threshold`, number of recorded distinct `approvals`, and
+`approvals_remaining` (zero once the threshold is met). Its status follows the
+same lazy expiry evaluation as `get_tx`; an unknown transaction ID returns
+`ForgeError::NotFound`. This view is read-only and requires no authorization.
 
 Additional views: `get_threshold`, `get_owners`, `is_owner`,
 `get_confirmations`, `get_rejections`, `get_tx_count`, `get_tx`, and the
