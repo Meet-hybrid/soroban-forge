@@ -36,6 +36,38 @@ The event consumer supports filtering by:
 
 The filter logic is deterministic and sorts normalized events before filtering so replays remain idempotent.
 
+## Checkpoints and recovery
+
+The TypeScript SDK exposes a versioned JSON checkpoint for consumers that persist
+their own indexed events. A checkpoint stores the exact network identity, the
+sorted contract ID set, and the last indexed cursor (`ledger`, `eventIndex`,
+and `pagingToken`). Pass the same identity and the saved checkpoint when
+restarting:
+
+```ts
+const identity = {
+  network: "Test SDF Network ; September 2015",
+  contractIds: ["<CONTRACT_ID>"],
+};
+const indexer = createIndexer({ ...identity, checkpoint: savedCheckpointJson });
+const resumeAfter = indexer.cursor();
+```
+
+Save progress using `serializeIndexerCheckpoint(indexer.checkpoint()!)`. The
+checkpoint is JSON and can be loaded with `parseIndexerCheckpoint(json,
+identity)` before startup. Checkpoint loading fails closed if the JSON or
+cursor is malformed, the network or contract set differs, or the schema
+version is unsupported. The error identifies the mismatch and instructs the
+operator to restore a compatible checkpoint or deliberately discard it.
+
+On an incompatibility, do not edit the checkpoint to force startup. To recover,
+first decide whether existing indexed events can be retained; then deliberately
+remove the checkpoint and rebuild from the required starting ledger, or restore
+the matching network/contract configuration and a compatible checkpoint.
+Rebuilding from an earlier ledger is safe because normalized event IDs are
+deduplicated. Persist the returned checkpoint only after the corresponding
+events have been durably stored.
+
 ## Fixture mode
 
 The project keeps canonical fixture snapshots under `indexer/fixtures/*.json`. The TypeScript indexer can load them directly without a live RPC connection:

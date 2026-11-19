@@ -17,6 +17,154 @@ export interface EventFilter {
   includeMalformed?: boolean;
 }
 
+export const INDEXER_CHECKPOINT_SCHEMA_VERSION = 1;
+
+export interface IndexerCheckpoint {
+  schemaVersion: number;
+  network: string;
+  contractIds: string[];
+  cursor: IndexerCursor;
+}
+
+export interface IndexerIdentity {
+  network: string;
+  contractIds: ReadonlyArray<string>;
+}
+
+function checkpointError(reason: string): Error {
+  return new Error(
+    `Invalid indexer checkpoint: ${reason}. Refusing to resume. Deliberately discard the checkpoint and rebuild from the required starting ledger, or restore a compatible checkpoint.`,
+  );
+}
+
+function canonicalContractIds(contractIds: ReadonlyArray<unknown>): string[] {
+  if (!Array.isArray(contractIds) || contractIds.length === 0) {
+    throw checkpointError("contractIds must contain at least one contract ID");
+  }
+  const normalized: string[] = [];
+  for (const contractId of contractIds) {
+    if (typeof contractId !== "string" || contractId.trim().length === 0) {
+      throw checkpointError(
+        "contractIds must contain only non-empty contract IDs",
+      );
+    }
+    normalized.push(contractId.trim());
+  }
+  return Array.from(new Set(normalized)).sort();
+}
+
+function validateCheckpoint(
+  value: unknown,
+  identity: IndexerIdentity,
+): IndexerCheckpoint {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw checkpointError("checkpoint must be a JSON object");
+  }
+
+  const checkpoint = value as Record<string, unknown>;
+  if (checkpoint.schemaVersion !== INDEXER_CHECKPOINT_SCHEMA_VERSION) {
+    throw checkpointError(
+      `schema version ${String(checkpoint.schemaVersion)} is unsupported; expected ${INDEXER_CHECKPOINT_SCHEMA_VERSION}`,
+    );
+  }
+
+  if (
+    typeof identity.network !== "string" ||
+    identity.network.trim().length === 0
+  ) {
+    throw checkpointError("the configured network identity is empty");
+  }
+  const expectedContractIds = canonicalContractIds(identity.contractIds);
+
+  if (typeof checkpoint.network !== "string" || checkpoint.network.length === 0) {
+    throw checkpointError("network identity is missing or malformed");
+  }
+  if (checkpoint.network !== identity.network) {
+    throw checkpointError(
+      `network mismatch (checkpoint: '${checkpoint.network}', configured: '${identity.network}')`,
+    );
+  }
+  if (!Array.isArray(checkpoint.contractIds)) {
+    throw checkpointError("contractIds are missing or malformed");
+  }
+  const storedContractIds = canonicalContractIds(checkpoint.contractIds);
+  if (
+    storedContractIds.length !== expectedContractIds.length ||
+    storedContractIds.some(
+      (contractId, index) => contractId !== expectedContractIds[index],
+    )
+  ) {
+    throw checkpointError(
+      `contract set mismatch (checkpoint: [${storedContractIds.join(", ")}], configured: [${expectedContractIds.join(", ")}])`,
+    );
+  }
+
+  const cursor = checkpoint.cursor;
+  if (typeof cursor !== "object" || cursor === null || Array.isArray(cursor)) {
+    throw checkpointError("cursor is missing or malformed");
+  }
+  const storedCursor = cursor as Record<string, unknown>;
+  if (
+    !Number.isSafeInteger(storedCursor.ledger) ||
+    (storedCursor.ledger as number) < 0 ||
+    !Number.isSafeInteger(storedCursor.eventIndex) ||
+    (storedCursor.eventIndex as number) < 0 ||
+    (storedCursor.pagingToken !== undefined &&
+      (typeof storedCursor.pagingToken !== "string" ||
+        storedCursor.pagingToken.length === 0))
+  ) {
+    throw checkpointError(
+      "cursor must contain valid non-negative ledger and eventIndex values",
+    );
+  }
+
+  return {
+    schemaVersion: INDEXER_CHECKPOINT_SCHEMA_VERSION,
+    network: identity.network,
+    contractIds: expectedContractIds,
+    cursor: {
+      ledger: storedCursor.ledger as number,
+      eventIndex: storedCursor.eventIndex as number,
+      ...(storedCursor.pagingToken === undefined
+        ? {}
+        : { pagingToken: storedCursor.pagingToken as string }),
+    },
+  };
+}
+
+export function serializeIndexerCheckpoint(
+  checkpoint: IndexerCheckpoint,
+): string {
+  if (typeof checkpoint !== "object" || checkpoint === null) {
+    throw checkpointError("checkpoint must be a JSON object");
+  }
+  const value = checkpoint as unknown as Record<string, unknown>;
+  if (typeof value.network !== "string") {
+    throw checkpointError("network identity is missing or malformed");
+  }
+  const validated = validateCheckpoint(checkpoint, {
+    network: value.network,
+    contractIds: canonicalContractIds(
+      Array.isArray(value.contractIds) ? value.contractIds : [],
+    ),
+  });
+  return JSON.stringify(validated);
+}
+
+export function parseIndexerCheckpoint(
+  serialized: string,
+  identity: IndexerIdentity,
+): IndexerCheckpoint {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw checkpointError(`checkpoint JSON could not be parsed (${detail})`);
+  }
+  return validateCheckpoint(parsed, identity);
+}
+
 export interface ContractEventRecord {
   type: "contract" | string;
   contractId: string;
@@ -358,9 +506,35 @@ export function filterEvents(
 }
 
 export function createIndexer(
-  options: { events?: ReadonlyArray<unknown> } = {},
+  options: {
+    events?: ReadonlyArray<unknown>;
+    network?: string;
+    contractIds?: ReadonlyArray<string>;
+    checkpoint?: IndexerCheckpoint | string;
+  } = {},
 ) {
   const items = normalizeEvents(options.events ?? []);
+  const identity =
+    options.network === undefined || options.contractIds === undefined
+      ? undefined
+      : {
+          network: options.network,
+          contractIds: canonicalContractIds(options.contractIds),
+        };
+  let resumeCursor: IndexerCursor | undefined;
+
+  if (options.checkpoint !== undefined) {
+    if (!identity) {
+      throw checkpointError(
+        "network and contractIds must be configured before loading a checkpoint",
+      );
+    }
+    const checkpoint =
+      typeof options.checkpoint === "string"
+        ? parseIndexerCheckpoint(options.checkpoint, identity)
+        : validateCheckpoint(options.checkpoint, identity);
+    resumeCursor = checkpoint.cursor;
+  }
 
   return {
     events: items,
@@ -368,18 +542,67 @@ export function createIndexer(
       return filterEvents(items, filter);
     },
     append(newEvents: ReadonlyArray<unknown>) {
-      const merged = normalizeEvents([...items, ...newEvents]);
-      return createIndexer({ events: merged });
+      const currentCursor =
+        items.length === 0 ? resumeCursor : this.cursor();
+      const newItems = currentCursor
+        ? filterEvents(newEvents, { after: currentCursor })
+        : normalizeEvents(newEvents);
+      const merged = normalizeEvents([...items, ...newItems]);
+      return createIndexer({
+        events: merged,
+        ...(identity
+          ? {
+              network: identity.network,
+              contractIds: identity.contractIds,
+              ...(currentCursor
+                ? {
+                    checkpoint: {
+                      schemaVersion: INDEXER_CHECKPOINT_SCHEMA_VERSION,
+                      network: identity.network,
+                      contractIds: identity.contractIds,
+                      cursor: currentCursor,
+                    },
+                  }
+                : {}),
+            }
+          : {}),
+      });
     },
     cursor(): IndexerCursor | undefined {
       if (items.length === 0) {
-        return undefined;
+        return resumeCursor;
       }
       const last = items[items.length - 1];
-      return {
+      const eventCursor = {
         ledger: last.ledger,
         eventIndex: last.eventIndex,
         pagingToken: last.pagingToken,
+      };
+      if (
+        !resumeCursor ||
+        eventCursor.ledger > resumeCursor.ledger ||
+        (eventCursor.ledger === resumeCursor.ledger &&
+          eventCursor.eventIndex >= resumeCursor.eventIndex)
+      ) {
+        return eventCursor;
+      }
+      return resumeCursor;
+    },
+    checkpoint(): IndexerCheckpoint | undefined {
+      const cursor = this.cursor();
+      if (!cursor) {
+        return undefined;
+      }
+      if (!identity) {
+        throw checkpointError(
+          "network and contractIds must be configured before saving a checkpoint",
+        );
+      }
+      return {
+        schemaVersion: INDEXER_CHECKPOINT_SCHEMA_VERSION,
+        network: identity.network,
+        contractIds: identity.contractIds,
+        cursor,
       };
     },
   };
@@ -460,6 +683,8 @@ export const readFixtureEvents = loadFixtureEvents;
 
 export const indexer = {
   createIndexer,
+  parseIndexerCheckpoint,
+  serializeIndexerCheckpoint,
   normalizeEvents,
   filterEvents,
   loadFixtureEvents,

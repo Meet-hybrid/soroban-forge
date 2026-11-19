@@ -7,6 +7,8 @@ import {
   loadFixtureEvents,
   normalizeEvents,
   deriveEventType,
+  parseIndexerCheckpoint,
+  serializeIndexerCheckpoint,
   type ContractEventRecord,
 } from "../indexer.js";
 
@@ -67,5 +69,114 @@ test("vesting fixture is loadable through the public indexer aliases", () => {
   assert.ok(
     events.every((event) => event.contractId.length > 0),
     "all vesting events should have a contract id",
+  );
+});
+
+test("checkpoint resume preserves the cursor and avoids replaying indexed events", () => {
+  const [first, second] = loadFixtureEvents("escrow");
+  assert.ok(first);
+  assert.ok(second);
+  const identity = {
+    network: "Test SDF Network ; September 2015",
+    contractIds: [first.contractId],
+  };
+  const initial = createIndexer({ events: [first], ...identity });
+  const serializedCheckpoint = serializeIndexerCheckpoint(
+    initial.checkpoint()!,
+  );
+  const resumed = createIndexer({
+    ...identity,
+    checkpoint: serializedCheckpoint,
+  });
+
+  assert.deepEqual(resumed.cursor(), initial.cursor());
+  const replayed = resumed.append([first, second]);
+  assert.deepEqual(
+    replayed.events.map((event) => event.id),
+    [second.id],
+  );
+  assert.deepEqual(replayed.cursor(), {
+    ledger: second.ledger,
+    eventIndex: second.eventIndex,
+    pagingToken: second.pagingToken,
+  });
+});
+
+test("checkpoint rejects a different network", () => {
+  const event = loadFixtureEvents("escrow")[0];
+  assert.ok(event);
+  const checkpoint = serializeIndexerCheckpoint(
+    createIndexer({
+      events: [event],
+      network: "testnet",
+      contractIds: [event.contractId],
+    }).checkpoint()!,
+  );
+
+  assert.throws(
+    () =>
+      parseIndexerCheckpoint(checkpoint, {
+        network: "mainnet",
+        contractIds: [event.contractId],
+      }),
+    /network mismatch/,
+  );
+});
+
+test("checkpoint rejects a changed contract set", () => {
+  const event = loadFixtureEvents("escrow")[0];
+  assert.ok(event);
+  const checkpoint = serializeIndexerCheckpoint(
+    createIndexer({
+      events: [event],
+      network: "testnet",
+      contractIds: [event.contractId],
+    }).checkpoint()!,
+  );
+
+  assert.throws(
+    () =>
+      parseIndexerCheckpoint(checkpoint, {
+        network: "testnet",
+        contractIds: [event.contractId, "COTHER"],
+      }),
+    /contract set mismatch/,
+  );
+});
+
+test("checkpoint rejects malformed persisted data", () => {
+  const identity = { network: "testnet", contractIds: ["CCONTRACT"] };
+  assert.throws(
+    () => parseIndexerCheckpoint("{", identity),
+    /could not be parsed/,
+  );
+  assert.throws(
+    () =>
+      parseIndexerCheckpoint(
+        JSON.stringify({
+          schemaVersion: 1,
+          network: "testnet",
+          contractIds: ["CCONTRACT"],
+          cursor: { ledger: -1, eventIndex: 0 },
+        }),
+        identity,
+      ),
+    /cursor must contain valid/,
+  );
+});
+
+test("checkpoint rejects an unsupported schema version", () => {
+  assert.throws(
+    () =>
+      parseIndexerCheckpoint(
+        JSON.stringify({
+          schemaVersion: 2,
+          network: "testnet",
+          contractIds: ["CCONTRACT"],
+          cursor: { ledger: 1, eventIndex: 0 },
+        }),
+        { network: "testnet", contractIds: ["CCONTRACT"] },
+      ),
+    /schema version 2 is unsupported/,
   );
 });
