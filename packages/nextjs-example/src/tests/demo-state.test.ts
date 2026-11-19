@@ -7,6 +7,7 @@ import {
   DEMO_STATE_VERSION,
   DemoStateValidationError,
   emptyDemoState,
+  importDemoState,
   loadDemoState,
   parseDemoStateExport,
   parseStoredDemoState,
@@ -33,18 +34,19 @@ class MemoryStorage implements DemoStorage {
   }
 }
 
+function strkey(prefix: "G" | "C"): string {
+  return `${prefix}${"A".repeat(55)}`;
+}
+
 function sampleState(): DemoState {
   return {
-    buyer: "GBUYEREXAMPLE0000000000000000000000000000000000000000000000000",
-    seller: "GSELLEREXAMPLE00000000000000000000000000000000000000000000000",
-    arbiter: "GARBiterEXAMPLE0000000000000000000000000000000000000000000000",
+    buyer: strkey("G"),
+    seller: strkey("G"),
+    arbiter: strkey("G"),
     token:
       "CBJQ53EOHB5MWSS7CETN523WILLNVS7NQAQQAQIS5QAYTPRCZSGKL23O",
     amount: "25000000",
     timeoutSecs: "7200",
-    createdId: "42",
-    actionEscrowId: "42",
-    readEscrowId: "42",
     resolveFavor: "buyer",
   };
 }
@@ -68,17 +70,26 @@ test("creates and parses a valid versioned local demo state export", () => {
   assert.equal(document.exportedAt, "2026-11-19T12:34:56.000Z");
   assert.match(String(document.label), /local browser demo state/i);
   assert.deepEqual(parseDemoStateExport(json), state);
+  assert.doesNotMatch(json, /createdId|actionEscrowId|readEscrowId/);
   assert.doesNotMatch(json, /signedTxXdr|privateKey|secretKey|mnemonic/i);
 });
 
-test("validates stored legacy state before use", () => {
+test("validates stored legacy state and ignores transient chain references", () => {
   const storage = new MemoryStorage();
-  storage.setItem(DEMO_STATE_STORAGE_KEY, JSON.stringify(sampleState()));
+  storage.setItem(
+    DEMO_STATE_STORAGE_KEY,
+    JSON.stringify({
+      ...sampleState(),
+      createdId: "42",
+      actionEscrowId: "42",
+      readEscrowId: "42",
+    })
+  );
 
   assert.deepEqual(loadDemoState(storage), sampleState());
 });
 
-test("rejects malformed stored and exported data", () => {
+test("rejects malformed, secret-bearing, and semantically invalid data", () => {
   assert.throws(
     () => parseStoredDemoState("{not json"),
     expectsCode("invalid_json")
@@ -88,7 +99,37 @@ test("rejects malformed stored and exported data", () => {
     expectsCode("invalid_state")
   );
   assert.throws(
-    () => parseStoredDemoState('{"buyer":"x","privateKey":"y"}'),
+    () =>
+      parseStoredDemoState(
+        JSON.stringify({ ...sampleState(), privateKey: "secret" })
+      ),
+    expectsCode("invalid_state")
+  );
+  assert.throws(
+    () =>
+      parseStoredDemoState(
+        JSON.stringify({ ...sampleState(), amount: "not-a-number" })
+      ),
+    expectsCode("invalid_state")
+  );
+  assert.throws(
+    () =>
+      parseStoredDemoState(
+        JSON.stringify({ ...sampleState(), token: "not-a-contract" })
+      ),
+    expectsCode("invalid_state")
+  );
+  assert.throws(
+    () =>
+      parseDemoStateExport(
+        JSON.stringify({
+          schema: DEMO_STATE_SCHEMA,
+          version: DEMO_STATE_VERSION,
+          kind: "local-demo-state",
+          exportedAt: "yesterday",
+          state: null,
+        })
+      ),
     expectsCode("invalid_state")
   );
   assert.throws(
@@ -111,6 +152,31 @@ test("rejects an unsupported export version", () => {
   );
 });
 
+test("import validates before persisting and can restore empty state", () => {
+  const storage = new MemoryStorage();
+  const exported = serializeDemoStateExport(sampleState());
+
+  assert.deepEqual(importDemoState(storage, exported), sampleState());
+  assert.deepEqual(loadDemoState(storage), sampleState());
+
+  assert.deepEqual(
+    importDemoState(storage, serializeDemoStateExport(null)),
+    null
+  );
+  assert.equal(loadDemoState(storage), null);
+});
+
+test("rejected import leaves persisted state untouched", () => {
+  const storage = new MemoryStorage();
+  saveDemoState(storage, sampleState());
+
+  assert.throws(
+    () => importDemoState(storage, "{not json"),
+    expectsCode("invalid_json")
+  );
+  assert.deepEqual(loadDemoState(storage), sampleState());
+});
+
 test("reset clears stored demo state", () => {
   const storage = new MemoryStorage();
   saveDemoState(storage, sampleState());
@@ -130,5 +196,5 @@ test("handles empty state", () => {
   assert.equal(document.state, null);
   assert.equal(parseDemoStateExport(json), null);
   assert.equal(loadDemoState(storage), null);
-  assert.deepEqual(emptyDemoState().createdId, null);
+  assert.deepEqual(emptyDemoState().resolveFavor, "seller");
 });

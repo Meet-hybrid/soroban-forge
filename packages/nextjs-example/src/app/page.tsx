@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ChangeEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Client,
   networks,
@@ -10,12 +17,18 @@ import {
   DEFAULT_DEMO_AMOUNT,
   DEFAULT_DEMO_TIMEOUT_SECS,
   DEFAULT_DEMO_TOKEN,
+  DEMO_STATE_SCHEMA,
+  DEMO_STATE_STORAGE_KEY,
+  DEMO_STATE_VERSION,
+  DemoStateValidationError,
   browserDemoStorage,
   emptyDemoState,
+  importDemoState,
   loadDemoState,
   resetDemoState,
   saveDemoState,
   serializeDemoStateExport,
+  validateDemoState,
   type DemoState,
 } from "../lib/demo-state";
 
@@ -83,8 +96,10 @@ export default function Home() {
   const [listBusy, setListBusy] = useState(false);
 
   const demoHydrated = useRef(false);
-  const skipNextPersist = useRef(false);
+  const suppressNextPersist = useRef(false);
+  const cancelResetRef = useRef<HTMLButtonElement>(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
 
   const pushLog = useCallback(
     (text: string, kind: LogEntry["kind"] = "info") => {
@@ -100,9 +115,6 @@ export default function Home() {
     setToken(state.token);
     setAmount(state.amount);
     setTimeoutSecs(state.timeoutSecs);
-    setCreatedId(state.createdId);
-    setActionEscrowId(state.actionEscrowId);
-    setReadEscrowId(state.readEscrowId);
     setResolveFavor(state.resolveFavor);
   }, []);
 
@@ -114,9 +126,6 @@ export default function Home() {
       token,
       amount,
       timeoutSecs,
-      createdId,
-      actionEscrowId,
-      readEscrowId,
       resolveFavor,
     }),
     [
@@ -126,12 +135,25 @@ export default function Home() {
       token,
       amount,
       timeoutSecs,
-      createdId,
-      actionEscrowId,
-      readEscrowId,
       resolveFavor,
     ]
   );
+
+  const demoStatePreview = useMemo(
+    () => JSON.stringify(currentDemoState(), null, 2),
+    [currentDemoState]
+  );
+
+  const persistIssue = useMemo(() => {
+    try {
+      validateDemoState(currentDemoState());
+      return null;
+    } catch (error) {
+      return error instanceof DemoStateValidationError
+        ? `${error.code}: ${error.message}`
+        : (error as Error).message;
+    }
+  }, [currentDemoState]);
 
   useEffect(() => {
     const storage = browserDemoStorage();
@@ -141,7 +163,6 @@ export default function Home() {
         if (stored !== null) applyDemoState(stored);
       } catch (error) {
         resetDemoState(storage);
-        skipNextPersist.current = true;
         pushLog(
           `Stored demo state was invalid and was reset: ${(error as Error).message}`,
           "err"
@@ -154,16 +175,28 @@ export default function Home() {
 
   useEffect(() => {
     if (!demoHydrated.current) return;
-    if (skipNextPersist.current) {
-      skipNextPersist.current = false;
+    if (suppressNextPersist.current) {
+      suppressNextPersist.current = false;
       return;
     }
+    if (persistIssue) return;
     saveDemoState(browserDemoStorage(), currentDemoState());
-  }, [currentDemoState]);
+  }, [currentDemoState, persistIssue]);
+
+  useEffect(() => {
+    if (!confirmReset) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setConfirmReset(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    cancelResetRef.current?.focus();
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmReset]);
 
   const exportDemoState = useCallback(() => {
     try {
       const json = serializeDemoStateExport(currentDemoState());
+      setImportError(null);
       const blob = new Blob([json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -172,23 +205,58 @@ export default function Home() {
       document.body.appendChild(link);
       link.click();
       link.remove();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 0);
       pushLog("Exported local demo state as JSON (browser only).", "ok");
     } catch (error) {
       pushLog(`Export failed: ${(error as Error).message}`, "err");
     }
   }, [currentDemoState, pushLog]);
 
+  const handleDemoImport = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file) return;
+
+      try {
+        const raw = await file.text();
+        const state = importDemoState(browserDemoStorage(), raw);
+        const next = state ?? emptyDemoState();
+        suppressNextPersist.current =
+          JSON.stringify(next) !== demoStatePreview;
+        applyDemoState(next);
+        setImportError(null);
+        pushLog(
+          state === null
+            ? "Imported empty local demo state."
+            : "Imported and validated local demo state.",
+          "ok"
+        );
+      } catch (error) {
+        const message =
+          error instanceof DemoStateValidationError
+            ? `${error.code}: ${error.message}`
+            : (error as Error).message;
+        setImportError(message);
+        pushLog(`Import rejected: ${message}`, "err");
+      }
+    },
+    [applyDemoState, demoStatePreview, pushLog]
+  );
+
   const confirmDemoReset = useCallback(() => {
+    const next = emptyDemoState();
     resetDemoState(browserDemoStorage());
-    skipNextPersist.current = true;
-    applyDemoState(emptyDemoState());
+    suppressNextPersist.current =
+      JSON.stringify(next) !== demoStatePreview;
+    applyDemoState(next);
     setConfirmReset(false);
+    setImportError(null);
     pushLog(
       "Reset local demo state. Wallet connection and network settings were unchanged.",
       "ok"
     );
-  }, [applyDemoState, pushLog]);
+  }, [applyDemoState, demoStatePreview, pushLog]);
 
   const freighterMissing =
     typeof window !== "undefined" && !window.freighterApi;
@@ -766,25 +834,75 @@ export default function Home() {
       <section className="mt-6 rounded-xl border border-gray-300 p-4">
         <h2 className="text-lg font-semibold mb-2">6 · Local demo state</h2>
         <p className="text-sm text-gray-600 mb-3">
-          Export contains local browser form state only. It is not on-chain
-          data and contains no wallet keys or signed transaction payloads.
+          This panel covers browser-only form values. Escrow IDs produced by
+          live transactions stay in the panels above and are never exported.
+          Exports contain no wallet keys or signed transaction payloads.
         </p>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={exportDemoState}
-            className="rounded bg-blue-600 px-4 py-1.5 text-sm text-white hover:bg-blue-700"
-          >
-            Export local demo state
-          </button>
-          <button
-            onClick={() => setConfirmReset(true)}
-            className="rounded bg-gray-200 px-4 py-1.5 text-sm hover:bg-gray-300"
-          >
-            Reset local demo state
-          </button>
-          <span className="text-sm text-gray-500">
-            Reset keeps your wallet connection and network settings unchanged.
-          </span>
+        <dl className="mb-3 grid gap-1 text-xs text-gray-500 sm:grid-cols-3">
+          <div>
+            <dt className="font-medium text-gray-500">Schema</dt>
+            <dd className="break-all font-mono">{DEMO_STATE_SCHEMA}</dd>
+          </div>
+          <div>
+            <dt className="font-medium text-gray-500">Version</dt>
+            <dd className="font-mono">{DEMO_STATE_VERSION}</dd>
+          </div>
+          <div>
+            <dt className="font-medium text-gray-500">Storage key</dt>
+            <dd className="break-all font-mono">{DEMO_STATE_STORAGE_KEY}</dd>
+          </div>
+        </dl>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div>
+            <h3 className="text-sm font-semibold mb-2">
+              Current local form state
+            </h3>
+            <pre className="max-h-64 overflow-auto rounded-lg bg-gray-100 p-3 font-mono text-xs">
+              {demoStatePreview}
+            </pre>
+          </div>
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={exportDemoState}
+                className="rounded bg-blue-600 px-4 py-1.5 text-sm text-white hover:bg-blue-700"
+              >
+                Export local demo state
+              </button>
+              <button
+                onClick={() => setConfirmReset(true)}
+                className="rounded bg-gray-200 px-4 py-1.5 text-sm hover:bg-gray-300"
+              >
+                Reset local demo state
+              </button>
+            </div>
+            <label className="block text-sm">
+              Import local demo state JSON
+              <input
+                type="file"
+                accept="application/json,.json"
+                onChange={(event) => void handleDemoImport(event)}
+                aria-label="Import local demo state JSON"
+                className="mt-1 block w-full text-sm"
+              />
+            </label>
+            {importError && (
+              <p role="alert" className="text-sm text-red-700">
+                {importError}
+              </p>
+            )}
+            {persistIssue && (
+              <p className="text-sm text-amber-700">
+                Current form state is not persisted: {persistIssue}
+              </p>
+            )}
+            <p className="text-sm text-gray-500">
+              Import validates the versioned document before applying it. The
+              preview shows current form values; only valid form state is
+              persisted. Reset keeps your wallet connection and network settings
+              unchanged.
+            </p>
+          </div>
         </div>
       </section>
 
@@ -812,6 +930,7 @@ export default function Home() {
             </p>
             <div className="flex justify-end gap-2">
               <button
+                ref={cancelResetRef}
                 onClick={() => setConfirmReset(false)}
                 className="rounded bg-gray-200 px-4 py-1.5 text-sm hover:bg-gray-300"
               >

@@ -17,9 +17,6 @@ export interface DemoState {
   token: string;
   amount: string;
   timeoutSecs: string;
-  createdId: string | null;
-  actionEscrowId: string;
-  readEscrowId: string;
   resolveFavor: DemoResolveFavor;
 }
 
@@ -61,15 +58,15 @@ const STRING_FIELDS = [
   "token",
   "amount",
   "timeoutSecs",
-  "actionEscrowId",
-  "readEscrowId",
 ] as const;
 
-const STATE_FIELDS = new Set<string>([
-  ...STRING_FIELDS,
+const LEGACY_FIELDS = new Set<string>([
   "createdId",
-  "resolveFavor",
+  "actionEscrowId",
+  "readEscrowId",
 ]);
+
+const STATE_FIELDS = new Set<string>([...STRING_FIELDS, "resolveFavor"]);
 
 const EXPORT_FIELDS = new Set<string>([
   "schema",
@@ -90,9 +87,6 @@ export function emptyDemoState(): DemoState {
     token: DEFAULT_DEMO_TOKEN,
     amount: DEFAULT_DEMO_AMOUNT,
     timeoutSecs: DEFAULT_DEMO_TIMEOUT_SECS,
-    createdId: null,
-    actionEscrowId: "",
-    readEscrowId: "",
     resolveFavor: "seller",
   };
 }
@@ -115,7 +109,7 @@ export function validateDemoState(value: unknown): DemoState {
   }
 
   for (const key of Object.keys(value)) {
-    if (!STATE_FIELDS.has(key)) {
+    if (!STATE_FIELDS.has(key) && !LEGACY_FIELDS.has(key)) {
       throw new DemoStateValidationError(
         "invalid_state",
         `Demo state contains an unexpected field: ${key}`
@@ -133,19 +127,8 @@ export function validateDemoState(value: unknown): DemoState {
         `Demo state field ${field} must be a string`
       );
     }
-    validateFieldValue(field, fieldValue);
+    validateStateField(field, fieldValue);
     result[field] = fieldValue;
-  }
-
-  if (value.createdId !== null && typeof value.createdId !== "string") {
-    throw new DemoStateValidationError(
-      "invalid_state",
-      "Demo state field createdId must be a string or null"
-    );
-  }
-  if (typeof value.createdId === "string") {
-    validateFieldValue("createdId", value.createdId);
-    result.createdId = value.createdId;
   }
 
   if (value.resolveFavor !== "seller" && value.resolveFavor !== "buyer") {
@@ -185,6 +168,16 @@ export function parseDemoStateExport(raw: string): DemoState | null {
   return parseDemoStateExportObject(parsed);
 }
 
+export function importDemoState(
+  storage: DemoStorage | null,
+  raw: string
+): DemoState | null {
+  const state = parseDemoStateExport(raw);
+  if (state === null) resetDemoState(storage);
+  else saveDemoState(storage, state);
+  return state;
+}
+
 export function parseStoredDemoState(raw: string): DemoState | null {
   const parsed = parseJson(raw, "Stored demo state");
   if (parsed === null) return null;
@@ -196,8 +189,10 @@ export function parseStoredDemoState(raw: string): DemoState | null {
   }
 
   const isWrapped =
-    "schema" in parsed || "kind" in parsed || "version" in parsed;
-  return isWrapped ? parseDemoStateExportObject(parsed) : validateDemoState(parsed);
+    "schema" in parsed || "kind" in parsed || "state" in parsed;
+  return isWrapped
+    ? parseDemoStateExportObject(parsed)
+    : validateDemoState(parsed);
 }
 
 export function loadDemoState(storage: DemoStorage | null): DemoState | null {
@@ -272,11 +267,28 @@ function parseDemoStateExportObject(value: unknown): DemoState | null {
       "Demo state export is missing its state"
     );
   }
+  if (value.label !== undefined && typeof value.label !== "string") {
+    throw new DemoStateValidationError(
+      "invalid_state",
+      "Demo state export label must be a string"
+    );
+  }
+  if (value.exportedAt !== undefined) {
+    if (
+      typeof value.exportedAt !== "string" ||
+      Number.isNaN(Date.parse(value.exportedAt))
+    ) {
+      throw new DemoStateValidationError(
+        "invalid_state",
+        "Demo state export exportedAt must be an ISO date string"
+      );
+    }
+  }
 
   return value.state === null ? null : validateDemoState(value.state);
 }
 
-function validateFieldValue(field: string, value: string): void {
+function validateStateField(field: string, value: string): void {
   if (value.length > MAX_FIELD_LENGTH) {
     throw new DemoStateValidationError(
       "invalid_state",
@@ -289,6 +301,47 @@ function validateFieldValue(field: string, value: string): void {
       `Demo state field ${field} contains rejected secret material`
     );
   }
+
+  if (field === "buyer" || field === "seller" || field === "arbiter") {
+    if (value !== "" && !isStellarAddress(value)) {
+      throw new DemoStateValidationError(
+        "invalid_state",
+        `Demo state field ${field} must be empty or a valid address`
+      );
+    }
+  } else if (field === "token") {
+    if (!isContractId(value)) {
+      throw new DemoStateValidationError(
+        "invalid_state",
+        "Demo state field token must be a valid contract id"
+      );
+    }
+  } else if (field === "amount" || field === "timeoutSecs") {
+    if (!isUnsignedInteger(value)) {
+      throw new DemoStateValidationError(
+        "invalid_state",
+        `Demo state field ${field} must be a non-negative integer`
+      );
+    }
+    if (field === "timeoutSecs" && /^0+$/.test(value)) {
+      throw new DemoStateValidationError(
+        "invalid_state",
+        "Demo state field timeoutSecs must be greater than zero"
+      );
+    }
+  }
+}
+
+function isStellarAddress(value: string): boolean {
+  return /^G[2-7A-Z]{55}$/.test(value);
+}
+
+function isContractId(value: string): boolean {
+  return /^C[2-7A-Z]{55}$/.test(value);
+}
+
+function isUnsignedInteger(value: string): boolean {
+  return /^\d+$/.test(value);
 }
 
 function containsSecretMaterial(value: string): boolean {
