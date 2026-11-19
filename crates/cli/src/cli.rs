@@ -1,4 +1,5 @@
 use clap::Args;
+use clap::ValueEnum;
 use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
@@ -102,12 +103,28 @@ pub struct EventsArgs {
     /// Event type filter
     #[arg(long = "type")]
     pub event_type: Option<String>,
+    /// Event topic name filter
+    #[arg(long)]
+    pub topic: Option<String>,
     /// Network to use
     #[arg(long, default_value = "testnet")]
     pub network: String,
-    /// Emit one JSON object per event (JSONL format) for machine processing
+    /// Follow new events continuously (alias: --follow)
+    #[arg(long, alias = "follow")]
+    pub stream: bool,
+    /// Output format
+    #[arg(long, value_enum, default_value = "pretty")]
+    pub format: EventsFormat,
+    /// Emit one JSON object per event (deprecated; use --format jsonl)
     #[arg(long)]
     pub jsonl: bool,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EventsFormat {
+    #[default]
+    Pretty,
+    Jsonl,
 }
 
 #[derive(Args, Debug, Clone)]

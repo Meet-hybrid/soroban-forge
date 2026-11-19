@@ -223,6 +223,22 @@
       ]
     },
     {
+      "name": "get_action_summary",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "caller",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<udt:EscrowActionSummary,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_basket",
       "inputs": [
         {
@@ -232,6 +248,22 @@
       ],
       "outputs": [
         "result<udt:BasketEscrowData,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_basket_action_summary",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "caller",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<udt:EscrowActionSummary,udt:ForgeError>"
       ]
     },
     {
@@ -789,6 +821,44 @@
   ],
   "types": [
     {
+      "kind": "union",
+      "name": "ActionIneligibilityReason",
+      "variants": [
+        {
+          "name": "Eligible",
+          "types": []
+        },
+        {
+          "name": "WrongRole",
+          "types": []
+        },
+        {
+          "name": "WrongStatus",
+          "types": []
+        },
+        {
+          "name": "BeforeDeadline",
+          "types": []
+        },
+        {
+          "name": "AfterDeadline",
+          "types": []
+        },
+        {
+          "name": "ReviewWindowNotEnded",
+          "types": []
+        },
+        {
+          "name": "ReleasePending",
+          "types": []
+        },
+        {
+          "name": "NoPendingRequest",
+          "types": []
+        }
+      ]
+    },
+    {
       "kind": "struct",
       "name": "BasketEscrowData",
       "fields": [
@@ -823,6 +893,144 @@
         {
           "name": "timeout",
           "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "EscrowAction",
+      "variants": [
+        {
+          "name": "Deposit",
+          "types": []
+        },
+        {
+          "name": "RequestRelease",
+          "types": []
+        },
+        {
+          "name": "ApproveRelease",
+          "types": []
+        },
+        {
+          "name": "ExecuteRelease",
+          "types": []
+        },
+        {
+          "name": "Release",
+          "types": []
+        },
+        {
+          "name": "ReleasePartial",
+          "types": []
+        },
+        {
+          "name": "Refund",
+          "types": []
+        },
+        {
+          "name": "RefundExpired",
+          "types": []
+        },
+        {
+          "name": "Dispute",
+          "types": []
+        },
+        {
+          "name": "Resolve",
+          "types": []
+        },
+        {
+          "name": "ResolveSplit",
+          "types": []
+        },
+        {
+          "name": "Cancel",
+          "types": []
+        },
+        {
+          "name": "DepositBasket",
+          "types": []
+        },
+        {
+          "name": "RequestReleaseBasket",
+          "types": []
+        },
+        {
+          "name": "ReleaseBasket",
+          "types": []
+        },
+        {
+          "name": "ReleasePartialBasket",
+          "types": []
+        },
+        {
+          "name": "RefundBasket",
+          "types": []
+        },
+        {
+          "name": "DisputeBasket",
+          "types": []
+        },
+        {
+          "name": "ResolveBasket",
+          "types": []
+        },
+        {
+          "name": "CancelBasket",
+          "types": []
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "EscrowActionEligibility",
+      "fields": [
+        {
+          "name": "action",
+          "type": "udt:EscrowAction"
+        },
+        {
+          "name": "eligible",
+          "type": "bool"
+        },
+        {
+          "name": "reason",
+          "type": "udt:ActionIneligibilityReason"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "EscrowActionSummary",
+      "fields": [
+        {
+          "name": "actions",
+          "type": "vec<udt:EscrowActionEligibility>"
+        },
+        {
+          "name": "deadline",
+          "type": "u64"
+        },
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "has_pending_request",
+          "type": "bool"
+        },
+        {
+          "name": "pending_release_at",
+          "type": "option<u64>"
+        },
+        {
+          "name": "pending_request_amount",
+          "type": "option<i128>"
+        },
+        {
+          "name": "status",
+          "type": "udt:EscrowStatus"
         }
       ]
     },

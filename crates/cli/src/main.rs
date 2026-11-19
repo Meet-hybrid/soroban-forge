@@ -114,6 +114,29 @@ mod tests {
     }
 
     #[test]
+    fn events_follow_alias_topic_and_format_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "events",
+            "--contract",
+            "C123",
+            "--follow",
+            "--topic",
+            "Transfer",
+            "--format",
+            "jsonl",
+        ])
+        .unwrap();
+
+        let Commands::Events(args) = cli.command else {
+            panic!("expected events command");
+        };
+        assert!(args.stream);
+        assert_eq!(args.topic.as_deref(), Some("Transfer"));
+        assert_eq!(args.format, crate::cli::EventsFormat::Jsonl);
+    }
+
+    #[test]
     fn verify_flags_parse() {
         let cli = Cli::try_parse_from([
             "soroban-forge",
@@ -263,5 +286,25 @@ mod tests {
             Cli::try_parse_from(["soroban-forge", "storage-diff", "--source", "source.wasm",])
                 .is_err()
         );
+    fn inspect_contract_json_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "inspect",
+            "CA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAXE",
+            "--json",
+            "--network",
+            "testnet",
+        ])
+        .unwrap();
+
+        let Commands::Inspect(args) = cli.command else {
+            panic!("expected inspect command");
+        };
+        assert_eq!(
+            args.contract.as_deref(),
+            Some("CA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAXE")
+        );
+        assert!(args.json);
+        assert_eq!(args.network, "testnet");
     }
 }
