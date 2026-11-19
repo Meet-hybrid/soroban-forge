@@ -117,6 +117,22 @@
       ]
     },
     {
+      "name": "get_vote_receipt",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<udt:VoteReceipt,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "has_voted",
       "inputs": [
         {
@@ -519,6 +535,24 @@
         {
           "name": "Cancelled",
           "types": []
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "VoteReceipt",
+      "fields": [
+        {
+          "name": "has_voted",
+          "type": "bool"
+        },
+        {
+          "name": "support",
+          "type": "option<bool>"
+        },
+        {
+          "name": "weight",
+          "type": "i128"
         }
       ]
     }

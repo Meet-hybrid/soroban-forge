@@ -1,6 +1,8 @@
 import type { Metadata } from 'next'
 import './globals.css'
 
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: 'Soroban Forge Example',
   description: 'Next.js example application demonstrating Soroban Forge contract interactions',
