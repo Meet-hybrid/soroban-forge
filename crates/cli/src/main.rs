@@ -20,7 +20,7 @@ mod decode_failure;
 use clap::{Parser, Subcommand};
 use cli::{
     BuildArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs,
-    ScaffoldValidateArgs, TestArgs, VerifyArgs,
+    ScaffoldValidateArgs, StorageDiffArgs, TestArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 
@@ -50,6 +50,7 @@ pub enum Commands {
     Events(EventsArgs),
     Inspect(InspectArgs),
     Doctor(DoctorArgs),
+    StorageDiff(StorageDiffArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -69,6 +70,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,
         Commands::Doctor(args) => commands::doctor::run(args)?,
+        Commands::StorageDiff(args) => commands::storage_diff::run(args)?,
     }
 
     Ok(())
@@ -232,5 +234,34 @@ mod tests {
             ))
         );
         assert_eq!(args.expected.as_deref(), Some("a".repeat(64).as_str()));
+    }
+
+    #[test]
+    fn storage_diff_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "storage-diff",
+            "--source",
+            "source.wasm",
+            "--target",
+            "target.wasm",
+            "--json",
+        ])
+        .unwrap();
+
+        let Commands::StorageDiff(args) = cli.command else {
+            panic!("expected storage-diff command");
+        };
+        assert_eq!(args.source, std::path::PathBuf::from("source.wasm"));
+        assert_eq!(args.target, std::path::PathBuf::from("target.wasm"));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn storage_diff_requires_source_and_target() {
+        assert!(
+            Cli::try_parse_from(["soroban-forge", "storage-diff", "--source", "source.wasm",])
+                .is_err()
+        );
     }
 }

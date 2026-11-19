@@ -143,3 +143,16 @@ pub struct DoctorArgs {
     #[arg(long, value_name = "PATH")]
     pub wasm: Option<PathBuf>,
 }
+
+#[derive(Args, Debug, Clone)]
+pub struct StorageDiffArgs {
+    /// Path to the source WASM artifact
+    #[arg(long, value_name = "PATH")]
+    pub source: PathBuf,
+    /// Path to the target WASM artifact
+    #[arg(long, value_name = "PATH")]
+    pub target: PathBuf,
+    /// Output as JSON for programmatic use
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
