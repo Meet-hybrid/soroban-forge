@@ -251,8 +251,10 @@ cargo run -p soroban-forge-cli -- doctor        # check your toolchain and envir
 # Contract interaction
 cargo run -p soroban-forge-cli -- invoke --contract <CONTRACT_ID> --function balance --network testnet
 cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --since <LEDGER> --network testnet
-# Stream events in JSONL format for machine processing
-cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --jsonl
+# Follow live events, optionally filtering to a decoded topic name
+cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --stream --topic Transfer
+# Emit one decoded event object per line for machine processing
+cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --format jsonl
 ```
 
 Commands: `build`, `lint`, `test`, `deploy`, `new`, `scaffold-validate`,
