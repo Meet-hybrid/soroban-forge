@@ -2363,7 +2363,7 @@ mod model_check;
 mod tests {
     use super::*;
     use soroban_forge_test_utils::{MockTarget, MockTargetClient, TestAccounts};
-    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, MockAuth as _};
+    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
     use soroban_sdk::{contract, contractimpl, Bytes, Env, FromVal, Map, Symbol, TryIntoVal, Val};
