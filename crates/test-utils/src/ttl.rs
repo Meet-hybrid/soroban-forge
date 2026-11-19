@@ -114,21 +114,41 @@ impl fmt::Display for ChaosTrace {
     }
 }
 
-/// Move the test environment's ledger sequence forward by `n` ledgers.
+/// Advance the test ledger to an absolute sequence and Unix timestamp in seconds.
+/// Both fields can stay unchanged. Other ledger settings are preserved.
 ///
 /// # Panics
 ///
-/// Panics if `n` would cause the sequence number to overflow `u32`, or if
-/// the resulting sequence is not strictly greater than the current
-/// sequence (monotonicity guard).
+/// Panics before changing the ledger if either value would move backwards.
+pub fn advance_ledger_to(env: &Env, sequence: u32, timestamp: u64) {
+    let ledger = env.ledger();
+    assert!(
+        sequence >= ledger.sequence(),
+        "ledger sequence must not move backwards"
+    );
+    assert!(
+        timestamp >= ledger.timestamp(),
+        "ledger timestamp must not move backwards"
+    );
+    ledger.with_mut(|info| {
+        info.sequence_number = sequence;
+        info.timestamp = timestamp;
+    });
+}
+
+/// Move the test environment's ledger sequence forward by `n` ledgers,
+/// leaving the timestamp unchanged.
+///
+/// # Panics
+///
+/// Panics if `n` would cause the sequence number to overflow `u32`.
 pub fn advance_ledger(env: &Env, n: u32) {
-    let current = env.ledger().sequence();
-    let next = current
+    let ledger = env.ledger();
+    let next = ledger
+        .sequence()
         .checked_add(n)
         .expect("ledger sequence must not overflow");
-    assert!(next >= current, "ledger sequence must not move backwards");
-    env.ledger()
-        .with_mut(|ledger| ledger.sequence_number = next);
+    advance_ledger_to(env, next, ledger.timestamp());
 }
 
 /// Return the remaining TTL of a persistent entry in `contract`'s storage.
@@ -316,9 +336,10 @@ mod tests {
     use std::string::String;
 
     use super::{
-        advance_ledger, assert_no_violations, chaos_drive, entry_is_live, entry_ttl, ChaosTarget,
-        StepOutcome, BUMP_AMOUNT, BUMP_THRESHOLD,
+        advance_ledger, advance_ledger_to, assert_no_violations, chaos_drive, entry_is_live,
+        entry_ttl, ChaosTarget, StepOutcome, BUMP_AMOUNT, BUMP_THRESHOLD,
     };
+    use soroban_sdk::testutils::Ledger as _;
     use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
 
     // -------------------------------------------------------------------
@@ -348,6 +369,34 @@ mod tests {
         let env = Env::default();
         let contract = env.register(TtlProbe, ());
         (env, contract)
+    }
+
+    #[test]
+    fn advance_ledger_to_moves_both_fields_and_preserves_settings() {
+        let env = Env::default();
+        let before = env.ledger().get();
+        advance_ledger_to(&env, before.sequence_number + 12, before.timestamp + 60);
+        let after = env.ledger().get();
+        assert_eq!(after.sequence_number, before.sequence_number + 12);
+        assert_eq!(after.timestamp, before.timestamp + 60);
+        assert_eq!(after.protocol_version, before.protocol_version);
+        assert_eq!(after.max_entry_ttl, before.max_entry_ttl);
+        advance_ledger(&env, 1);
+        assert_eq!(env.ledger().timestamp(), after.timestamp);
+    }
+
+    #[test]
+    fn advance_ledger_to_rejects_either_rewind_without_moving() {
+        let env = Env::default();
+        advance_ledger_to(&env, 20, 100);
+        for (sequence, timestamp) in [(19, 101), (21, 99)] {
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                advance_ledger_to(&env, sequence, timestamp);
+            }))
+            .is_err());
+            assert_eq!(env.ledger().sequence(), 20);
+            assert_eq!(env.ledger().timestamp(), 100);
+        }
     }
 
     #[test]

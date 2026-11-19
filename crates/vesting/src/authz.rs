@@ -724,3 +724,92 @@ fn reassignment_rejects_old_new_and_outsider_signatures() {
         assert_eq!(client.get_schedule(&id).reassignment_count, 0);
     }
 }
+
+// -----------------------------------------------------------------------
+//  Issue #609 Authorization Matrix Expansion
+// -----------------------------------------------------------------------
+
+#[test]
+fn revoke_rejects_signature_replayed_for_unrelated_schedule_id() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id1 = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id2 = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + DURATION / 2);
+
+    // Funder signs revoke exclusively for id1
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id1,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    // Attempting to use id1's revocation signature on id2 must abort and preserve state
+    let res = client.try_revoke(&id2);
+    assert_auth_abort!(res);
+    assert_eq!(client.get_status(&id2), VestingStatus::Vesting);
+    assert_eq!(client.get_schedule(&id2).revoked_vested, None);
+}
+
+#[test]
+fn cancel_schedule_rejects_unrelated_third_party_revocation_attempt() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let stranger = &accounts.validator; // Unrelated account
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + DURATION / 2);
+
+    // Stranger attempts to sign revocation
+    env.mock_auths(&[MockAuth {
+        address: stranger,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_revoke(&id);
+    assert_auth_abort!(res);
+    // State preservation: schedule remains intact and vesting
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+    assert_eq!(client.get_schedule(&id).revoked_vested, None);
+}
+
+#[test]
+fn create_schedule_rejects_funder_signer_mismatch() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let declared_funder = &accounts.deployer;
+    let actual_signer = &accounts.user2;
+    let beneficiary = &accounts.user1;
+
+    // Actual signer does not match the funder argument passed to create_schedule
+    env.mock_auths(&[MockAuth {
+        address: actual_signer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create_schedule",
+            args: (declared_funder, beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_create_schedule(
+        declared_funder,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+    assert_auth_abort!(res);
+}
