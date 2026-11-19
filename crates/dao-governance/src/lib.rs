@@ -294,6 +294,16 @@ pub trait SorobanForgeDaoGovernance {
         voter: Address,
     ) -> Result<bool, soroban_forge_shared_utils::ForgeError>;
 
+    /// Read the exact vote direction and recorded weight for a voter.
+    ///
+    /// Returns [`ForgeError::NotFound`] for an unknown proposal. A well-formed
+    /// address that has not voted yields a no-vote receipt.
+    fn get_vote_receipt(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<VoteReceipt, soroban_forge_shared_utils::ForgeError>;
+
     /// Permissionless keeper entrypoint: extend the persistent storage TTL of a proposal.
     ///
     /// # Errors
@@ -303,6 +313,22 @@ pub trait SorobanForgeDaoGovernance {
 
     /// Read how many active proposals `proposer` currently has in flight (read-only view).
     fn get_active_proposal_count(env: Env, proposer: Address) -> u32;
+}
+
+/// Immutable receipt for a single proposal vote.
+///
+/// `support` and `weight` are the values recorded at vote time. They are never
+/// recalculated from the voter's current token balance.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoteReceipt {
+    /// Whether this voter cast a vote on the proposal.
+    pub has_voted: bool,
+    /// Recorded direction: `Some(true)` for, `Some(false)` against.
+    /// `None` means no vote was recorded. Abstain is not supported by `vote`.
+    pub support: Option<bool>,
+    /// Governance-token balance recorded when the vote was cast.
+    pub weight: i128,
 }
 
 /// Lifecycle state of a governance proposal.
@@ -430,6 +456,11 @@ enum DataKey {
     GovernanceToken,
     /// Number of concurrent active proposals currently in flight for a proposer.
     ActiveProposalCount(Address),
+    /// Exact direction and weight recorded for a voter's receipt.
+    ///
+    /// Appended last so existing `DataKey` discriminants stay unchanged for
+    /// contracts upgraded from a version without receipts.
+    VoteReceipt(u64, Address),
 }
 
 /// Maximum number of concurrent active proposals a single proposer may have by default.
@@ -674,6 +705,14 @@ impl DaoGovernance {
         }
         let key = DataKey::Proposal(proposal_id);
         env.storage().instance().set(&vote_key, &true);
+        env.storage().instance().set(
+            &DataKey::VoteReceipt(proposal_id, voter.clone()),
+            &VoteReceipt {
+                has_voted: true,
+                support: Some(support),
+                weight,
+            },
+        );
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
         events::vote_cast(&env, proposal_id, &voter, support, weight);
@@ -935,13 +974,37 @@ impl DaoGovernance {
         Ok(proposals)
     }
 
+    /// Read the immutable vote receipt recorded for `voter` on `proposal_id`.
+    ///
+    /// This is a read-only view: it never writes storage, extends TTLs, or
+    /// recalculates voting power. A voter that has not voted receives
+    /// `has_voted: false`, `support: None`, and `weight: 0`. A malformed
+    /// `voter` address is rejected by the Soroban host before this query runs
+    /// (the shared error registry documents bad addresses as `InvalidInput`).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no proposal with this id.
+    pub fn get_vote_receipt(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<VoteReceipt, ForgeError> {
+        // Verify the proposal exists; this is a pure read.
+        Self::get_proposal_impl(&env, proposal_id)?;
+        let key = DataKey::VoteReceipt(proposal_id, voter);
+        Ok(env.storage().instance().get(&key).unwrap_or(VoteReceipt {
+            has_voted: false,
+            support: None,
+            weight: 0,
+        }))
+    }
+
     /// Check whether `voter` has voted on `proposal_id` (read-only view).
     ///
-    /// Returns `ForgeError::NotFound` if `proposal_id` does not exist.
+    /// Returns [`ForgeError::NotFound`] if `proposal_id` does not exist.
     pub fn has_voted(env: Env, proposal_id: u64, voter: Address) -> Result<bool, ForgeError> {
-        // Verify proposal existence
         Self::get_proposal_impl(&env, proposal_id)?;
-
         let vote_key = DataKey::Vote(proposal_id, voter);
         Ok(env.storage().instance().has(&vote_key))
     }
@@ -1191,7 +1254,7 @@ mod resource_report;
 mod tests {
     use super::*;
     use soroban_forge_test_utils::{MockTarget, MockTargetClient, TestAccounts};
-    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use soroban_sdk::testutils::{storage::Instance as _, Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{Bytes, Env};
 
@@ -2495,6 +2558,197 @@ mod tests {
                 .unwrap_err()
                 .unwrap(),
             ForgeError::NotFound
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Proposal vote receipts (Issue 606)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn vote_receipt_records_yes_direction_and_recorded_weight() {
+        let (_env, client, accounts, proposal_id, _target_id) = setup!();
+        let voter = accounts.user2.clone();
+        assert_eq!(
+            client.get_vote_receipt(&proposal_id, &voter),
+            VoteReceipt {
+                has_voted: false,
+                support: None,
+                weight: 0,
+            }
+        );
+
+        client.vote(&proposal_id, &voter, &true);
+
+        assert!(client.has_voted(&proposal_id, &voter));
+        assert_eq!(
+            client.get_vote_receipt(&proposal_id, &voter),
+            VoteReceipt {
+                has_voted: true,
+                support: Some(true),
+                weight: FUNDS,
+            }
+        );
+        assert_eq!(client.get_proposal(&proposal_id).for_votes, FUNDS);
+    }
+
+    #[test]
+    fn vote_receipt_records_no_direction() {
+        let (_env, client, accounts, proposal_id, _target_id) = setup!();
+
+        client.vote(&proposal_id, &accounts.user2, &false);
+
+        assert_eq!(
+            client.get_vote_receipt(&proposal_id, &accounts.user2),
+            VoteReceipt {
+                has_voted: true,
+                support: Some(false),
+                weight: FUNDS,
+            }
+        );
+        assert_eq!(client.get_proposal(&proposal_id).against_votes, FUNDS);
+    }
+
+    #[test]
+    fn vote_receipt_returns_no_vote_result_state_for_unvoted_and_unknown_accounts() {
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
+        let unknown_account = Address::generate(&env);
+
+        for voter in [&accounts.user1, &accounts.user2, &unknown_account] {
+            assert_eq!(
+                client.get_vote_receipt(&proposal_id, voter),
+                VoteReceipt {
+                    has_voted: false,
+                    support: None,
+                    weight: 0,
+                },
+                "no-vote receipt must be a result state, not an error"
+            );
+            assert!(!client.has_voted(&proposal_id, voter));
+        }
+    }
+
+    #[test]
+    fn vote_receipt_unknown_proposal_returns_not_found() {
+        let (_env, client, accounts, _proposal_id, _target_id) = setup!();
+
+        assert_eq!(
+            client
+                .try_get_vote_receipt(&999, &accounts.user2)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+    }
+
+    #[test]
+    fn vote_receipt_weight_is_immutable_after_current_balance_changes() {
+        let (env, token, token_client, _contract_id, client, accounts, target_id) = fresh_bond!();
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let voter = accounts.user2.clone();
+
+        client.vote(&proposal_id, &voter, &true);
+        let recorded = client.get_vote_receipt(&proposal_id, &voter);
+        assert_eq!(recorded.weight, FUNDS);
+
+        // Increase the voter's *current* balance. The receipt and the tally
+        // must keep the weight that was recorded at vote time.
+        StellarAssetClient::new(&env, &token).mint(&voter, &5_000);
+        assert_eq!(token_client.balance(&voter), FUNDS + 5_000);
+
+        assert_eq!(client.get_vote_receipt(&proposal_id, &voter), recorded);
+        assert_eq!(client.get_proposal(&proposal_id).for_votes, FUNDS);
+    }
+
+    #[test]
+    fn vote_receipts_are_independent_per_account_and_direction() {
+        let (env, token, token_client, _contract_id, client, accounts, target_id) = fresh_bond!();
+        StellarAssetClient::new(&env, &token).mint(&accounts.user2, &500);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+
+        client.vote(&proposal_id, &accounts.user2, &true);
+        client.vote(&proposal_id, &accounts.user3, &false);
+
+        assert_eq!(
+            client.get_vote_receipt(&proposal_id, &accounts.user2),
+            VoteReceipt {
+                has_voted: true,
+                support: Some(true),
+                weight: token_client.balance(&accounts.user2),
+            }
+        );
+        assert_eq!(
+            client.get_vote_receipt(&proposal_id, &accounts.user3),
+            VoteReceipt {
+                has_voted: true,
+                support: Some(false),
+                weight: token_client.balance(&accounts.user3),
+            }
+        );
+        assert_eq!(
+            client.get_vote_receipt(&proposal_id, &accounts.validator),
+            VoteReceipt {
+                has_voted: false,
+                support: None,
+                weight: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn vote_receipt_query_does_not_mutate_proposal_vote_or_ttl_storage() {
+        let (env, _token, _token_client, contract_id, client, accounts, target_id) = fresh_bond!();
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.vote(&proposal_id, &accounts.user2, &true);
+
+        let proposal_before = client.get_proposal(&proposal_id);
+        let receipt_before = client.get_vote_receipt(&proposal_id, &accounts.user2);
+        let voted_before = client.has_voted(&proposal_id, &accounts.user2);
+        let count_before = client.get_proposal_count();
+        let sequence_before = env.ledger().sequence();
+        let events_before = env.events().all().events().len();
+        let ttl_before = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
+
+        let receipt_after = client.get_vote_receipt(&proposal_id, &accounts.user2);
+
+        assert_eq!(receipt_after, receipt_before);
+        assert_eq!(client.get_proposal(&proposal_id), proposal_before);
+        assert_eq!(
+            client.has_voted(&proposal_id, &accounts.user2),
+            voted_before
+        );
+        assert_eq!(client.get_proposal_count(), count_before);
+        assert_eq!(env.ledger().sequence(), sequence_before);
+        assert_eq!(
+            env.events().all().events().len(),
+            events_before,
+            "vote receipt query emitted an event"
+        );
+        assert_eq!(
+            env.as_contract(&contract_id, || env.storage().instance().get_ttl()),
+            ttl_before,
+            "vote receipt query changed TTL"
         );
     }
 

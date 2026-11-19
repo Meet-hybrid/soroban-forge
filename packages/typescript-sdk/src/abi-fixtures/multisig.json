@@ -276,6 +276,13 @@
       ]
     },
     {
+      "name": "is_paused",
+      "inputs": [],
+      "outputs": [
+        "bool"
+      ]
+    },
+    {
       "name": "is_tx_live",
       "inputs": [
         {
@@ -285,6 +292,18 @@
       ],
       "outputs": [
         "bool"
+      ]
+    },
+    {
+      "name": "pause_wallet",
+      "inputs": [
+        {
+          "name": "approvers",
+          "type": "vec<address>"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -333,6 +352,18 @@
       ],
       "outputs": [
         "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "resume_wallet",
+      "inputs": [
+        {
+          "name": "approvers",
+          "type": "vec<address>"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -542,6 +573,34 @@
         {
           "name": "payload_len",
           "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "WalletPaused",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "wallet",
+          "type": "address"
+        },
+        {
+          "name": "timestamp",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "WalletResumed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "wallet",
+          "type": "address"
+        },
+        {
+          "name": "timestamp",
+          "type": "u64"
         }
       ]
     },
