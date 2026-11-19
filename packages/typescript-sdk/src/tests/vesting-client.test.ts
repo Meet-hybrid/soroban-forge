@@ -104,3 +104,30 @@ test("vesting client reports a failed create_schedule simulation", async () => {
     /fixture contract simulation failure/,
   );
 });
+
+import {
+  TESTNET_PASSPHRASE,
+  assertEveryMethodEncodes,
+  assertForgeErrors,
+  assertNetworkConstruction,
+  assertDeterministicAddresses,
+} from "./offline-client-test-utils.js";
+import { ForgeError } from "../../dist/clients/vesting.js";
+
+test("vesting: construction works on testnet, mainnet and custom networks", () => {
+  assertDeterministicAddresses();
+  assertNetworkConstruction((options) => new vesting.Client(options as never));
+});
+
+test("vesting: every ABI method encodes zero and edge arguments", () => {
+  const client = new vesting.Client({
+    contractId: CONTRACT_ID,
+    networkPassphrase: TESTNET_PASSPHRASE,
+    rpcUrl: RPC_URL,
+  });
+  assertEveryMethodEncodes("vesting", client);
+});
+
+test("vesting: ForgeError 1 through 16 map to names and messages", () => {
+  assertForgeErrors(ForgeError);
+});
