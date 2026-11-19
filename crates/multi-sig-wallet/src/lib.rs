@@ -2356,6 +2356,9 @@ mod events {
         #[topic]
         pub tx_id: u64,
         pub submitter: Address,
+    }
+
+    #[contractevent]
     pub struct WalletPaused {
         #[topic]
         pub wallet: Address,
