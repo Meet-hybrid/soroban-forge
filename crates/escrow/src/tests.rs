@@ -1226,3 +1226,46 @@ fn conservation_holds_on_every_terminal_path() {
         }
     }
 }
+
+#[test]
+fn cancellation_before_saved_cursor_restarts_cleanly_at_cursor_zero() {
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let ids = [
+        create(&client, &token, buyer, seller, arbiter, TIMEOUT),
+        create(&client, &token, buyer, seller, arbiter, TIMEOUT),
+        create(&client, &token, buyer, seller, arbiter, TIMEOUT),
+        create(&client, &token, buyer, seller, arbiter, TIMEOUT),
+    ];
+
+    let handed_cursor = client.escrows_for_participant(buyer, &0, &2);
+    assert_eq!(handed_cursor.next_cursor, Some(2));
+    client.cancel(&ids[1]);
+
+    let continued = client.escrows_for_participant(buyer, &2, &2);
+    assert_eq!(continued.total, 3);
+    assert_eq!(continued.ids.len(), 1);
+    assert_eq!(continued.ids.get_unchecked(0), ids[3]);
+
+    let restarted = client.escrows_for_participant(buyer, &0, &u32::MAX);
+    assert_eq!(restarted.total, 3);
+    assert_eq!(restarted.ids.get_unchecked(0), ids[0]);
+    assert_eq!(restarted.ids.get_unchecked(1), ids[2]);
+    assert_eq!(restarted.ids.get_unchecked(2), ids[3]);
+}
+
+#[test]
+fn cancellation_of_only_remaining_index_yields_empty_first_page_and_no_cursor() {
+    let (_env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+
+    let before = client.escrows_for_participant(buyer, &0, &1);
+    assert_eq!(before.next_cursor, None);
+    client.cancel(&id);
+
+    let after = client.escrows_for_participant(buyer, &0, &1);
+    assert_eq!(after.total, 0);
+    assert_eq!(after.ids.len(), 0);
+    assert_eq!(after.next_cursor, None);
+}

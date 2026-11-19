@@ -1,7 +1,7 @@
 use crate::cli::VerifyArgs;
 use crate::commands::build::{self, CONTRACT_PACKAGES};
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ pub fn run(args: VerifyArgs) -> Result<()> {
     match (args.wasm.as_deref(), args.expected.as_deref()) {
         (Some(wasm), expected) => verify_wasm(wasm, expected, args.package.as_deref()),
         (None, Some(expected)) => verify_expected(expected, args.package.as_deref()),
-        (None, None) => verify_manifest(&args.manifest),
+        (None, None) => verify_manifest(&args.manifest, args.json),
     }
 }
 
@@ -118,72 +118,142 @@ fn verify_expected(expected: &str, package: Option<&str>) -> Result<()> {
 
 /// `--manifest <PATH>`: validate every listed artifact in the provenance
 /// manifest against a deterministic rebuild of the contract packages.
-fn verify_manifest(manifest_path: &str) -> Result<()> {
+fn verify_manifest(manifest_path: &str, json: bool) -> Result<()> {
     let manifest = parse_manifest(Path::new(manifest_path))?;
 
     build::ensure_wasm_target_installed()?;
-    build::build_contract_wasm(None).context("rebuilding contracts for provenance verification")?;
+    let stdout = if json {
+        std::process::Stdio::null()
+    } else {
+        std::process::Stdio::inherit()
+    };
+    build::build_contract_wasm_with_stdout(None, stdout)
+        .context("rebuilding contracts for provenance verification")?;
 
-    println!("Verifying provenance manifest against source rebuild");
-    if let Some(commit) = manifest.git_commit.as_deref() {
-        println!("  git_commit:   {commit}");
-    }
-    if let Some(generated_at) = manifest.generated_at.as_deref() {
-        println!("  generated_at: {generated_at}");
-    }
-    if let Some(target) = manifest.target.as_deref() {
-        println!("  target:       {target}");
-    }
-
-    let mut mismatches = 0;
-    print_header("Expected SHA256", "Actual SHA256");
-    for artifact in &manifest.artifacts {
-        let rebuilt_path = build::wasm_release_dir().join(&artifact.name);
-        let actual_hash = match sha256_hex_file(&rebuilt_path) {
-            Ok(hash) => hash,
-            Err(error) => {
-                println!(
-                    "{:<32} {:<66} {:<66} MISSING ({error})",
-                    artifact.name, artifact.sha256, "-"
-                );
-                mismatches += 1;
-                continue;
+    let summary = summarize_manifest(&manifest, &build::wasm_release_dir())?;
+    if json {
+        println!("{}", serde_json::to_string(&summary)?);
+    } else {
+        println!("Verifying provenance manifest against source rebuild");
+        for (label, value) in [
+            ("git_commit", &manifest.git_commit),
+            ("generated_at", &manifest.generated_at),
+            ("target", &manifest.target),
+        ] {
+            if let Some(value) = value {
+                println!("  {label:<13} {value}");
             }
-        };
-        // The manifest records the artifact size it was generated from; a
-        // divergent size is its own drift signal even when by slim chance the
-        // hash still matches.
-        let size_drift = match artifact.bytes {
-            Some(recorded) => match fs::metadata(&rebuilt_path).map(|meta| meta.len()) {
-                Ok(actual) if actual != recorded => {
-                    println!(
-                        "  note: {:<32} size drifted: manifest {recorded} bytes vs rebuilt {actual} bytes",
-                        artifact.name,
-                    );
-                    true
-                }
-                _ => false,
-            },
-            None => false,
-        };
-        let status = compare(&artifact.sha256, &actual_hash, None);
-        print_row(
-            &artifact.name,
-            "Expected SHA256",
-            &artifact.sha256,
-            "Actual SHA256",
-            &actual_hash,
-            status,
-        );
-        if status == VerifyStatus::Mismatch || size_drift {
-            mismatches += 1;
+        }
+        print_header("Expected SHA256", "Actual SHA256");
+        for row in &summary.artifacts {
+            if row.size_drift {
+                println!(
+                    "  note: {:<32} size drifted: manifest {} bytes vs rebuilt {} bytes",
+                    row.name,
+                    row.expected_bytes.unwrap_or_default(),
+                    row.actual_bytes.unwrap_or_default(),
+                );
+            }
+            match &row.actual_sha256 {
+                Some(hash) => print_row(
+                    row.name,
+                    "Expected SHA256",
+                    row.expected_sha256,
+                    "Actual SHA256",
+                    hash,
+                    compare(row.expected_sha256, hash, None),
+                ),
+                None => println!(
+                    "{:<32} {:<66} {:<66} MISSING",
+                    row.name, row.expected_sha256, "-"
+                ),
+            }
         }
     }
 
-    if mismatches > 0 {
-        bail!("provenance verification failed: {mismatches} artifact(s) drifted");
+    summary.finish()
+}
+
+#[derive(Serialize)]
+struct ManifestSummary<'a> {
+    ok: bool,
+    artifacts: Vec<ArtifactResult<'a>>,
+}
+
+impl ManifestSummary<'_> {
+    fn finish(&self) -> Result<()> {
+        if !self.ok {
+            let failures = self
+                .artifacts
+                .iter()
+                .filter(|row| row.status != ArtifactStatus::Match)
+                .count();
+            bail!("provenance verification failed: {failures} artifact(s) drifted");
+        }
+        Ok(())
     }
-    Ok(())
+}
+
+#[derive(Serialize)]
+struct ArtifactResult<'a> {
+    name: &'a str,
+    status: ArtifactStatus,
+    expected_sha256: &'a str,
+    actual_sha256: Option<String>,
+    expected_bytes: Option<u64>,
+    actual_bytes: Option<u64>,
+    size_drift: bool,
+}
+
+#[derive(PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ArtifactStatus {
+    Match,
+    Mismatch,
+    SizeDrift,
+    Missing,
+}
+
+fn summarize_manifest<'a>(manifest: &'a Manifest, dir: &Path) -> Result<ManifestSummary<'a>> {
+    let mut summary = ManifestSummary {
+        ok: true,
+        artifacts: Vec::with_capacity(manifest.artifacts.len()),
+    };
+    for artifact in &manifest.artifacts {
+        let path = dir.join(&artifact.name);
+        let mut row = ArtifactResult {
+            name: &artifact.name,
+            status: ArtifactStatus::Missing,
+            expected_sha256: &artifact.sha256,
+            actual_sha256: None,
+            expected_bytes: artifact.bytes,
+            actual_bytes: None,
+            size_drift: false,
+        };
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let hash = sha256_hex(&bytes);
+                let len = bytes.len() as u64;
+                row.size_drift = artifact.bytes.is_some_and(|expected| expected != len);
+                row.status = if compare(&artifact.sha256, &hash, None) == VerifyStatus::Mismatch {
+                    ArtifactStatus::Mismatch
+                } else if row.size_drift {
+                    ArtifactStatus::SizeDrift
+                } else {
+                    ArtifactStatus::Match
+                };
+                row.actual_sha256 = Some(hash);
+                row.actual_bytes = Some(len);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", path.display()))
+            }
+        }
+        summary.ok &= row.status == ArtifactStatus::Match;
+        summary.artifacts.push(row);
+    }
+    Ok(summary)
 }
 
 /// Load and validate a provenance manifest, normalizing every listed SHA-256
@@ -191,7 +261,7 @@ fn verify_manifest(manifest_path: &str) -> Result<()> {
 fn parse_manifest(path: &Path) -> Result<Manifest> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read provenance manifest at {}", path.display()))?;
-    let manifest: Manifest = serde_json::from_str(&raw)
+    let mut manifest: Manifest = serde_json::from_str(&raw)
         .with_context(|| format!("malformed provenance manifest at {}", path.display()))?;
     if manifest.schema != "soroban-forge/provenance@1" {
         bail!(
@@ -199,8 +269,8 @@ fn parse_manifest(path: &Path) -> Result<Manifest> {
             manifest.schema
         );
     }
-    for artifact in &manifest.artifacts {
-        expect_valid_sha256(&artifact.sha256)?;
+    for artifact in &mut manifest.artifacts {
+        artifact.sha256 = expect_valid_sha256(&artifact.sha256)?;
     }
     Ok(manifest)
 }
@@ -341,6 +411,47 @@ mod tests {
             "soroban-forge-verify-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn manifest_summary_serializes_success_and_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let hash = sha256_hex(b"abc");
+        let good = serde_json::json!({"name": "good.wasm", "sha256": hash, "bytes": 3});
+        let mut data = serde_json::json!({
+            "schema": "soroban-forge/provenance@1", "artifacts": [good]
+        });
+        fs::write(dir.path().join("good.wasm"), b"abc").unwrap();
+        fs::write(&manifest_path, data.to_string()).unwrap();
+        let manifest = parse_manifest(&manifest_path).unwrap();
+        let summary = summarize_manifest(&manifest, dir.path()).unwrap();
+        let output = serde_json::to_value(&summary).unwrap();
+        assert!(summary.finish().is_ok());
+        assert_eq!(output["ok"], true);
+        assert_eq!(output["artifacts"][0]["status"], "match");
+
+        fs::write(dir.path().join("mismatch.wasm"), b"other").unwrap();
+        fs::write(dir.path().join("size.wasm"), b"abc").unwrap();
+        data["artifacts"] = serde_json::json!([
+            good,
+            {"name": "mismatch.wasm", "sha256": hash, "bytes": 3},
+            {"name": "size.wasm", "sha256": hash, "bytes": 4},
+            {"name": "missing.wasm", "sha256": hash}
+        ]);
+        fs::write(&manifest_path, data.to_string()).unwrap();
+        let manifest = parse_manifest(&manifest_path).unwrap();
+        let summary = summarize_manifest(&manifest, dir.path()).unwrap();
+        let output = serde_json::to_value(&summary).unwrap();
+        assert!(summary.finish().is_err());
+        assert_eq!(output["ok"], false);
+        let rows = &output["artifacts"];
+        assert_eq!(rows[1]["status"], "mismatch");
+        assert_eq!(rows[1]["size_drift"], true);
+        assert_eq!(rows[1]["actual_bytes"], 5);
+        assert_eq!(rows[2]["status"], "size_drift");
+        assert_eq!(rows[3]["status"], "missing");
+        assert!(rows[3]["actual_sha256"].is_null());
     }
 
     #[test]
