@@ -35,8 +35,14 @@ pub struct TestArgs {
 #[derive(Args, Debug, Clone)]
 pub struct DeployArgs {
     pub wasm: String,
-    #[arg(short, long, default_value = "testnet")]
-    pub network: String,
+    #[arg(short, long)]
+    pub network: Option<String>,
+    #[arg(long)]
+    pub network_profile: Option<String>,
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+    #[arg(long)]
+    pub network_passphrase: Option<String>,
     #[arg(short, long)]
     pub source: Option<String>,
 }
@@ -87,9 +93,15 @@ pub struct InvokeArgs {
     /// Function arguments (key=value format)
     #[arg(long = "arg", action = clap::ArgAction::Append)]
     pub args: Vec<String>,
-    /// Network to use
-    #[arg(long, default_value = "testnet")]
-    pub network: String,
+    /// Network name to use
+    #[arg(long)]
+    pub network: Option<String>,
+    #[arg(long)]
+    pub network_profile: Option<String>,
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+    #[arg(long)]
+    pub network_passphrase: Option<String>,
     /// Source account
     #[arg(long)]
     pub source: Option<String>,
@@ -109,9 +121,15 @@ pub struct EventsArgs {
     /// Event topic name filter
     #[arg(long)]
     pub topic: Option<String>,
-    /// Network to use
-    #[arg(long, default_value = "testnet")]
-    pub network: String,
+    /// Network name to use
+    #[arg(long)]
+    pub network: Option<String>,
+    #[arg(long)]
+    pub network_profile: Option<String>,
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+    #[arg(long)]
+    pub network_passphrase: Option<String>,
     /// Follow new events continuously (alias: --follow)
     #[arg(long, alias = "follow")]
     pub stream: bool,
@@ -140,9 +158,15 @@ pub struct InspectArgs {
     /// Output as JSON for programmatic use.
     #[arg(long, default_value_t = false)]
     pub json: bool,
-    /// Network to use.
-    #[arg(long, default_value = "testnet")]
-    pub network: String,
+    /// Network name to use.
+    #[arg(long)]
+    pub network: Option<String>,
+    #[arg(long)]
+    pub network_profile: Option<String>,
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+    #[arg(long)]
+    pub network_passphrase: Option<String>,
     /// Source account.
     #[arg(long)]
     pub source: Option<String>,

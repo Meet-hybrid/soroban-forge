@@ -134,6 +134,12 @@ fn run_dry_run(args: &InspectArgs) -> Result<()> {
 }
 
 fn fetch_state(args: &InspectArgs, contract: &str) -> Result<String> {
+    let network = crate::network_profiles::resolve_network(
+        args.network.as_deref(),
+        args.network_profile.as_deref(),
+        args.rpc_url.as_deref(),
+        args.network_passphrase.as_deref(),
+    )?;
     let mut command = std::process::Command::new("stellar");
     command
         .arg("contract")
@@ -141,10 +147,17 @@ fn fetch_state(args: &InspectArgs, contract: &str) -> Result<String> {
         .arg("--id")
         .arg(contract)
         .arg("--network")
-        .arg(&args.network)
+        .arg(&network.name)
         .arg("--")
         .arg("inspect")
         .arg("--json");
+
+    if let Some(rpc_url) = network.rpc_url {
+        command.arg("--rpc-url").arg(rpc_url);
+    }
+    if let Some(passphrase) = network.network_passphrase {
+        command.arg("--network-passphrase").arg(passphrase);
+    }
 
     if let Some(source) = &args.source {
         command.arg("--source").arg(source);
@@ -344,7 +357,10 @@ mod tests {
             contract: None,
             keys: vec![],
             json: false,
-            network: "testnet".to_string(),
+            network: Some("testnet".to_string()),
+            network_profile: None,
+            rpc_url: None,
+            network_passphrase: None,
             source: None,
             wasm: Some(wasm.clone()),
             expected: Some("not-a-hash".to_string()),
@@ -366,7 +382,10 @@ mod tests {
             contract: None,
             keys: vec![],
             json: false,
-            network: "testnet".to_string(),
+            network: Some("testnet".to_string()),
+            network_profile: None,
+            rpc_url: None,
+            network_passphrase: None,
             source: None,
             wasm: Some(wasm.clone()),
             expected: Some("a".repeat(64)),

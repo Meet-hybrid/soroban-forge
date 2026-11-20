@@ -24,6 +24,47 @@ without depending on the workspace layout or a stale shared-utils version pin.
 
 Run the contributor preflight before opening a pull request or deploying a contract:
 
+### Reusable network profiles
+
+Network-aware commands (`deploy`, `invoke`, `events`, and `inspect`) accept a
+named profile from `~/.config/soroban-forge/networks.toml`. Set
+`SOROBAN_FORGE_NETWORK_PROFILES` to use another file. The format is TOML:
+
+```toml
+[profiles.local]
+rpc_url = "http://127.0.0.1:8000"
+network_passphrase = "Standalone Network ; February 2017"
+
+[profiles.testnet-custom]
+rpc_url = "https://rpc.testnet.example"
+network_passphrase = "Test SDF Network ; September 2015"
+```
+
+Select a profile with `--network-profile`:
+
+```bash
+cargo run -p soroban-forge-cli -- invoke \
+  --contract CAAAA \
+  --function balance \
+  --network-profile local
+
+cargo run -p soroban-forge-cli -- deploy target/contract.wasm \
+  --network-profile testnet-custom
+```
+
+Precedence is: explicit `--network`, `--rpc-url`, and `--network-passphrase` values
+override profile values; profile values override the existing defaults (normally
+`testnet` with Stellar CLI default RPC/passphrase behavior). `--network-profile`
+must name a complete profile. Missing RPC URLs or passphrases, malformed URLs,
+unknown names, unreadable files, and malformed TOML fail before command execution
+with an actionable error.
+
+Profile files are configuration only: secret material is forbidden. Do not put
+secret seeds, private keys, source-account secrets, environment substitutions,
+or similarly named credential fields in a profile; such fields are rejected.
+
+Run the local environment preflight before deploying a contract:
+
 ```bash
 # Check the expected develop base, stellar, cargo, and the wasm32v1-none target
 cargo run -p soroban-forge-cli -- doctor

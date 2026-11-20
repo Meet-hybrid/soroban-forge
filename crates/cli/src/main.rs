@@ -15,6 +15,8 @@
 
 mod cli;
 mod commands;
+mod network_profiles;
+
 #[path = "commands/decode_failure.rs"]
 mod decode_failure;
 
@@ -372,6 +374,6 @@ mod tests {
             Some("CA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAXE")
         );
         assert!(args.json);
-        assert_eq!(args.network, "testnet");
+        assert_eq!(args.network.as_deref(), Some("testnet"));
     }
 }

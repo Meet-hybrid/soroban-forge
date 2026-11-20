@@ -18,7 +18,7 @@ fn run_with<F>(args: &InvokeArgs, execute: F) -> Result<()>
 where
     F: FnOnce(&mut Command) -> io::Result<CommandOutput>,
 {
-    let mut command = invoke_command(args);
+    let mut command = invoke_command(args)?;
     let output = execute(&mut command).context("failed to run stellar contract invoke")?;
     ensure_success("contract invocation", &output)?;
 
@@ -31,8 +31,13 @@ where
     Ok(())
 }
 
-fn invoke_command(args: &InvokeArgs) -> Command {
-    // For MVP, we'll use the stellar CLI as the transport layer
+fn invoke_command(args: &InvokeArgs) -> Result<Command> {
+    let network = crate::network_profiles::resolve_network(
+        args.network.as_deref(),
+        args.network_profile.as_deref(),
+        args.rpc_url.as_deref(),
+        args.network_passphrase.as_deref(),
+    )?;
     let mut cmd = Command::new("stellar");
     cmd.arg("contract").arg("invoke");
     cmd.arg("--id").arg(&args.contract);
@@ -41,22 +46,24 @@ fn invoke_command(args: &InvokeArgs) -> Command {
         cmd.arg("--source-account").arg(source);
     }
 
-    cmd.arg("--network").arg(&args.network);
+    cmd.arg("--network").arg(&network.name);
+    if let Some(rpc_url) = network.rpc_url {
+        cmd.arg("--rpc-url").arg(rpc_url);
+    }
+    if let Some(passphrase) = network.network_passphrase {
+        cmd.arg("--network-passphrase").arg(passphrase);
+    }
 
-    // Add the function name
     cmd.arg("--").arg(&args.function);
-
-    // Parse and add arguments
     for arg in &args.args {
         if let Some((key, value)) = arg.split_once('=') {
             cmd.arg(format!("--{}", key)).arg(value);
         } else {
-            // Positional argument
             cmd.arg(arg);
         }
     }
 
-    cmd
+    Ok(cmd)
 }
 
 #[cfg(test)]
@@ -68,14 +75,17 @@ mod tests {
             contract: "C123".to_owned(),
             function: "get_threshold".to_owned(),
             args: vec!["owner=GABC".to_owned(), "positional".to_owned()],
-            network: "testnet".to_owned(),
+            network: Some("testnet".to_owned()),
+            network_profile: None,
+            rpc_url: None,
+            network_passphrase: None,
             source: Some("alice".to_owned()),
         }
     }
 
     #[test]
     fn invoke_command_preserves_arguments_and_successful_behavior() {
-        let command = invoke_command(&invoke_args());
+        let command = invoke_command(&invoke_args()).unwrap();
         let args: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())

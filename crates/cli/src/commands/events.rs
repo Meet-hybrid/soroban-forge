@@ -51,8 +51,8 @@ fn run_once_with<F>(args: &EventsArgs, start_ledger: Option<u64>, execute: F) ->
 where
     F: FnOnce(&mut Command) -> io::Result<CommandOutput>,
 {
-    let output =
-        execute(&mut event_command(args, start_ledger)).context("failed to run stellar events")?;
+    let mut command = event_command(args, start_ledger)?;
+    let output = execute(&mut command).context("failed to run stellar events")?;
     ensure_success("event retrieval", &output)?;
 
     let value: Value = if output.stdout.trim().is_empty() {
@@ -64,18 +64,31 @@ where
     Ok(event_values(&value)?.into_iter().cloned().collect())
 }
 
-fn event_command(args: &EventsArgs, start_ledger: Option<u64>) -> Command {
+fn event_command(args: &EventsArgs, start_ledger: Option<u64>) -> Result<Command> {
+    let network = crate::network_profiles::resolve_network(
+        args.network.as_deref(),
+        args.network_profile.as_deref(),
+        args.rpc_url.as_deref(),
+        args.network_passphrase.as_deref(),
+    )?;
     let mut command = Command::new("stellar");
     command
         .arg("events")
         .arg("--id")
         .arg(&args.contract)
         .arg("--network")
-        .arg(&args.network)
+        .arg(network.name)
         .arg("--output")
         .arg("json")
         .arg("--count")
         .arg(POLL_EVENT_COUNT);
+
+    if let Some(rpc_url) = network.rpc_url {
+        command.arg("--rpc-url").arg(rpc_url);
+    }
+    if let Some(passphrase) = network.network_passphrase {
+        command.arg("--network-passphrase").arg(passphrase);
+    }
 
     if let Some(ledger) = start_ledger {
         command.arg("--start-ledger").arg(ledger.to_string());
@@ -83,7 +96,7 @@ fn event_command(args: &EventsArgs, start_ledger: Option<u64>) -> Command {
     if let Some(event_type) = &args.event_type {
         command.arg("--type").arg(event_type);
     }
-    command
+    Ok(command)
 }
 
 fn matches_topic(event: &Value, topic: Option<&str>) -> bool {
@@ -289,7 +302,10 @@ mod tests {
             since: None,
             event_type: None,
             topic: None,
-            network: "testnet".to_owned(),
+            network: Some("testnet".to_owned()),
+            network_profile: None,
+            rpc_url: None,
+            network_passphrase: None,
             stream: false,
             format: EventsFormat::Pretty,
             jsonl: false,
