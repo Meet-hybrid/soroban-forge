@@ -15,17 +15,32 @@
 //!    underfunded payer — fails with the same error the single-sale path
 //!    raises for that defect and leaves every balance and the committed
 //!    summary byte-identical to the pre-call state.
+//! 6. Multi-recipient rounding residue: for random splits of 1 to
+//!    `MAX_ROYALTY_RECIPIENTS` distinct recipients (total bps <= 10_000) and
+//!    amounts from 1 to 10^18 stroops, over 1,024 randomized `settle_sale`
+//!    sales (128 cases of 8) plus a 1–4 sale `settle_sales` batch per case,
+//!    measured from real token balance deltas against an exact `i128` model:
+//!    - strict value conservation: `seller_net + sum(recipient_shares) ==
+//!      sale_amount` and the payer pays exactly `sale_amount`;
+//!    - floor discipline: each recipient receives exactly
+//!      `floor(amount * bps / 10_000)`;
+//!    - dust allocation: `seller_net >= amount - floor(amount * total_bps /
+//!      10_000)`, with the extra dust below the recipient count;
+//!    - zero-sale invariance: amounts `<= 0` are rejected with
+//!      `InvalidInput` by `settle_sale`, `settle_sales` and `distribute` for
+//!      every configuration, leaving balances and the summary untouched.
 
 //! 4. Batch conservation: the aggregate of a random batch satisfies `sum(seller_net) + sum(royalty_share) == sum(amount)`.
 //! 5. Cap boundary: a batch exceeding `MAX_SETTLE_SALES` is rejected before any transfer.
 //! 6. Rollback integrity: a failed batch transfer leaves every balance and the summary untouched.
 
 use crate::{
-    MarketplaceRoyalties, SettlementSummary, SorobanForgeMarketplaceRoyaltiesClient,
-    MAX_SETTLE_SALES,
+    MarketplaceRoyalties, RoyaltyShare, SettlementSummary, SorobanForgeMarketplaceRoyaltiesClient,
+    MAX_ROYALTY_RECIPIENTS, MAX_SETTLE_SALES,
 };
 use proptest::collection::vec as prop_vec;
 use proptest::prelude::*;
+use proptest::test_runner::RngSeed;
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
@@ -639,4 +654,369 @@ proptest! {
             "the single-sale cross-check leaves the summary untouched"
         );
     }
+}
+
+// -----------------------------------------------------------------------
+// Multi-recipient rounding residue
+// -----------------------------------------------------------------------
+
+/// Upper bound of the randomized sale amounts: 10^18 stroops.
+const MAX_SPLIT_AMOUNT: i128 = 1_000_000_000_000_000_000;
+
+/// Sales per `settle_sales` batch in the residue property.
+const MAX_SPLIT_BATCH: usize = 4;
+
+/// Single `settle_sale` sales per residue case; 128 cases of 8 give 1,024
+/// randomized sales without paying for 1,024 contract deployments.
+const SINGLE_SALES_PER_CASE: usize = 8;
+
+/// Residue property cases.
+const SPLIT_CASES: u32 = 128;
+
+/// A world whose collection carries a multi-recipient split.
+struct SplitWorld {
+    env: Env,
+    token: Address,
+    contract_id: Address,
+    collection: Address,
+    payer: Address,
+    sellers: Vec<Address>,
+    recipients: Vec<Address>,
+    bps: Vec<u32>,
+}
+
+/// Register `bps.len()` distinct recipients at the given rates and mint the
+/// payer exactly `mint_amount`.
+fn setup_split_world(bps: &[u32], mint_amount: i128) -> SplitWorld {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(admin).address();
+    let collection = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let sellers: Vec<Address> = (0..SELLER_POOL).map(|_| Address::generate(&env)).collect();
+    let recipients: Vec<Address> = bps.iter().map(|_| Address::generate(&env)).collect();
+    if mint_amount > 0 {
+        StellarAssetClient::new(&env, &token).mint(&payer, &mint_amount);
+    }
+
+    let contract_id = env.register(MarketplaceRoyalties, ());
+    let mut shares = soroban_sdk::Vec::new(&env);
+    for (recipient, bps) in recipients.iter().zip(bps) {
+        shares.push_back(RoyaltyShare {
+            recipient: recipient.clone(),
+            bps: *bps,
+        });
+    }
+    SorobanForgeMarketplaceRoyaltiesClient::new(&env, &contract_id)
+        .set_royalty_splits(&collection, &shares);
+
+    SplitWorld {
+        env,
+        token,
+        contract_id,
+        collection,
+        payer,
+        sellers,
+        recipients,
+        bps: bps.to_vec(),
+    }
+}
+
+impl SplitWorld {
+    fn client(&self) -> SorobanForgeMarketplaceRoyaltiesClient<'_> {
+        SorobanForgeMarketplaceRoyaltiesClient::new(&self.env, &self.contract_id)
+    }
+
+    fn balance(&self, address: &Address) -> i128 {
+        TokenClient::new(&self.env, &self.token).balance(address)
+    }
+
+    /// Payer, sellers, recipients and contract balances in a fixed order.
+    fn balances(&self) -> Vec<i128> {
+        core::iter::once(&self.payer)
+            .chain(&self.sellers)
+            .chain(&self.recipients)
+            .chain(core::iter::once(&self.contract_id))
+            .map(|address| self.balance(address))
+            .collect()
+    }
+
+    fn recipient_balances(&self) -> Vec<i128> {
+        self.recipients.iter().map(|r| self.balance(r)).collect()
+    }
+
+    fn summary(&self) -> Option<SettlementSummary> {
+        self.client()
+            .try_get_settlement_summary(&self.collection)
+            .ok()
+            .and_then(|result| result.ok())
+    }
+}
+
+/// Exact model of one recipient's share. `amount <= 10^18` and
+/// `bps <= 10_000` keep the product far inside `i128`, so this is plain
+/// floored division, independent of the contract's overflow-safe
+/// quotient/remainder decomposition.
+fn floored_share(amount: i128, bps: u32) -> i128 {
+    amount * i128::from(bps) / 10_000
+}
+
+/// Assert every per-sale invariant for one settled sale.
+fn assert_split_invariants(
+    amount: i128,
+    bps: &[u32],
+    recipient_deltas: &[i128],
+    seller_net: i128,
+    royalty_share: i128,
+) -> Result<(), TestCaseError> {
+    let total_bps: u32 = bps.iter().sum();
+    let mut sum_shares = 0i128;
+    for (index, (&rate, &delta)) in bps.iter().zip(recipient_deltas).enumerate() {
+        // Floor discipline: exactly floor(amount * bps / 10_000), never up.
+        prop_assert_eq!(
+            delta,
+            floored_share(amount, rate),
+            "recipient {} at {} bps on {} must receive the floored share",
+            index,
+            rate,
+            amount
+        );
+        prop_assert!(delta * 10_000 <= amount * i128::from(rate));
+        sum_shares += delta;
+    }
+    prop_assert_eq!(royalty_share, sum_shares);
+    // Strict value conservation.
+    prop_assert_eq!(
+        seller_net + sum_shares,
+        amount,
+        "seller_net + recipient shares must equal the sale amount"
+    );
+    prop_assert!(seller_net >= 0);
+    // Dust allocation: all residue of the per-recipient floors goes to the
+    // seller, and it is less than one stroop per recipient.
+    let aggregate_floor_net = amount - floored_share(amount, total_bps);
+    prop_assert!(
+        seller_net >= aggregate_floor_net,
+        "seller_net {} must keep all rounding dust (>= {})",
+        seller_net,
+        aggregate_floor_net
+    );
+    prop_assert!(seller_net - aggregate_floor_net < bps.len() as i128);
+    Ok(())
+}
+
+/// 1 to `MAX_ROYALTY_RECIPIENTS` rates summing to at most 10_000, with the
+/// empty (all-zero) and full (exactly 10_000) budgets weighted in.
+fn split_bps_strategy() -> impl Strategy<Value = Vec<u32>> {
+    let budget = prop_oneof![
+        1 => Just(0u32),
+        2 => Just(10_000u32),
+        7 => 0u32..=10_000,
+    ];
+    (1usize..=MAX_ROYALTY_RECIPIENTS as usize, budget).prop_flat_map(|(count, budget)| {
+        prop_vec(0u32..=budget, count - 1).prop_map(move |mut cuts| {
+            // Sorted cut points partition [0, budget] into `count` rates.
+            cuts.sort_unstable();
+            let mut rates = Vec::with_capacity(count);
+            let mut previous = 0;
+            for cut in cuts {
+                rates.push(cut - previous);
+                previous = cut;
+            }
+            rates.push(budget - previous);
+            rates
+        })
+    })
+}
+
+/// Sale amounts from 1 to 10^18, biased toward the residue-heavy edges:
+/// tiny amounts, values one either side of a multiple of 10_000, and the
+/// upper bound itself.
+fn split_amount_strategy() -> impl Strategy<Value = i128> {
+    prop_oneof![
+        3 => 1i128..=MAX_SPLIT_AMOUNT,
+        2 => 1i128..=20_000,
+        2 => (1i128..=MAX_SPLIT_AMOUNT / 10_000)
+            .prop_flat_map(|k| (Just(k * 10_000), -1i128..=1))
+            .prop_map(|(base, offset)| (base + offset).clamp(1, MAX_SPLIT_AMOUNT)),
+        1 => (MAX_SPLIT_AMOUNT - 10_000)..=MAX_SPLIT_AMOUNT,
+    ]
+}
+
+/// Non-positive sale amounts.
+fn invalid_amount_strategy() -> impl Strategy<Value = i128> {
+    prop_oneof![Just(0i128), Just(-1i128), Just(i128::MIN), i128::MIN..=0,]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        // SPLIT_CASES * SINGLE_SALES_PER_CASE = 1,024 single sales, plus a
+        // 1–4 sale batch per case.
+        cases: SPLIT_CASES,
+        // Fixed seed: the same sales run on every machine and in CI.
+        rng_seed: RngSeed::Fixed(0x524f_5941_4c54_5900),
+        ..ProptestConfig::default()
+    })]
+
+    /// Value conservation, floor discipline and dust allocation hold for
+    /// `settle_sale` and `settle_sales` under random multi-recipient splits.
+    #[test]
+    fn prop_multi_recipient_rounding_residue(
+        bps in split_bps_strategy(),
+        amounts in prop_vec(split_amount_strategy(), SINGLE_SALES_PER_CASE),
+        batch in prop_vec((0usize..SELLER_POOL, split_amount_strategy()), 1..=MAX_SPLIT_BATCH),
+    ) {
+        let batch_total: i128 = batch.iter().map(|(_, a)| a).sum();
+        let singles_total: i128 = amounts.iter().sum();
+        let w = setup_split_world(&bps, singles_total + batch_total);
+        let client = w.client();
+
+        // Single sales, each checked against its own balance deltas.
+        for (i, &amount) in amounts.iter().enumerate() {
+        let seller = &w.sellers[i % SELLER_POOL];
+        let seller_before = w.balance(seller);
+        let recipients_before = w.recipient_balances();
+        let payer_before = w.balance(&w.payer);
+        let settlement = client.settle_sale(&w.collection, &w.token, &w.payer, seller, &amount);
+        let deltas: Vec<i128> = w
+            .recipient_balances()
+            .iter()
+            .zip(&recipients_before)
+            .map(|(after, before)| after - before)
+            .collect();
+        prop_assert_eq!(w.balance(seller) - seller_before, settlement.seller_net);
+        prop_assert_eq!(payer_before - w.balance(&w.payer), amount);
+        assert_split_invariants(
+            amount,
+            &w.bps,
+            &deltas,
+            settlement.seller_net,
+            settlement.royalty_share,
+        )?;
+        prop_assert_eq!(w.balance(&w.contract_id), 0, "the contract never takes custody");
+
+        // The read-only preview agrees with what was settled.
+        let preview = client.preview_settlement(&w.collection, &amount);
+        prop_assert_eq!(preview.seller_net, settlement.seller_net);
+        prop_assert_eq!(preview.royalty_amount, settlement.royalty_share);
+        prop_assert_eq!(
+            preview.rounding_residue,
+            settlement.seller_net - (amount - floored_share(amount, w.bps.iter().sum()))
+        );
+        }
+
+        // Batch: per-sale settlements and aggregate balance deltas.
+        let sellers_before: Vec<i128> = w.sellers.iter().map(|s| w.balance(s)).collect();
+        let recipients_before = w.recipient_balances();
+        let mut sales = soroban_sdk::Vec::new(&w.env);
+        for (seller, sale_amount) in &batch {
+            sales.push_back((w.sellers[*seller].clone(), *sale_amount));
+        }
+        let settlements = client.settle_sales(&w.collection, &w.token, &w.payer, &sales);
+        prop_assert_eq!(settlements.len() as usize, batch.len());
+
+        let mut expected_seller_gain = std::vec![0i128; SELLER_POOL];
+        let mut expected_recipient_gain = std::vec![0i128; w.bps.len()];
+        for (i, (seller, sale_amount)) in batch.iter().enumerate() {
+            let settlement = settlements.get(i as u32).unwrap();
+            let shares: Vec<i128> =
+                w.bps.iter().map(|&rate| floored_share(*sale_amount, rate)).collect();
+            assert_split_invariants(
+                *sale_amount,
+                &w.bps,
+                &shares,
+                settlement.seller_net,
+                settlement.royalty_share,
+            )?;
+            expected_seller_gain[*seller] += settlement.seller_net;
+            for (gain, share) in expected_recipient_gain.iter_mut().zip(&shares) {
+                *gain += share;
+            }
+        }
+        for (index, seller) in w.sellers.iter().enumerate() {
+            prop_assert_eq!(w.balance(seller) - sellers_before[index], expected_seller_gain[index]);
+        }
+        for (index, before) in recipients_before.iter().enumerate() {
+            prop_assert_eq!(
+                w.balance(&w.recipients[index]) - before,
+                expected_recipient_gain[index],
+                "batch recipient {} must receive the sum of its per-sale floors",
+                index
+            );
+        }
+        prop_assert_eq!(w.balance(&w.payer), 0, "the payer funds exactly every sale");
+        prop_assert_eq!(w.balance(&w.contract_id), 0);
+
+        let summary = w.summary().unwrap();
+        prop_assert_eq!(summary.sales, (SINGLE_SALES_PER_CASE + batch.len()) as u32);
+        prop_assert_eq!(summary.gross_volume, singles_total + batch_total);
+    }
+
+    /// Non-positive amounts are rejected with `InvalidInput` by every
+    /// settlement path, whatever the split, with no balance or summary change.
+    #[test]
+    fn prop_non_positive_amounts_always_reject(
+        bps in split_bps_strategy(),
+        invalid in invalid_amount_strategy(),
+        valid in split_amount_strategy(),
+        position in 0usize..MAX_SPLIT_BATCH,
+    ) {
+        let w = setup_split_world(&bps, valid * MAX_SPLIT_BATCH as i128);
+        let client = w.client();
+        let seller = &w.sellers[0];
+        let balances_before = w.balances();
+
+        let err = client
+            .try_settle_sale(&w.collection, &w.token, &w.payer, seller, &invalid)
+            .unwrap_err()
+            .unwrap();
+        prop_assert_eq!(err, ForgeError::InvalidInput);
+
+        let err = client
+            .try_distribute(&w.collection, &w.token, &w.payer, seller, &invalid)
+            .unwrap_err()
+            .unwrap();
+        prop_assert_eq!(err, ForgeError::InvalidInput);
+
+        // One invalid sale anywhere in an otherwise valid batch.
+        let mut sales = soroban_sdk::Vec::new(&w.env);
+        for i in 0..MAX_SPLIT_BATCH {
+            let sale_amount = if i == position { invalid } else { valid };
+            sales.push_back((w.sellers[i % SELLER_POOL].clone(), sale_amount));
+        }
+        let err = client
+            .try_settle_sales(&w.collection, &w.token, &w.payer, &sales)
+            .unwrap_err()
+            .unwrap();
+        prop_assert_eq!(err, ForgeError::InvalidInput);
+
+        prop_assert_eq!(w.balances(), balances_before, "a rejected sale moves no tokens");
+        prop_assert!(w.summary().is_none(), "a rejected sale commits no summary");
+    }
+}
+
+#[test]
+fn multi_recipient_residue_known_values() {
+    // 3 recipients at 3_333 bps each on 10_001 stroops: each floors to
+    // 3_333, so the seller keeps 10_001 - 9_999 = 2, one more than the
+    // aggregate floor (floor(10_001 * 9_999 / 10_000) = 9_999 -> net 2).
+    let w = setup_split_world(&[3_333, 3_333, 3_333], 10_001);
+    let settlement =
+        w.client()
+            .settle_sale(&w.collection, &w.token, &w.payer, &w.sellers[0], &10_001);
+    assert_eq!(settlement.royalty_share, 9_999);
+    assert_eq!(settlement.seller_net, 2);
+    assert_eq!(w.recipient_balances(), std::vec![3_333, 3_333, 3_333]);
+
+    // 5 recipients at 1 bps each on 9_999 stroops: every share floors to 0
+    // and the whole sale stays with the seller.
+    let w = setup_split_world(&[1, 1, 1, 1, 1], 9_999);
+    let settlement =
+        w.client()
+            .settle_sale(&w.collection, &w.token, &w.payer, &w.sellers[0], &9_999);
+    assert_eq!(settlement.royalty_share, 0);
+    assert_eq!(settlement.seller_net, 9_999);
+    assert_eq!(w.balance(&w.sellers[0]), 9_999);
 }

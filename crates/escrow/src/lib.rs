@@ -196,6 +196,10 @@
 //!   authorization.
 //! - `resolve` — arbiter only; the decision is final.
 //! - `cancel` — buyer, while `Pending`.
+//! - `extend_deadline` / `extend_basket_deadline` — **buyer** authorizes,
+//!   while `Funded`: moves the deadline later (`created_at + new_timeout`),
+//!   even after the current deadline has passed. A pending release request
+//!   is left as it is.
 //!
 //! ## Storage and TTL
 //!
@@ -265,6 +269,13 @@ pub const MIN_REVIEW_PERIOD: u64 = 60;
 /// Longest review window a buyer may set: 30 days.
 pub const MAX_REVIEW_PERIOD: u64 = 30 * 24 * 60 * 60;
 
+/// Highest arbiter fee an escrow may declare: 1000 basis points (10%).
+///
+/// The fee is deducted from the disputed balance before it is divided, so the
+/// cap bounds what an arbiter can withhold from the buyer and seller while
+/// still allowing a meaningful service fee.
+pub const MAX_ARBITER_FEE_BPS: u32 = 1_000;
+
 /// Public interface for the Soroban Forge escrow contract.
 #[contractclient(name = "SorobanForgeEscrowClient")]
 pub trait SorobanForgeEscrow {
@@ -310,6 +321,9 @@ pub trait SorobanForgeEscrow {
     ///   the transfer (insufficient balance, missing trustline, deauthorized
     ///   token, or undeployed token contract).
     fn deposit(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    /// Read-only deposit preflight.
+    fn preflight_deposit(env: Env, escrow_id: u64) -> DepositPreflight;
 
     /// Release the full remaining balance to the seller now. Requires the
     /// **buyer**; only valid while `Funded`. A seller who wants to be paid
@@ -397,8 +411,9 @@ pub trait SorobanForgeEscrow {
     fn dispute(env: Env, escrow_id: u64, claimant: Address) -> Result<(), ForgeError>;
 
     /// Resolve a dispute. Requires the arbiter; only valid while
-    /// `Disputed`. Pays the **remaining** balance to the seller (`true`)
-    /// or back to the buyer (`false`). The decision is final.
+    /// `Disputed`. Deducts the escrow's arbiter fee from the **remaining**
+    /// balance and pays the rest to the seller (`true`) or back to the buyer
+    /// (`false`). The decision is final.
     ///
     /// # Errors
     ///
@@ -413,8 +428,9 @@ pub trait SorobanForgeEscrow {
     ///
     /// Requires the arbiter; only valid while `Disputed` and only for
     /// `seller_bps <= 10_000`. The seller share is computed as
-    /// `amount * seller_bps / 10_000`, with the remainder retained by the
-    /// buyer. The split is final and settles both transfers atomically.
+    /// `distributable * seller_bps / 10_000`, where `distributable` is the
+    /// remaining balance minus the arbiter fee, with the remainder retained by
+    /// the buyer. The split is final and settles all transfers atomically.
     fn resolve_split(env: Env, escrow_id: u64, seller_bps: u32) -> Result<(), ForgeError>;
 
     /// Create an escrow with its own review window (seconds the buyer has to
@@ -435,6 +451,29 @@ pub trait SorobanForgeEscrow {
         amount: i128,
         timeout: u64,
         review_period: u64,
+    ) -> Result<u64, ForgeError>;
+
+    /// Create an escrow with an arbiter service fee, in basis points of the
+    /// disputed remaining balance. Capped at [`MAX_ARBITER_FEE_BPS`]; `0` is
+    /// equivalent to [`Self::create_escrow`].
+    ///
+    /// The fee is deducted on [`Self::resolve`] / [`Self::resolve_split`] and
+    /// paid to the arbiter; the awardee receives exactly the remainder.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — as [`Self::create_escrow`], or
+    ///   `arbiter_fee_bps` above [`MAX_ARBITER_FEE_BPS`].
+    #[allow(clippy::too_many_arguments)]
+    fn create_escrow_with_arbiter_fee(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        token: Address,
+        amount: i128,
+        timeout: u64,
+        arbiter_fee_bps: u32,
     ) -> Result<u64, ForgeError>;
 
     /// Seller asks to be paid `amount` (all or part of the remaining
@@ -478,6 +517,10 @@ pub trait SorobanForgeEscrow {
 
     /// The escrow's review window in seconds.
     fn review_period(env: Env, escrow_id: u64) -> u64;
+
+    /// The arbiter fee of a single-token escrow, in basis points. `0` when the
+    /// escrow was created without a fee.
+    fn get_arbiter_fee_bps(env: Env, escrow_id: u64) -> u32;
 
     /// Read-only summary of every caller-facing action on a single-token escrow.
     ///
@@ -628,6 +671,32 @@ pub trait SorobanForgeEscrow {
     /// * [`ForgeError::NotFound`] — no basket with this id.
     /// * [`ForgeError::InvalidInput`] — the basket is not `Pending`.
     fn cancel_basket(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    // -------------------------------------------------------------------
+    // Deadline extension
+    // -------------------------------------------------------------------
+
+    /// Move a funded single-token escrow's deadline later by replacing its
+    /// `timeout`: the deadline becomes `created_at + new_timeout`. Requires
+    /// the **buyer**; only valid while `Funded`.
+    ///
+    /// Allowed after the current deadline has passed, so a buyer can re-open
+    /// a late delivery as long as they have not refunded. A pending release
+    /// request is left untouched. Emits `DeadlineExtended`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no single-token escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — not `Funded`, or `new_timeout` does
+    ///   not exceed the current `timeout`.
+    /// * [`ForgeError::ArithmeticOverflow`] — `created_at + new_timeout`
+    ///   overflows.
+    fn extend_deadline(env: Env, escrow_id: u64, new_timeout: u64) -> Result<(), ForgeError>;
+
+    /// Basket form of [`Self::extend_deadline`]. Same rules and errors;
+    /// `NotFound` when no basket has this id.
+    fn extend_basket_deadline(env: Env, escrow_id: u64, new_timeout: u64)
+        -> Result<(), ForgeError>;
 
     /// Read the full basket record, including per-leg `released` accounting.
     ///
@@ -1064,6 +1133,13 @@ pub enum DataKey {
     /// Absent for escrows created before review windows existed, which read
     /// as [`DEFAULT_REVIEW_PERIOD`].
     ReviewPeriod(u64),
+    /// The arbiter fee in basis points for escrow `u64`, set at creation.
+    ///
+    /// Stored outside [`EscrowData`] so the record — and every event that
+    /// carries it — keeps its existing shape, and escrows created without a
+    /// fee (including every record written before fees existed) simply read
+    /// as `0`.
+    ArbiterFee(u64),
 }
 
 /// The deployable escrow contract.
@@ -1072,6 +1148,61 @@ pub struct Escrow;
 
 #[contractimpl]
 impl Escrow {
+    /// Read-only deposit preflight; this function performs no storage writes.
+    pub fn preflight_deposit(env: Env, escrow_id: u64) -> DepositPreflight {
+        let escrow = match Self::load_escrow(&env, escrow_id) {
+            Ok(value) => value,
+            Err(ForgeError::NotFound) => {
+                return DepositPreflight {
+                    status: DepositPreflightStatus::UnknownEscrow,
+                    escrow_id,
+                    token: None,
+                    buyer: None,
+                    required_amount: 0,
+                    buyer_balance: None,
+                    allowance: None,
+                }
+            }
+            Err(_) => {
+                return DepositPreflight {
+                    status: DepositPreflightStatus::Unavailable,
+                    escrow_id,
+                    token: None,
+                    buyer: None,
+                    required_amount: 0,
+                    buyer_balance: None,
+                    allowance: None,
+                }
+            }
+        };
+        if escrow.status != EscrowStatus::Pending || escrow.amount <= 0 {
+            return DepositPreflight {
+                status: DepositPreflightStatus::InvalidInput,
+                escrow_id,
+                token: Some(escrow.token),
+                buyer: Some(escrow.buyer),
+                required_amount: escrow.amount,
+                buyer_balance: None,
+                allowance: None,
+            };
+        }
+        let balance = preflight::read_balance(&env, &escrow.token, &escrow.buyer);
+        let status = match balance {
+            None => DepositPreflightStatus::Unavailable,
+            Some(value) if value >= escrow.amount => DepositPreflightStatus::Sufficient,
+            Some(_) => DepositPreflightStatus::InsufficientBalance,
+        };
+        DepositPreflight {
+            status,
+            escrow_id,
+            token: Some(escrow.token),
+            buyer: Some(escrow.buyer),
+            required_amount: escrow.amount,
+            buyer_balance: balance,
+            allowance: None,
+        }
+    }
+
     // -------------------------------------------------------------------
     // Lifecycle
     // -------------------------------------------------------------------
@@ -1099,6 +1230,42 @@ impl Escrow {
             amount,
             timeout,
             DEFAULT_REVIEW_PERIOD,
+            0,
+        )
+    }
+
+    /// Create an escrow whose arbiter earns `arbiter_fee_bps` of the disputed
+    /// balance when resolving.
+    ///
+    /// Buyer-authorized, like `create_escrow`. `arbiter_fee_bps` must not
+    /// exceed [`MAX_ARBITER_FEE_BPS`]; the fee is deducted from the remaining
+    /// balance on `resolve` and `resolve_split` and paid to the arbiter, and
+    /// the awardee receives exactly the rest. `0` is equivalent to
+    /// `create_escrow` and pays the arbiter nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_escrow_with_arbiter_fee(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        token: Address,
+        amount: i128,
+        timeout: u64,
+        arbiter_fee_bps: u32,
+    ) -> Result<u64, ForgeError> {
+        if arbiter_fee_bps > MAX_ARBITER_FEE_BPS {
+            return Err(ForgeError::InvalidInput);
+        }
+        Self::create_single(
+            &env,
+            buyer,
+            seller,
+            arbiter,
+            token,
+            amount,
+            timeout,
+            DEFAULT_REVIEW_PERIOD,
+            arbiter_fee_bps,
         )
     }
 
@@ -1129,6 +1296,7 @@ impl Escrow {
             amount,
             timeout,
             review_period,
+            0,
         )
     }
 
@@ -1142,6 +1310,7 @@ impl Escrow {
         amount: i128,
         timeout: u64,
         review_period: u64,
+        arbiter_fee_bps: u32,
     ) -> Result<u64, ForgeError> {
         let env = env.clone();
         if amount <= 0 {
@@ -1180,6 +1349,11 @@ impl Escrow {
             .set(&DataKey::Escrow(id), &escrow);
         bump_entry(&env, &DataKey::Escrow(id));
         set_review_period(&env, id, review_period);
+        // Zero is the default an absent entry reads as, so the write is
+        // skipped rather than storing a redundant value.
+        if arbiter_fee_bps > 0 {
+            set_arbiter_fee_bps(&env, id, arbiter_fee_bps);
+        }
         // Index write joins the rest of the success-path writes: it runs
         // after every fallible step (validation, `require_auth`, id
         // allocation), so it cannot observe or create partial state.
@@ -1414,8 +1588,14 @@ impl Escrow {
         Ok(())
     }
 
-    /// Resolve a dispute: arbiter only, final. Pays the **remaining**
-    /// balance to the seller (`true`) or refunds it to the buyer (`false`).
+    /// Resolve a dispute: arbiter only, final. Deducts the escrow's arbiter
+    /// fee from the **remaining** balance and pays the rest to the seller
+    /// (`true`) or back to the buyer (`false`).
+    ///
+    /// The fee is `floor(remaining * arbiter_fee_bps / 10_000)` and is `0` for
+    /// escrows created without a fee, so the pre-fee behaviour is unchanged.
+    /// Both transfers happen before the record is written: a failed transfer
+    /// reverts the whole resolve.
     pub fn resolve(env: Env, escrow_id: u64, in_favor_of_seller: bool) -> Result<(), ForgeError> {
         let escrow = Self::load_escrow(&env, escrow_id)?;
         if escrow.status != EscrowStatus::Disputed {
@@ -1425,31 +1605,64 @@ impl Escrow {
         // resolve must fail without touching the token contract.
         escrow.arbiter.require_auth();
 
-        let mut resolved = escrow;
-        if in_favor_of_seller {
-            let settled = payout_assets(&env, &single_leg(&env, &resolved), &resolved.seller)?;
-            resolved.released = settled.get_unchecked(0).released;
-            resolved.status = EscrowStatus::Completed;
-        } else {
-            let settled = payout_assets(&env, &single_leg(&env, &resolved), &resolved.buyer)?;
-            resolved.released = settled.get_unchecked(0).released;
-            resolved.status = EscrowStatus::Refunded;
+        let remaining = escrow.remaining();
+        let (arbiter_fee, award) = split_amount(remaining, arbiter_fee_bps_of(&env, escrow_id))?;
+        // Fee first, then the awardee's remainder. `award` is
+        // `remaining - arbiter_fee` by construction, so the deposit is
+        // conserved even when the fee rounds down.
+        if arbiter_fee > 0 {
+            transfer_from_contract(&env, &escrow.token, &escrow.arbiter, arbiter_fee)?;
         }
+        if award > 0 {
+            let payee = if in_favor_of_seller {
+                &escrow.seller
+            } else {
+                &escrow.buyer
+            };
+            payout_part(&env, &single_leg(&env, &escrow), 0, payee, award)?;
+        }
+
+        let mut resolved = escrow;
+        resolved.released = resolved.amount;
+        resolved.status = if in_favor_of_seller {
+            EscrowStatus::Completed
+        } else {
+            EscrowStatus::Refunded
+        };
+        let (seller_award, buyer_award) = if in_favor_of_seller {
+            (award, 0)
+        } else {
+            (0, award)
+        };
+
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &resolved);
         bump_entry(&env, &DataKey::Escrow(escrow_id));
         events::resolved(&env, &resolved, in_favor_of_seller);
+        // Only fee-bearing resolves emit the fee event, so the event stream of
+        // a fee-less escrow is exactly what it was before fees existed.
+        if arbiter_fee > 0 {
+            events::dispute_resolved_with_fee(
+                &env,
+                escrow_id,
+                arbiter_fee,
+                seller_award,
+                buyer_award,
+            );
+        }
         Ok(())
     }
 
     /// Resolve a dispute by splitting the escrowed amount between the seller
-    /// and buyer according to `seller_bps` out of 10_000.
+    /// and buyer according to `seller_bps` out of 10_000, after deducting the
+    /// escrow's arbiter fee from the remaining balance.
     ///
-    /// The seller share is floored at `amount * seller_bps / 10_000` and the
+    /// The distributable balance is `remaining - arbiter_fee`; the seller
+    /// share is floored at `distributable * seller_bps / 10_000` and the
     /// remainder stays with the buyer. `seller_bps == 0` resolves to a
     /// buyer-only refund and `seller_bps == 10_000` resolves to a full seller
-    /// payout. A failed second payout rolls back the whole invocation.
+    /// payout. A failed payout rolls back the whole invocation.
     pub fn resolve_split(env: Env, escrow_id: u64, seller_bps: u32) -> Result<(), ForgeError> {
         let escrow = Self::load_escrow(&env, escrow_id)?;
         if escrow.status != EscrowStatus::Disputed {
@@ -1461,9 +1674,14 @@ impl Escrow {
         escrow.arbiter.require_auth();
 
         let remaining = escrow.remaining();
-        let (seller_share, buyer_share) = split_amount(remaining, seller_bps)?;
+        let (arbiter_fee, distributable) =
+            split_amount(remaining, arbiter_fee_bps_of(&env, escrow_id))?;
+        let (seller_share, buyer_share) = split_amount(distributable, seller_bps)?;
         let mut resolved = escrow;
 
+        if arbiter_fee > 0 {
+            transfer_from_contract(&env, &resolved.token, &resolved.arbiter, arbiter_fee)?;
+        }
         if seller_share > 0 {
             transfer_from_contract(&env, &resolved.token, &resolved.seller, seller_share)?;
         }
@@ -1483,6 +1701,15 @@ impl Escrow {
             .set(&DataKey::Escrow(escrow_id), &resolved);
         bump_entry(&env, &DataKey::Escrow(escrow_id));
         events::resolved_split(&env, &resolved, seller_bps, seller_share, buyer_share);
+        if arbiter_fee > 0 {
+            events::dispute_resolved_with_fee(
+                &env,
+                escrow_id,
+                arbiter_fee,
+                seller_share,
+                buyer_share,
+            );
+        }
         Ok(())
     }
 
@@ -1775,6 +2002,59 @@ impl Escrow {
     }
 
     // -------------------------------------------------------------------
+    // Deadline extension
+    // -------------------------------------------------------------------
+
+    /// Buyer moves a funded escrow's deadline later. Validation and the
+    /// buyer's authorization both run before the record is rewritten at its
+    /// existing key; the participant index and any pending release request
+    /// are not touched.
+    pub fn extend_deadline(env: Env, escrow_id: u64, new_timeout: u64) -> Result<(), ForgeError> {
+        let escrow = Self::load_escrow(&env, escrow_id)?;
+        let (old_deadline, new_deadline) = extended_deadline(
+            &escrow.status,
+            escrow.created_at,
+            escrow.timeout,
+            new_timeout,
+        )?;
+        escrow.buyer.require_auth();
+
+        let mut extended = escrow;
+        extended.timeout = new_timeout;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &extended);
+        bump_entry(&env, &DataKey::Escrow(escrow_id));
+        events::deadline_extended(&env, escrow_id, old_deadline, new_deadline);
+        Ok(())
+    }
+
+    /// Basket form of `extend_deadline`, with the same rules.
+    pub fn extend_basket_deadline(
+        env: Env,
+        escrow_id: u64,
+        new_timeout: u64,
+    ) -> Result<(), ForgeError> {
+        let basket = Self::load_basket(&env, escrow_id)?;
+        let (old_deadline, new_deadline) = extended_deadline(
+            &basket.status,
+            basket.created_at,
+            basket.timeout,
+            new_timeout,
+        )?;
+        basket.buyer.require_auth();
+
+        let mut extended = basket;
+        extended.timeout = new_timeout;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Basket(escrow_id), &extended);
+        bump_entry(&env, &DataKey::Basket(escrow_id));
+        events::deadline_extended(&env, escrow_id, old_deadline, new_deadline);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
     // Release with a review window
     // -------------------------------------------------------------------
 
@@ -1837,6 +2117,15 @@ impl Escrow {
     /// The review window of an escrow, in seconds.
     pub fn review_period(env: Env, escrow_id: u64) -> u64 {
         review_period_of(&env, escrow_id)
+    }
+
+    /// The arbiter fee of a single-token escrow, in basis points.
+    ///
+    /// `0` for escrows created with `create_escrow` or
+    /// `create_escrow_with_review`, and for any record written before arbiter
+    /// fees existed.
+    pub fn get_arbiter_fee_bps(env: Env, escrow_id: u64) -> u32 {
+        arbiter_fee_bps_of(&env, escrow_id)
     }
 
     // -------------------------------------------------------------------
@@ -2490,6 +2779,21 @@ fn review_period_of(env: &Env, escrow_id: u64) -> u64 {
         .unwrap_or(DEFAULT_REVIEW_PERIOD)
 }
 
+fn set_arbiter_fee_bps(env: &Env, escrow_id: u64, bps: u32) {
+    let key = DataKey::ArbiterFee(escrow_id);
+    env.storage().persistent().set(&key, &bps);
+    bump_entry(env, &key);
+}
+
+/// The escrow's arbiter fee in basis points; absent means no fee, which is
+/// also how every record written before fees existed reads.
+fn arbiter_fee_bps_of(env: &Env, escrow_id: u64) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ArbiterFee(escrow_id))
+        .unwrap_or(0)
+}
+
 /// Pull every leg of `assets` from `from` into this contract's custody, in
 /// list order.
 ///
@@ -2580,6 +2884,23 @@ fn escrow_deadline(created_at: u64, timeout: u64) -> Result<u64, ForgeError> {
     created_at
         .checked_add(timeout)
         .ok_or(ForgeError::ArithmeticOverflow)
+}
+
+/// Validate a deadline extension for either record kind and return the
+/// `(old, new)` deadlines. Only a `Funded` escrow may be extended, and only to
+/// a strictly later deadline.
+fn extended_deadline(
+    status: &EscrowStatus,
+    created_at: u64,
+    timeout: u64,
+    new_timeout: u64,
+) -> Result<(u64, u64), ForgeError> {
+    if *status != EscrowStatus::Funded || new_timeout <= timeout {
+        return Err(ForgeError::InvalidInput);
+    }
+    let old_deadline = escrow_deadline(created_at, timeout)?;
+    let new_deadline = escrow_deadline(created_at, new_timeout)?;
+    Ok((old_deadline, new_deadline))
 }
 
 fn request_release_ineligibility(
@@ -2884,6 +3205,15 @@ mod events {
         pub release_at: u64,
     }
 
+    /// The buyer moved the escrow's deadline later. Either escrow kind.
+    #[contractevent]
+    pub struct DeadlineExtended {
+        #[topic]
+        pub escrow_id: u64,
+        pub old_deadline: u64,
+        pub new_deadline: u64,
+    }
+
     #[contractevent]
     pub struct RefundExpired {
         #[topic]
@@ -2922,6 +3252,22 @@ mod events {
         #[topic]
         pub escrow_id: u64,
         pub data: EscrowData,
+    }
+
+    /// A dispute was resolved with an arbiter fee deducted first.
+    ///
+    /// `arbiter_fee` is what the arbiter received; `seller_award` and
+    /// `buyer_award` are what each party received after the deduction. Their
+    /// sum is the disputed remaining balance, so the event alone proves
+    /// conservation. Emitted only when a fee was actually deducted, so a
+    /// fee-less escrow publishes the same events it always did.
+    #[contractevent]
+    pub struct DisputeResolvedWithFee {
+        #[topic]
+        pub escrow_id: u64,
+        pub arbiter_fee: i128,
+        pub seller_award: i128,
+        pub buyer_award: i128,
     }
 
     // Basket events are additive variants that mirror the single-token ones:
@@ -3046,6 +3392,15 @@ mod events {
         .publish(env);
     }
 
+    pub fn deadline_extended(env: &Env, escrow_id: u64, old_deadline: u64, new_deadline: u64) {
+        DeadlineExtended {
+            escrow_id,
+            old_deadline,
+            new_deadline,
+        }
+        .publish(env);
+    }
+
     pub fn refund_expired(env: &Env, escrow_id: u64, refunded_amount: i128, timestamp: u64) {
         RefundExpired {
             escrow_id,
@@ -3085,6 +3440,22 @@ mod events {
             seller_bps,
             seller_share,
             buyer_share,
+        }
+        .publish(env);
+    }
+
+    pub fn dispute_resolved_with_fee(
+        env: &Env,
+        escrow_id: u64,
+        arbiter_fee: i128,
+        seller_award: i128,
+        buyer_award: i128,
+    ) {
+        DisputeResolvedWithFee {
+            escrow_id,
+            arbiter_fee,
+            seller_award,
+            buyer_award,
         }
         .publish(env);
     }
@@ -3170,6 +3541,10 @@ mod events {
     }
 }
 
+mod preflight;
+
+pub use preflight::{DepositPreflight, DepositPreflightStatus};
+
 #[cfg(test)]
 mod tests;
 
@@ -3186,7 +3561,13 @@ mod review_tests;
 mod action_summary_tests;
 
 #[cfg(test)]
+mod deadline_tests;
+
+#[cfg(test)]
 mod props;
+
+#[cfg(test)]
+mod basket_props;
 
 // TTL chaos harness demo: drives randomized ledger gaps through the
 // escrow lifecycle and asserts no persistent entry expires during a

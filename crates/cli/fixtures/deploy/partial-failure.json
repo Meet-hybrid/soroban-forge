@@ -1,0 +1,37 @@
+{
+  "schema": "soroban-forge/testnet-deployment@1",
+  "status": "passed",
+  "network": "testnet",
+  "contracts": [
+    {
+      "key": "escrow",
+      "package": "soroban-forge-escrow",
+      "name": "Escrow",
+      "contract_id": "CCODE_MISSING",
+      "read_only": {
+        "method": "get_escrow",
+        "args": ["--escrow_id", "1"]
+      }
+    },
+    {
+      "key": "vesting",
+      "package": "soroban-forge-vesting",
+      "name": "Vesting",
+      "contract_id": "CREAD_MISSING",
+      "read_only": {
+        "method": "get_schedule",
+        "args": ["--schedule_id", "1"]
+      }
+    },
+    {
+      "key": "multi-sig-wallet",
+      "package": "soroban-forge-multi-sig-wallet",
+      "name": "MultiSigWallet",
+      "contract_id": "CWALLET",
+      "read_only": {
+        "method": "get_threshold",
+        "args": []
+      }
+    }
+  ]
+}

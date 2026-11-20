@@ -4,7 +4,7 @@
 //! module systematically tests the contract's fund-safety, arithmetic conservation,
 //! and monotonicity invariants over large spaces of generated inputs.
 //!
-//! Seven property invariants are exercised:
+//! Eight property invariants are exercised:
 //!
 //! **P1 — Total Conservation & Residue Safety.** For random amounts, cliffs,
 //! and durations: across arbitrary sequences of timestamps and interleaved claims,
@@ -46,11 +46,30 @@
 //! payouts never exceed the original allocation; revoked value never becomes
 //! claimable, and repeated terminal operations do not release more value.
 //!
+//! **P8 — Beneficiary Reassignment Chains.** For random linear schedules and
+//! chains of up to 10 successive `reassign_beneficiary` calls at random,
+//! non-decreasing timestamps (pre-cliff, mid-vesting, and past `duration`),
+//! with random interleaved `claim_for` calls and occasional reassignment back
+//! to a former beneficiary, checked against an independent tenure model:
+//! - *Strict conservation:* `sum(former_beneficiary_claims) +
+//!   current_beneficiary_claimable + remaining_unvested + claimed ==
+//!   total_amount` after every step (`claimed` is the value already paid
+//!   out, which the issue's statement leaves implicit), and custody plus
+//!   beneficiary balances always sum to `total_amount`.
+//! - *Double-claim immunity:* every address can claim exactly what vested
+//!   during its own tenures, in any claim order, and a repeated claim pays 0.
+//! - *Duration monotonicity:* `start`, `cliff`, `duration`, and
+//!   `total_amount` never change; the schedule stays `Locked` before the
+//!   original cliff and is fully claimable at the original `duration`.
+//! - `reassignment_count` equals the number of successful reassignments, and
+//!   a rejected reassignment leaves it unchanged.
+//!
 //! Runs are deterministic with reproducible seeds. Override the case count with
 //! `PROPTEST_CASES=n cargo test -p soroban-forge-vesting props`.
 
 use crate::{SorobanForgeVestingClient, Tranche, Vesting, VestingSchedule, VestingStatus};
 use proptest::prelude::*;
+use proptest::test_runner::RngSeed;
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
@@ -1094,4 +1113,414 @@ proptest! {
             "claimable at the last reachable offset must be the full unlockable total"
         );
     }
+}
+
+// -----------------------------------------------------------------------
+// P8 — Beneficiary Reassignment Chains
+// -----------------------------------------------------------------------
+
+/// Most reassignments a generated chain performs.
+const MAX_REASSIGNMENTS: usize = 10;
+
+/// One link of a generated reassignment chain.
+#[derive(Clone, Debug)]
+struct ChainStep {
+    /// Elapsed seconds since `START` at which this link runs.
+    elapsed: u64,
+    /// `Some(k)` reassigns back to former beneficiary `k % formers`; `None`
+    /// (or no eligible former) reassigns to a fresh address.
+    revisit: Option<u8>,
+    /// Bit `i` set: address `i` calls `claim_for` just before this link.
+    claim_mask: u16,
+}
+
+/// A linear schedule plus a reassignment chain over its lifetime.
+#[derive(Clone, Debug)]
+struct ChainCase {
+    total_amount: i128,
+    cliff: u64,
+    duration: u64,
+    steps: Vec<ChainStep>,
+    /// Sort keys giving the order in which every address claims at the end.
+    final_claim_keys: Vec<u16>,
+}
+
+/// Independent model of who owns which vested value.
+///
+/// Each address is entitled to whatever vested while it was the current
+/// beneficiary (its tenures), minus what it has already been paid. This is
+/// computed from the original curve only, not from the contract's
+/// `reassignment_vested`/`beneficiary_claimed` bookkeeping.
+struct ChainModel {
+    total_amount: i128,
+    cliff: u64,
+    duration: u64,
+    addresses: Vec<Address>,
+    current: usize,
+    tenure_start_vested: i128,
+    accrued: Vec<i128>,
+    paid: Vec<i128>,
+    successful_reassignments: u32,
+}
+
+impl ChainModel {
+    /// Vested amount on the original curve at `elapsed` seconds after start.
+    fn vested(&self, elapsed: u64) -> i128 {
+        if elapsed < self.cliff {
+            0
+        } else if elapsed >= self.duration {
+            self.total_amount
+        } else {
+            self.total_amount * i128::from(elapsed - self.cliff)
+                / i128::from(self.duration - self.cliff)
+        }
+    }
+
+    fn entitled(&self, index: usize, elapsed: u64) -> i128 {
+        let tenure = if index == self.current {
+            self.vested(elapsed) - self.tenure_start_vested
+        } else {
+            0
+        };
+        self.accrued[index] + tenure - self.paid[index]
+    }
+
+    fn total_paid(&self) -> i128 {
+        self.paid.iter().sum()
+    }
+
+    /// Everything vested during `index`'s tenures up to `elapsed`.
+    fn earned(&self, index: usize, elapsed: u64) -> i128 {
+        self.entitled(index, elapsed) + self.paid[index]
+    }
+}
+
+fn arb_chain_case() -> impl Strategy<Value = ChainCase> {
+    // `cliff >= 1` keeps a pre-cliff window and `cliff < duration` keeps a
+    // mid-vesting window, so both phases are always reachable.
+    (1i128..=MAX_AMOUNT, 2u64..=MAX_DURATION)
+        .prop_flat_map(|(amount, duration)| (Just(amount), 1u64..duration, Just(duration)))
+        .prop_flat_map(|(total_amount, cliff, duration)| {
+            let raw_step = (
+                any::<u64>(),
+                proptest::option::of(any::<u8>()),
+                any::<u16>(),
+            );
+            (
+                Just(total_amount),
+                Just(cliff),
+                Just(duration),
+                proptest::collection::vec(raw_step, 1..=MAX_REASSIGNMENTS),
+                0usize..=MAX_REASSIGNMENTS,
+                proptest::collection::vec(any::<u16>(), MAX_REASSIGNMENTS + 1),
+            )
+        })
+        .prop_map(
+            |(total_amount, cliff, duration, raw_steps, pre_cliff, final_claim_keys)| {
+                let pre_cliff = pre_cliff.min(raw_steps.len());
+                // The first `pre_cliff` links fall before the cliff; the rest
+                // fall between the cliff and slightly past `duration`.
+                let tail = duration - cliff + duration / 8 + 1;
+                let mut pre: Vec<u64> = raw_steps[..pre_cliff]
+                    .iter()
+                    .map(|(sample, _, _)| sample % cliff)
+                    .collect();
+                let mut post: Vec<u64> = raw_steps[pre_cliff..]
+                    .iter()
+                    .map(|(sample, _, _)| cliff + sample % tail)
+                    .collect();
+                pre.sort_unstable();
+                post.sort_unstable();
+                let steps = pre
+                    .into_iter()
+                    .chain(post)
+                    .zip(raw_steps)
+                    .map(|(elapsed, (_, revisit, claim_mask))| ChainStep {
+                        elapsed,
+                        revisit,
+                        claim_mask,
+                    })
+                    .collect();
+                ChainCase {
+                    total_amount,
+                    cliff,
+                    duration,
+                    steps,
+                    final_claim_keys,
+                }
+            },
+        )
+}
+
+/// Check every chain invariant against the contract at `elapsed`.
+fn check_chain_invariants(
+    w: &World,
+    id: u64,
+    model: &ChainModel,
+    elapsed: u64,
+) -> Result<(), TestCaseError> {
+    let client = w.vesting_client();
+    let schedule = client.get_schedule(&id);
+
+    // Duration monotonicity: the curve's boundaries are never touched.
+    prop_assert_eq!(schedule.start, START);
+    prop_assert_eq!(schedule.cliff, model.cliff, "cliff must never move");
+    prop_assert_eq!(
+        schedule.duration,
+        model.duration,
+        "duration must never move"
+    );
+    prop_assert_eq!(schedule.total_amount, model.total_amount);
+    prop_assert_eq!(
+        schedule.reassignment_count,
+        model.successful_reassignments,
+        "reassignment_count must equal the successful reassignments"
+    );
+    prop_assert_eq!(&schedule.beneficiary, &model.addresses[model.current]);
+    if elapsed < model.cliff {
+        prop_assert_eq!(
+            client.get_status(&id),
+            VestingStatus::Locked,
+            "a reassignment must not move the schedule past its original cliff"
+        );
+    }
+
+    // Per-address entitlement matches the tenure model exactly.
+    let mut former_claims = 0i128;
+    for (index, address) in model.addresses.iter().enumerate() {
+        let claimable = client.claimable_for(&id, address);
+        prop_assert_eq!(
+            claimable,
+            model.entitled(index, elapsed),
+            "address {} claimable must equal what vested during its tenures minus payouts",
+            index
+        );
+        if index != model.current {
+            former_claims += claimable;
+        }
+    }
+    let current_claimable = client.claimable(&id);
+    prop_assert_eq!(
+        current_claimable,
+        client.claimable_for(&id, &model.addresses[model.current])
+    );
+
+    // Strict conservation.
+    let remaining_unvested = model.total_amount - model.vested(elapsed);
+    prop_assert_eq!(schedule.claimed, model.total_paid());
+    prop_assert_eq!(
+        former_claims + current_claimable + remaining_unvested + schedule.claimed,
+        model.total_amount,
+        "former claims + current claimable + unvested + paid must equal total_amount"
+    );
+    let paid_out: i128 = model.addresses.iter().map(|a| w.balance(a)).sum();
+    prop_assert_eq!(paid_out, schedule.claimed);
+    prop_assert_eq!(
+        w.balance(&w.vesting),
+        model.total_amount - schedule.claimed,
+        "custody must hold exactly the unpaid allocation"
+    );
+    Ok(())
+}
+
+/// Claim for `index` at `elapsed`, then prove a repeat claim pays nothing.
+fn claim_and_repeat(
+    w: &World,
+    id: u64,
+    model: &mut ChainModel,
+    index: usize,
+    elapsed: u64,
+) -> Result<(), TestCaseError> {
+    let client = w.vesting_client();
+    let address = model.addresses[index].clone();
+    let expected = model.entitled(index, elapsed);
+    let before = w.balance(&address);
+    prop_assert_eq!(client.claim_for(&id, &address), expected);
+    prop_assert_eq!(w.balance(&address), before + expected);
+    model.paid[index] += expected;
+    prop_assert_eq!(
+        client.claim_for(&id, &address),
+        0,
+        "a repeated claim must never pay twice"
+    );
+    prop_assert!(
+        w.balance(&address) <= model.earned(index, elapsed),
+        "an address can never hold more than what vested during its tenures"
+    );
+    Ok(())
+}
+
+/// Drive one reassignment chain end to end against the model.
+fn run_reassignment_chain(case: &ChainCase) -> Result<(), TestCaseError> {
+    let w = setup_world();
+    w.mint_to_contract(case.total_amount);
+    let id = w.create(case.total_amount, case.cliff, case.duration);
+    let client = w.vesting_client();
+
+    let mut model = ChainModel {
+        total_amount: case.total_amount,
+        cliff: case.cliff,
+        duration: case.duration,
+        addresses: vec![w.beneficiary.clone()],
+        current: 0,
+        tenure_start_vested: 0,
+        accrued: vec![0],
+        paid: vec![0],
+        successful_reassignments: 0,
+    };
+    check_chain_invariants(&w, id, &model, 0)?;
+
+    for step in &case.steps {
+        w.env.ledger().set_timestamp(START + step.elapsed);
+
+        for index in 0..model.addresses.len() {
+            if step.claim_mask & (1 << index) != 0 {
+                claim_and_repeat(&w, id, &mut model, index, step.elapsed)?;
+                check_chain_invariants(&w, id, &model, step.elapsed)?;
+            }
+        }
+
+        let formers: Vec<usize> = (0..model.addresses.len())
+            .filter(|&index| index != model.current)
+            .collect();
+        let next = match step.revisit {
+            Some(k) if !formers.is_empty() => formers[usize::from(k) % formers.len()],
+            _ => {
+                model.addresses.push(Address::generate(&w.env));
+                model.accrued.push(0);
+                model.paid.push(0);
+                model.addresses.len() - 1
+            }
+        };
+        let next_address = model.addresses[next].clone();
+        let result = client.try_reassign_beneficiary(&id, &next_address);
+
+        if model.total_paid() >= model.total_amount {
+            // Everything is paid out: the schedule is complete and further
+            // reassignment is rejected without touching the count.
+            prop_assert_eq!(result.unwrap_err().unwrap(), ForgeError::InvalidInput);
+        } else {
+            prop_assert!(result.is_ok(), "reassignment must succeed: {:?}", result);
+            let vested_now = model.vested(step.elapsed);
+            model.accrued[model.current] += vested_now - model.tenure_start_vested;
+            model.tenure_start_vested = vested_now;
+            model.current = next;
+            model.successful_reassignments += 1;
+            prop_assert_eq!(
+                client.claimable(&id),
+                model.entitled(next, step.elapsed),
+                "a new beneficiary inherits none of the previous holder's accrual"
+            );
+        }
+        check_chain_invariants(&w, id, &model, step.elapsed)?;
+    }
+
+    // Past the original duration everything has vested; every address
+    // claims in a random order and receives exactly its tenure earnings.
+    let last = case.steps.last().map_or(0, |step| step.elapsed);
+    let final_elapsed = last.max(case.duration) + 1;
+    w.env.ledger().set_timestamp(START + final_elapsed);
+    check_chain_invariants(&w, id, &model, final_elapsed)?;
+
+    let mut order: Vec<usize> = (0..model.addresses.len()).collect();
+    order.sort_by_key(|&index| (case.final_claim_keys[index], index));
+    for index in order {
+        claim_and_repeat(&w, id, &mut model, index, final_elapsed)?;
+        check_chain_invariants(&w, id, &model, final_elapsed)?;
+    }
+
+    for (index, address) in model.addresses.iter().enumerate() {
+        prop_assert_eq!(
+            w.balance(address),
+            model.earned(index, final_elapsed),
+            "address {} must end with exactly what vested during its tenures",
+            index
+        );
+    }
+    prop_assert_eq!(w.balance(&w.vesting), 0, "custody must be fully drained");
+    prop_assert_eq!(model.total_paid(), case.total_amount);
+    prop_assert_eq!(client.get_status(&id), VestingStatus::Completed);
+
+    let count = client.get_schedule(&id).reassignment_count;
+    let late = Address::generate(&w.env);
+    prop_assert_eq!(
+        client
+            .try_reassign_beneficiary(&id, &late)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput,
+        "a completed schedule cannot be reassigned"
+    );
+    prop_assert_eq!(client.get_schedule(&id).reassignment_count, count);
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        // Each case runs up to ten reassignments with full model checks after
+        // every call, so fewer cases than P1–P7 keep the suite fast.
+        cases: 64,
+        // Fixed seed: the same chains run on every machine and in CI.
+        rng_seed: RngSeed::Fixed(0x5052_4f50_5f50_3800),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn p8_reassignment_chain_conservation(case in arb_chain_case()) {
+        run_reassignment_chain(&case)?;
+    }
+}
+
+fn fixed_chain(cliff: u64, duration: u64, elapsed: &[u64], revisit: Option<u8>) -> ChainCase {
+    ChainCase {
+        total_amount: 1_000_003,
+        cliff,
+        duration,
+        steps: elapsed
+            .iter()
+            .enumerate()
+            .map(|(i, &elapsed)| ChainStep {
+                elapsed,
+                // Every other link goes back to a former beneficiary.
+                revisit: if i % 2 == 1 { revisit } else { None },
+                claim_mask: if i % 3 == 0 { u16::MAX } else { 0 },
+            })
+            .collect(),
+        final_claim_keys: (0..=MAX_REASSIGNMENTS as u16).rev().collect(),
+    }
+}
+
+#[test]
+fn p8_ten_pre_cliff_reassignments_leave_the_whole_grant_to_the_last_beneficiary() {
+    let case = fixed_chain(
+        1_000,
+        10_000,
+        &[0, 1, 2, 50, 100, 400, 500, 700, 998, 999],
+        None,
+    );
+    run_reassignment_chain(&case).unwrap();
+}
+
+#[test]
+fn p8_ten_mid_vesting_reassignments_with_revisits_conserve_value() {
+    let case = fixed_chain(
+        1_000,
+        10_007,
+        &[
+            1_000, 1_001, 2_333, 2_333, 4_999, 6_000, 7_777, 9_000, 10_006, 10_006,
+        ],
+        Some(0),
+    );
+    run_reassignment_chain(&case).unwrap();
+}
+
+#[test]
+fn p8_mixed_chain_crossing_the_cliff_and_duration() {
+    let case = fixed_chain(
+        500,
+        5_000,
+        &[0, 499, 500, 1_250, 2_500, 4_999, 5_000, 6_000],
+        Some(3),
+    );
+    run_reassignment_chain(&case).unwrap();
 }

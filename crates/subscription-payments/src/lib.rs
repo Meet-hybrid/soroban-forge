@@ -57,12 +57,43 @@
 //! | `charge`                   | provider (existing authorization)  |
 //! | `deposit`                  | subscriber                         |
 //! | `withdraw_balance`         | subscriber                         |
+//! | `configure_auto_topup`     | subscriber                         |
+//! | `disable_auto_topup`       | subscriber                         |
 //! | `set_quotas`               | subscriber (prices the overage)    |
 //! | `record_usage`             | provider (meters the service)      |
 //! | `pause`                    | subscriber                         |
 //! | `resume`                   | subscriber                         |
 //! | `cancel`                   | subscriber                         |
 //! | read methods               | none                               |
+//!
+//! ## Prepaid auto-topup
+//!
+//! A prepaid subscription lapses to `PastDue` when its balance cannot cover
+//! the period. `configure_auto_topup(subscription_id, trigger_threshold,
+//! topup_amount)` lets the subscriber authorize the contract to pull
+//! `topup_amount` from their account into custody during billing instead:
+//!
+//! - **Trigger.** On a due `charge` in prepaid mode, before the debit, the
+//!   contract tops up once when `prepaid_balance < period_amount` (the
+//!   charge would otherwise fail) or `prepaid_balance < trigger_threshold`
+//!   (the subscriber's safety floor). At most one top-up runs per charge;
+//!   if the topped-up balance still cannot cover the period, the charge
+//!   follows the usual arrears path and the topped-up funds stay credited
+//!   to the prepaid balance.
+//! - **Transfer before state.** The top-up transfer (subscriber → custody)
+//!   runs before the debit transfer and before the subscription is written,
+//!   and emits `AutoTopupTriggered` with the amount and resulting balance.
+//! - **Safe fallback.** A top-up the token rejects (insufficient subscriber
+//!   funds, a deauthorized account) moves nothing and writes nothing; the
+//!   charge then proceeds on the unchanged balance — a debit when it still
+//!   covers the period, otherwise `PastDue` exactly as without auto-topup.
+//!   A top-up that would overflow the balance is skipped the same way.
+//! - **Validation.** `topup_amount > 0` and `trigger_threshold >= 0`; a
+//!   cancelled subscription cannot be configured. The configuration lives
+//!   under its own [`DataKey::AutoTopup`] key, so the stored `Subscription`
+//!   shape is unchanged; `disable_auto_topup` removes it, and
+//!   `get_auto_topup` reads it. Pull-mode billing and `charge_catchup`
+//!   (which refuses prepaid subscriptions) never top up.
 //!
 //! ## Provider opt-in (explicit consent)
 //!
@@ -273,6 +304,42 @@ pub trait SorobanForgeSubscriptionPayments {
         amount: i128,
     ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 
+    /// Authorize automatic prepaid top-ups for `subscription_id` (see the
+    /// module docs on prepaid auto-topup), replacing any earlier setting.
+    ///
+    /// During a due prepaid `charge`, when the balance is below the period
+    /// amount or below `trigger_threshold`, the contract first transfers
+    /// `topup_amount` from the subscriber into custody.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — `topup_amount <= 0`,
+    ///   `trigger_threshold < 0`, or the subscription is `Cancelled`.
+    /// * [`ForgeError::NotFound`] — no subscription with this id.
+    /// * [`ForgeError::Unauthorized`] — the subscriber did not authorize.
+    fn configure_auto_topup(
+        env: Env,
+        subscription_id: u64,
+        trigger_threshold: i128,
+        topup_amount: i128,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Stop automatic prepaid top-ups for `subscription_id`. Requires the
+    /// subscriber; idempotent when none is configured.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no subscription with this id.
+    /// * [`ForgeError::Unauthorized`] — the subscriber did not authorize.
+    fn disable_auto_topup(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the auto-topup setting of `subscription_id`, or `None` when it is
+    /// not configured (read-only view).
+    fn get_auto_topup(env: Env, subscription_id: u64) -> Option<AutoTopup>;
+
     /// Atomically charge up to `max_periods` elapsed periods.
     ///
     /// Returns the total billed amount. `max_periods` must not exceed the
@@ -373,6 +440,25 @@ pub trait SorobanForgeSubscriptionPayments {
     /// Requires the subscriber. Valid when `Active`, `Paused`, or `PastDue`.
     fn cancel(env: Env, subscription_id: u64)
         -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Cancel `subscription_id` on the provider's side, returning any unspent
+    /// prepaid balance to the subscriber.
+    ///
+    /// Requires the provider. Valid when `Active`, `Paused`, or `PastDue`.
+    /// A positive `prepaid_balance` is transferred back to the subscriber
+    /// before the cancellation is stored, leaving `Some(0)`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no subscription with this id.
+    /// * [`ForgeError::InvalidInput`] — the subscription is already
+    ///   `Cancelled`.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the refund; nothing is changed.
+    fn cancel_by_provider(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
     /// Read a stored subscription by id (read-only view).
     fn get_subscription(
@@ -556,6 +642,18 @@ pub struct UsageRecord {
     pub period_start: u64,
 }
 
+/// A subscriber's authorization for automatic prepaid top-ups (see the
+/// module docs on prepaid auto-topup).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutoTopup {
+    /// Top up when the prepaid balance is below this floor at billing time
+    /// (in addition to whenever it cannot cover the period). Never negative.
+    pub trigger_threshold: i128,
+    /// Amount pulled from the subscriber into custody per top-up. Positive.
+    pub topup_amount: i128,
+}
+
 /// Instance-storage keys.
 #[contracttype]
 enum DataKey {
@@ -577,6 +675,10 @@ enum DataKey {
     /// `record_usage`, removed by the charge that closes the period, read by
     /// the amount derivation.
     Usage(u64, Symbol),
+    /// The subscriber's [`AutoTopup`] authorization for a subscription.
+    /// Persistent; written by `configure_auto_topup`, removed by
+    /// `disable_auto_topup`, read by `charge`.
+    AutoTopup(u64),
 }
 
 /// The deployable subscription payments contract.
@@ -711,6 +813,9 @@ impl SubscriptionPayments {
     ///   Increments `failed_attempts`. If `failed_attempts >= MAX_RETRIES`
     ///   (3), status becomes `Cancelled`. Otherwise status becomes `PastDue`.
     ///   Returns `0`.
+    /// - In prepaid mode with auto-topup configured, a low balance is first
+    ///   topped up from the subscriber (see the module docs on prepaid
+    ///   auto-topup); a rejected top-up falls back to the rules above.
     pub fn charge(env: Env, subscription_id: u64) -> Result<i128, ForgeError> {
         let mut subscription = Self::get_subscription_impl(&env, subscription_id)?;
         if subscription.status == SubscriptionStatus::Cancelled
@@ -732,7 +837,12 @@ impl SubscriptionPayments {
         // the subscription untouched and no funds in flight.
         let amount = Self::derive_period_amount(&env, &subscription)?;
 
-        if let Some(balance) = subscription.prepaid_balance {
+        if let Some(mut balance) = subscription.prepaid_balance {
+            if let Some(topup) = Self::auto_topup_impl(&env, subscription_id) {
+                if balance < amount || balance < topup.trigger_threshold {
+                    balance = Self::run_auto_topup(&env, &mut subscription, &topup, balance);
+                }
+            }
             if balance < amount {
                 Self::record_failed_charge(&env, &mut subscription)?;
                 return Ok(0);
@@ -827,6 +937,49 @@ impl SubscriptionPayments {
         Ok(())
     }
 
+    fn auto_topup_impl(env: &Env, subscription_id: u64) -> Option<AutoTopup> {
+        let key = DataKey::AutoTopup(subscription_id);
+        let topup = env.storage().persistent().get(&key);
+        if topup.is_some() {
+            bump_entry(env, &key);
+        }
+        topup
+    }
+
+    /// Pull one configured top-up from the subscriber into custody and
+    /// return the resulting prepaid balance.
+    ///
+    /// Transfer before state: the in-memory balance changes only after the
+    /// transfer succeeded. A rejected transfer or an overflowing balance
+    /// skips the top-up and returns `balance` unchanged, so the caller's
+    /// ordinary sufficient/insufficient-balance path applies untouched.
+    fn run_auto_topup(
+        env: &Env,
+        subscription: &mut Subscription,
+        topup: &AutoTopup,
+        balance: i128,
+    ) -> i128 {
+        let Some(updated) = balance.checked_add(topup.topup_amount) else {
+            return balance;
+        };
+        let transfer_result = token::TokenClient::new(env, &subscription.token).try_transfer(
+            &subscription.subscriber,
+            env.current_contract_address(),
+            &topup.topup_amount,
+        );
+        if !matches!(transfer_result, Ok(Ok(()))) {
+            return balance;
+        }
+        subscription.prepaid_balance = Some(updated);
+        events::auto_topup_triggered(
+            env,
+            subscription.subscription_id,
+            topup.topup_amount,
+            updated,
+        );
+        updated
+    }
+
     /// Pull tokens into custody and enable prepaid mode only after success.
     pub fn deposit(env: Env, subscription_id: u64, amount: i128) -> Result<i128, ForgeError> {
         if amount <= 0 {
@@ -887,6 +1040,48 @@ impl SubscriptionPayments {
         Self::store_subscription(&env, subscription_id, &subscription);
         events::balance_refunded(&env, subscription_id, amount, remaining);
         Ok(remaining)
+    }
+
+    /// Authorize automatic prepaid top-ups (see the trait docs).
+    pub fn configure_auto_topup(
+        env: Env,
+        subscription_id: u64,
+        trigger_threshold: i128,
+        topup_amount: i128,
+    ) -> Result<(), ForgeError> {
+        if topup_amount <= 0 || trigger_threshold < 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        if subscription.status == SubscriptionStatus::Cancelled {
+            return Err(ForgeError::InvalidInput);
+        }
+        subscription.subscriber.require_auth();
+        let key = DataKey::AutoTopup(subscription_id);
+        env.storage().persistent().set(
+            &key,
+            &AutoTopup {
+                trigger_threshold,
+                topup_amount,
+            },
+        );
+        bump_entry(&env, &key);
+        Ok(())
+    }
+
+    /// Stop automatic prepaid top-ups (see the trait docs).
+    pub fn disable_auto_topup(env: Env, subscription_id: u64) -> Result<(), ForgeError> {
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        subscription.subscriber.require_auth();
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AutoTopup(subscription_id));
+        Ok(())
+    }
+
+    /// Read the auto-topup setting, if any (read-only view).
+    pub fn get_auto_topup(env: Env, subscription_id: u64) -> Option<AutoTopup> {
+        Self::auto_topup_impl(&env, subscription_id)
     }
 
     /// Atomically bill multiple elapsed periods.
@@ -1100,37 +1295,28 @@ impl SubscriptionPayments {
     /// Requires the subscriber. Valid when `Active`, `Paused`, or `PastDue`. Cancelling
     /// an already-cancelled subscription is rejected.
     pub fn cancel(env: Env, subscription_id: u64) -> Result<(), ForgeError> {
-        let mut subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
         if subscription.status == SubscriptionStatus::Cancelled {
             return Err(ForgeError::InvalidInput);
         }
         subscription.subscriber.require_auth();
+        Self::settle_cancellation(&env, subscription_id, subscription)
+    }
 
-        let mut refund = None;
-        if let Some(balance) = subscription.prepaid_balance {
-            if balance > 0 {
-                let transfer_result = token::TokenClient::new(&env, &subscription.token)
-                    .try_transfer(
-                        &env.current_contract_address(),
-                        &subscription.subscriber,
-                        &balance,
-                    );
-                if !matches!(transfer_result, Ok(Ok(()))) {
-                    return Err(ForgeError::TokenTransferFailed);
-                }
-                subscription.prepaid_balance = Some(0);
-                refund = Some(balance);
-            }
+    /// Cancel a subscription on the provider's side, refunding any unspent
+    /// prepaid balance to the subscriber.
+    ///
+    /// Requires the provider. Valid when `Active`, `Paused`, or `PastDue`;
+    /// cancelling an already-cancelled subscription is rejected. Settles
+    /// exactly like the subscriber's `cancel`: the refund transfer runs
+    /// before the cancellation is stored.
+    pub fn cancel_by_provider(env: Env, subscription_id: u64) -> Result<(), ForgeError> {
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        if subscription.status == SubscriptionStatus::Cancelled {
+            return Err(ForgeError::InvalidInput);
         }
-
-        subscription.status = SubscriptionStatus::Cancelled;
-        subscription.paused_at = None;
-        Self::store_subscription(&env, subscription_id, &subscription);
-        if let Some(amount) = refund {
-            events::balance_refunded(&env, subscription_id, amount, 0);
-        }
-        events::cancelled(&env, &subscription);
-        Ok(())
+        subscription.provider.require_auth();
+        Self::settle_cancellation(&env, subscription_id, subscription)
     }
 
     /// Read a stored subscription by id (read-only view).
@@ -1210,6 +1396,44 @@ impl SubscriptionPayments {
         }
         let ids = Self::index_ids(&env, &DataKey::ProviderSubscriptions(provider));
         Self::resolve_page(&env, &ids, offset, limit)
+    }
+
+    /// Refund any positive prepaid balance to the subscriber, then store the
+    /// subscription as `Cancelled` with `paused_at` cleared.
+    ///
+    /// Shared by `cancel` and `cancel_by_provider`; callers have already
+    /// checked the status and authorized. The refund transfer runs before the
+    /// state write, so a rejected transfer leaves the record unchanged.
+    fn settle_cancellation(
+        env: &Env,
+        subscription_id: u64,
+        mut subscription: Subscription,
+    ) -> Result<(), ForgeError> {
+        let mut refund = None;
+        if let Some(balance) = subscription.prepaid_balance {
+            if balance > 0 {
+                let transfer_result = token::TokenClient::new(env, &subscription.token)
+                    .try_transfer(
+                        &env.current_contract_address(),
+                        &subscription.subscriber,
+                        &balance,
+                    );
+                if !matches!(transfer_result, Ok(Ok(()))) {
+                    return Err(ForgeError::TokenTransferFailed);
+                }
+                subscription.prepaid_balance = Some(0);
+                refund = Some(balance);
+            }
+        }
+
+        subscription.status = SubscriptionStatus::Cancelled;
+        subscription.paused_at = None;
+        Self::store_subscription(env, subscription_id, &subscription);
+        if let Some(amount) = refund {
+            events::balance_refunded(env, subscription_id, amount, 0);
+        }
+        events::cancelled(env, &subscription);
+        Ok(())
     }
 
     /// Create a new subscription through the single shared creation path used
@@ -1594,6 +1818,31 @@ mod events {
         pub balance_after: i128,
     }
 
+    /// A prepaid balance was topped up from the subscriber during `charge`.
+    #[contractevent]
+    pub struct AutoTopupTriggered {
+        #[topic]
+        pub subscription_id: u64,
+        /// Amount pulled from the subscriber into custody.
+        pub amount: i128,
+        /// Prepaid balance after the top-up, before the period's debit.
+        pub balance_after: i128,
+    }
+
+    pub fn auto_topup_triggered(
+        env: &Env,
+        subscription_id: u64,
+        amount: i128,
+        balance_after: i128,
+    ) {
+        AutoTopupTriggered {
+            subscription_id,
+            amount,
+            balance_after,
+        }
+        .publish(env);
+    }
+
     pub fn deposited(env: &Env, subscription_id: u64, amount: i128, balance_after: i128) {
         Deposited {
             subscription_id,
@@ -1665,6 +1914,10 @@ mod events {
 #[cfg(test)]
 mod authz;
 #[cfg(test)]
+mod auto_topup;
+#[cfg(test)]
+mod conservation;
+#[cfg(test)]
 mod metering;
 #[cfg(test)]
 mod prepaid;
@@ -1683,7 +1936,9 @@ mod model_check;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_forge_test_utils::TestAccounts;
+    use soroban_forge_test_utils::{
+        FailureBoundary, FailureSchedule, FailureToken, FailureTokenClient, TestAccounts,
+    };
     use soroban_sdk::testutils::{storage::Persistent, Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{Address, Env};
@@ -1742,6 +1997,52 @@ mod tests {
         assert_eq!(subscription.last_charged, START);
         assert_eq!(subscription.paused_at, None);
         assert_eq!(subscription.failed_attempts, 0);
+    }
+
+    #[test]
+    fn failure_token_seeded_catchup_failure_rolls_back_all_periods() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(START);
+        let token = env.register(FailureToken, ());
+        let token_client = FailureTokenClient::new(&env, &token);
+        let contract_id = env.register(SubscriptionPayments, ());
+        let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        token_client.mint(&accounts.user1, &10_000_i128);
+        let subscription_id = client.subscribe(
+            &accounts.user1,
+            &accounts.validator,
+            &token,
+            &AMOUNT,
+            &PERIOD,
+        );
+        let schedule = FailureSchedule::seeded(1, FailureBoundary::BeforeBatchStep);
+        let step = schedule.failing_step().expect("seeded step");
+        token_client.set_fail_at_transfer(&step);
+        let before = client.get_subscription(&subscription_id);
+        let subscriber_before = token_client.balance(&accounts.user1);
+        let provider_before = token_client.balance(&accounts.validator);
+        env.ledger().set_timestamp(START + PERIOD * 3);
+
+        let err = client
+            .try_charge_catchup(&subscription_id, &3)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::TokenTransferFailed);
+        let after = client.get_subscription(&subscription_id);
+        assert_eq!(after.last_charged, before.last_charged);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.failed_attempts, before.failed_attempts);
+        assert_eq!(after.prepaid_balance, before.prepaid_balance);
+        assert_eq!(token_client.balance(&accounts.user1), subscriber_before);
+        assert_eq!(token_client.balance(&accounts.validator), provider_before);
+        assert!(token_client.transfer_trace().is_empty());
+        assert_eq!(
+            schedule.attempt_trace(step),
+            (1..=step).collect::<std::vec::Vec<u32>>()
+        );
+        assert!(env.events().all().events().is_empty());
     }
 
     #[test]

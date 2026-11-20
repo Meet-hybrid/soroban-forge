@@ -43,6 +43,18 @@
       ]
     },
     {
+      "name": "get_royalty_splits",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<vec<udt:RoyaltyShare>,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_settlement_summary",
       "inputs": [
         {
@@ -52,6 +64,22 @@
       ],
       "outputs": [
         "result<udt:SettlementSummary,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "preview_settlement",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<udt:SettlementPreview,udt:ForgeError>"
       ]
     },
     {
@@ -378,6 +406,32 @@
       "fields": [
         {
           "name": "royalty_share",
+          "type": "i128"
+        },
+        {
+          "name": "seller_net",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "SettlementPreview",
+      "fields": [
+        {
+          "name": "gross",
+          "type": "i128"
+        },
+        {
+          "name": "recipients",
+          "type": "vec<tuple<address,i128>>"
+        },
+        {
+          "name": "rounding_residue",
+          "type": "i128"
+        },
+        {
+          "name": "royalty_amount",
           "type": "i128"
         },
         {

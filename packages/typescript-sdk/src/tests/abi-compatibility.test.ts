@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
-import { xdr } from "@stellar/stellar-sdk";
+import { StrKey, xdr } from "@stellar/stellar-sdk";
+import type { Result } from "@stellar/stellar-sdk/contract";
 import {
   dao,
   escrow,
@@ -252,6 +253,147 @@ test("escrow action summaries have stable query signatures", () => {
   assert.equal(typeof clients.escrow.get_basket_action_summary, "function");
 });
 
+test("dao vote receipt query has a typed no-vote-capable result", () => {
+  const client = clients.dao;
+  assert.equal(typeof client.get_vote_receipt, "function");
+  const fn = client.spec
+    .funcs()
+    .find((entry) => entry.name().toString() === "get_vote_receipt");
+  assert.ok(fn, "DAO spec must expose get_vote_receipt");
+  assert.deepEqual(
+    fn.inputs().map((input) => ({
+      name: input.name().toString(),
+      type: typeName(input.type()),
+    })),
+    [
+      { name: "proposal_id", type: "u64" },
+      { name: "voter", type: "address" },
+    ],
+  );
+  assert.deepEqual(fn.outputs().map(typeName), [
+    "result<udt:VoteReceipt,udt:ForgeError>",
+  ]);
+
+  const receiptEntry = client.spec.entries.find(
+    (entry) =>
+      entry.switch().name === "scSpecEntryUdtStructV0" &&
+      entry.udtStructV0().name().toString() === "VoteReceipt",
+  );
+  assert.ok(receiptEntry, "VoteReceipt UDT must be in the DAO spec");
+  assert.deepEqual(
+    receiptEntry
+      .udtStructV0()
+      .fields()
+      .map((field) => ({
+        name: field.name().toString(),
+        type: typeName(field.type()),
+      })),
+    [
+      { name: "has_voted", type: "bool" },
+      { name: "support", type: "option<bool>" },
+      { name: "weight", type: "i128" },
+    ],
+  );
+
+  const args = client.spec.funcArgsToScVals("get_vote_receipt", {
+    proposal_id: 42n,
+    voter: CONTRACT_ID,
+  });
+  assert.deepEqual(
+    args.map((arg) => arg.switch().name),
+    ["scvU64", "scvAddress"],
+  );
+
+  // A malformed account string is rejected while encoding, before any
+  // simulation, so it can never be reported as a successful no-vote receipt.
+  assert.throws(() =>
+    client.spec.funcArgsToScVals("get_vote_receipt", {
+      proposal_id: 42n,
+      voter: "not-a-valid-address",
+    }),
+  );
+});
+
+test("dao proposal status query exposes executable and retryable readiness flags", () => {
+  const client = clients.dao;
+  assert.equal(typeof client.get_proposal_status, "function");
+  const fn = client.spec
+    .funcs()
+    .find((entry) => entry.name().toString() === "get_proposal_status");
+  assert.ok(fn, "DAO spec must expose get_proposal_status");
+  assert.deepEqual(
+    fn.inputs().map((input) => ({
+      name: input.name().toString(),
+      type: typeName(input.type()),
+    })),
+    [{ name: "proposal_id", type: "u64" }],
+  );
+  assert.deepEqual(fn.outputs().map(typeName), [
+    "result<udt:ProposalStatus,udt:ForgeError>",
+  ]);
+
+  const statusEntry = client.spec.entries.find(
+    (entry) =>
+      entry.switch().name === "scSpecEntryUdtStructV0" &&
+      entry.udtStructV0().name().toString() === "ProposalStatus",
+  );
+  assert.ok(statusEntry, "ProposalStatus UDT must be in the DAO spec");
+  assert.deepEqual(
+    statusEntry
+      .udtStructV0()
+      .fields()
+      .map((field) => ({
+        name: field.name().toString(),
+        type: typeName(field.type()),
+      })),
+    [
+      { name: "against_votes", type: "i128" },
+      { name: "for_votes", type: "i128" },
+      { name: "is_executable", type: "bool" },
+      { name: "is_retryable", type: "bool" },
+      { name: "proposal_id", type: "u64" },
+      { name: "state", type: "udt:ProposalState" },
+      { name: "voting_ends", type: "u64" },
+    ],
+  );
+});
+
+test("marketplace settlement preview decodes ordered royalty payments and conserves gross", () => {
+  const client = clients.marketplace;
+  const method = "preview_settlement";
+  assert.equal(typeof client[method], "function");
+  const args = client.spec.funcArgsToScVals(method, {
+    collection: CONTRACT_ID,
+    amount: 101n,
+  });
+  assert.deepEqual(args.map((arg) => arg.switch().name), [
+    "scvAddress",
+    "scvI128",
+  ]);
+
+  const second = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 1));
+  const preview: MarketplaceTypes.SettlementPreview = {
+    gross: 101n,
+    recipients: [[CONTRACT_ID, 33n], [second, 33n]],
+    royalty_amount: 66n,
+    seller_net: 35n,
+    rounding_residue: 1n,
+  };
+  const [output] = client.spec.getFunc(method).outputs();
+  assert.ok(output);
+  const encoded = client.spec.nativeToScVal(preview, output.result().okType());
+  const result: Result<MarketplaceTypes.SettlementPreview> =
+    client.spec.funcResToNative(method, encoded.toXDR("base64"));
+  const decoded = result.unwrap();
+  assert.deepEqual(decoded, preview);
+  const paid = decoded.recipients.reduce(
+    (total, [, amount]) => total + amount,
+    0n,
+  );
+  assert.equal(paid, decoded.royalty_amount);
+  assert.equal(paid + decoded.seller_net, decoded.gross);
+});
+
 // These aliases compile only if every generated contract namespace keeps its
 // public domain types exported from the unified SDK entrypoint.
 type _PublicContractTypes = [
@@ -274,6 +416,7 @@ type _PublicContractTypes = [
   DaoTypes.ProposalState,
   DaoTypes.BondState,
   DaoTypes.BondConfig,
+  DaoTypes.VoteReceipt,
   MarketplaceTypes.Royalty,
   MarketplaceTypes.RoyaltyStatus,
   MarketplaceTypes.Settlement,

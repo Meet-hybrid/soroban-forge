@@ -6,6 +6,8 @@
 //! 2. No early bill: `charge` returns `0` and changes nothing before a full period
 //!    has elapsed.
 //! 3. Terminal safety: a `Cancelled` subscription never bills.
+//! 4. Provider cancellation conserves prepaid funds: every unspent token
+//!    returns to the subscriber and nothing stays in custody.
 
 use crate::{
     SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus,
@@ -377,5 +379,48 @@ proptest! {
             prop_assert_eq!(token.balance(&w.contract_id), balance);
             prop_assert_eq!(token.balance(&w.provider), debits);
         }
+    }
+
+    #[test]
+    fn prop_provider_cancellation_returns_every_unspent_prepaid_token(
+        amount in 1i128..=1_000_i128,
+        deposit in 0i128..=10_000_i128,
+        charges in 0u32..=5_u32,
+        pause_first in any::<bool>(),
+    ) {
+        let mint = 10_000_i128;
+        let w = setup_world(mint);
+        let id = w.subscribe(amount, 10);
+        let client = w.client();
+        let token = soroban_sdk::token::Client::new(&w.env, &w.token);
+        if deposit > 0 {
+            client.deposit(&id, &deposit);
+        }
+        for i in 1..=charges {
+            w.env.ledger().set_timestamp(START + 10 * u64::from(i));
+            // Retry exhaustion may cancel mid-loop; later charges then error.
+            let _ = client.try_charge(&id);
+        }
+        let before = client.get_subscription(&id);
+        if pause_first && before.status == SubscriptionStatus::Active {
+            client.pause(&id);
+        }
+        if before.status == SubscriptionStatus::Cancelled {
+            // Retry exhaustion already cancelled and refunded it.
+            prop_assert_eq!(
+                client.try_cancel_by_provider(&id),
+                Err(Ok(ForgeError::InvalidInput))
+            );
+        } else {
+            client.cancel_by_provider(&id);
+        }
+
+        let paid = token.balance(&w.provider);
+        let after = client.get_subscription(&id);
+        prop_assert_eq!(after.status, SubscriptionStatus::Cancelled);
+        prop_assert_eq!(after.paused_at, None);
+        prop_assert_eq!(after.prepaid_balance, before.prepaid_balance.map(|_| 0));
+        prop_assert_eq!(token.balance(&w.contract_id), 0);
+        prop_assert_eq!(token.balance(&w.subscriber) + paid, mint);
     }
 }

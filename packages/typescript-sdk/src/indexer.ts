@@ -193,7 +193,7 @@ function asNumber(value: unknown, fallback = 0): number {
 }
 
 function decodeScVal(raw: string): unknown {
-  if (!raw) {
+  if (raw == null) {
     return undefined;
   }
 
@@ -211,130 +211,211 @@ function scValToJson(value: unknown): unknown {
   }
 
   const scValType = xdr.ScValType as unknown as Record<string, unknown> | undefined;
+  if (!scValType) {
+    return value;
+  }
+
   const maybe = value as { switch?: () => unknown; value?: () => unknown };
-  if (typeof maybe.switch === "function") {
-    const kind = maybe.switch();
+  if (typeof maybe.switch !== "function") {
+    return value;
+  }
 
-    const boolKind =
-      typeof scValType?.scvBool === "function"
-        ? scValType.scvBool()
-        : undefined;
-    if (kind === boolKind) {
-      return Boolean((maybe as { value?: () => boolean }).value?.());
-    }
+  const kind = maybe.switch();
 
-    const ints = [
-      typeof scValType?.scvI32 === "function" ? scValType.scvI32() : undefined,
-      typeof scValType?.scvU32 === "function" ? scValType.scvU32() : undefined,
-      typeof scValType?.scvI64 === "function" ? scValType.scvI64() : undefined,
-      typeof scValType?.scvU64 === "function" ? scValType.scvU64() : undefined,
-      typeof scValType?.scvI128 === "function"
-        ? scValType.scvI128()
-        : undefined,
-      typeof scValType?.scvU128 === "function"
-        ? scValType.scvU128()
-        : undefined,
-      typeof scValType?.scvI256 === "function"
-        ? scValType.scvI256()
-        : undefined,
-      typeof scValType?.scvU256 === "function"
-        ? scValType.scvU256()
-        : undefined,
-    ];
-    if (ints.includes(kind)) {
-      return String((maybe as { value?: () => unknown }).value?.());
-    }
-
-    const symbolKind =
-      typeof scValType?.scvSymbol === "function"
-        ? scValType.scvSymbol()
-        : undefined;
-    if (kind === symbolKind) {
-      const sym = (maybe as { sym?: () => { toString: () => string } }).sym?.();
-      return sym
-        ? sym.toString()
-        : String((maybe as { value?: () => unknown }).value?.());
-    }
-
-    const stringKind =
-      typeof scValType?.scvString === "function"
-        ? scValType.scvString()
-        : undefined;
-    if (kind === stringKind) {
-      const s = (maybe as { str?: () => { toString: () => string } }).str?.();
-      return s
-        ? s.toString()
-        : String((maybe as { value?: () => unknown }).value?.());
-    }
-
-    const addressKind =
-      typeof scValType?.scvAddress === "function"
-        ? scValType.scvAddress()
-        : undefined;
-    if (kind === addressKind) {
-      const address = (
-        maybe as { address?: () => { toString: () => string } }
-      ).address?.();
-      return address
-        ? address.toString()
-        : String((maybe as { value?: () => unknown }).value?.());
-    }
-
-    const vecKind =
-      typeof scValType?.scvVec === "function" ? scValType.scvVec() : undefined;
-    if (kind === vecKind) {
-      const vec = (maybe as { vec?: () => unknown[] }).vec?.() ?? [];
-      return Array.from(vec).map((entry) => scValToJson(entry));
-    }
-
-    const mapKind =
-      typeof scValType?.scvMap === "function" ? scValType.scvMap() : undefined;
-    if (kind === mapKind) {
-      const map =
-        (
-          maybe as { map?: () => Array<{ key: unknown; val: unknown }> }
-        ).map?.() ?? [];
-      return Object.fromEntries(
-        map.map((entry) => [
-          scValToJson((entry as { key: unknown }).key),
-          scValToJson((entry as { val: unknown }).val),
-        ]),
-      );
-    }
-
-    const bytesKind =
-      typeof scValType?.scvBytes === "function"
-        ? scValType.scvBytes()
-        : undefined;
-    if (kind === bytesKind) {
-      const bytes = (maybe as { bytes?: () => Uint8Array }).bytes?.();
-      return bytes ? Buffer.from(bytes).toString("hex") : undefined;
-    }
-
-    const voidKind =
-      typeof scValType?.scvVoid === "function"
-        ? scValType.scvVoid()
-        : undefined;
-    const errorKind =
-      typeof scValType?.scvError === "function"
-        ? scValType.scvError()
-        : undefined;
-    if (kind === voidKind || kind === errorKind) {
+  const resolveInt = (): string | undefined => {
+    const raw = (maybe as { value?: () => unknown }).value?.();
+    if (raw == null) {
       return undefined;
     }
+    if (typeof raw === "bigint") {
+      return String(raw);
+    }
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      return String(raw);
+    }
+    const num = Number(raw);
+    return Number.isFinite(num) ? String(num) : undefined;
+  };
+
+  const boolKind =
+    typeof scValType?.scvBool === "function" ? scValType.scvBool() : undefined;
+  if (kind === boolKind) {
+    return Boolean((maybe as { value?: () => boolean }).value?.());
   }
 
-  if (Array.isArray(value)) {
-    return value.map((item) => scValToJson(item));
+  const ints = [
+    typeof scValType?.scvI32 === "function" ? scValType.scvI32() : undefined,
+    typeof scValType?.scvU32 === "function" ? scValType.scvU32() : undefined,
+    typeof scValType?.scvI64 === "function" ? scValType.scvI64() : undefined,
+    typeof scValType?.scvU64 === "function" ? scValType.scvU64() : undefined,
+    typeof scValType?.scvI128 === "function"
+      ? scValType.scvI128()
+      : undefined,
+    typeof scValType?.scvU128 === "function"
+      ? scValType.scvU128()
+      : undefined,
+    typeof scValType?.scvI256 === "function"
+      ? scValType.scvI256()
+      : undefined,
+    typeof scValType?.scvU256 === "function"
+      ? scValType.scvU256()
+      : undefined,
+  ];
+  if (ints.includes(kind)) {
+    return resolveInt() ?? String((maybe as { value?: () => unknown }).value?.());
   }
 
-  if (typeof value === "object") {
+  const timepointKind =
+    typeof scValType?.scvTimepoint === "function"
+      ? scValType.scvTimepoint()
+      : undefined;
+  if (kind === timepointKind) {
+    return resolveInt() ?? String((maybe as { value?: () => unknown }).value?.());
+  }
+
+  const durationKind =
+    typeof scValType?.scvDuration === "function"
+      ? scValType.scvDuration()
+      : undefined;
+  if (kind === durationKind) {
+    return resolveInt() ?? String((maybe as { value?: () => unknown }).value?.());
+  }
+
+  const symbolKind =
+    typeof scValType?.scvSymbol === "function"
+      ? scValType.scvSymbol()
+      : undefined;
+  if (kind === symbolKind) {
+    const sym = (
+      maybe as { sym?: () => { toString: () => string } }
+    ).sym?.();
+    return sym
+      ? sym.toString()
+      : String((maybe as { value?: () => unknown }).value?.());
+  }
+
+  const stringKind =
+    typeof scValType?.scvString === "function"
+      ? scValType.scvString()
+      : undefined;
+  if (kind === stringKind) {
+    const s = (
+      maybe as { str?: () => { toString: () => string } }
+    ).str?.();
+    return s
+      ? s.toString()
+      : String((maybe as { value?: () => unknown }).value?.());
+  }
+
+  const addressKind =
+    typeof scValType?.scvAddress === "function"
+      ? scValType.scvAddress()
+      : undefined;
+  if (kind === addressKind) {
+    const address = (
+      maybe as { address?: () => { toString: () => string } }
+    ).address?.();
+    return address
+      ? address.toString()
+      : String((maybe as { value?: () => unknown }).value?.());
+  }
+
+  const contractInstanceKind =
+    typeof scValType?.scvContractInstance === "function"
+      ? scValType.scvContractInstance()
+      : undefined;
+  if (kind === contractInstanceKind) {
+    const instance = (
+      maybe as { value?: () => { contractId?: string } }
+    ).value?.();
+    if (!instance || typeof instance !== "object") {
+      return String(instance ?? "");
+    }
+    return instance.contractId ?? String(instance);
+  }
+
+  const ledgerKeyContractInstanceKind =
+    typeof scValType?.scvLedgerKeyContractInstance === "function"
+      ? scValType.scvLedgerKeyContractInstance()
+      : undefined;
+  if (kind === ledgerKeyContractInstanceKind) {
+    const key = (
+      maybe as { value?: () => { contractId?: string } }
+    ).value?.();
+    if (!key || typeof key !== "object") {
+      return String(key ?? "");
+    }
+    return key.contractId ?? String(key);
+  }
+
+  const executableTagKind =
+    typeof scValType?.scvExecutableTag === "function"
+      ? scValType.scvExecutableTag()
+      : undefined;
+  if (kind === executableTagKind) {
+    return String(
+      (maybe as { value?: () => unknown }).value?.() ?? "",
+    );
+  }
+
+  const objectKind =
+    typeof scValType?.scvObject === "function" ? scValType.scvObject() : undefined;
+  if (kind === objectKind) {
+    const object = (
+      maybe as { value?: () => Record<string, unknown> }
+    ).value?.();
+    if (!object || typeof object !== "object") {
+      return undefined;
+    }
     return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
+      Object.entries(object).map(([key, nested]) => [
         key,
         scValToJson(nested),
       ]),
     );
+  }
+
+  const vecKind =
+    typeof scValType?.scvVec === "function" ? scValType.scvVec() : undefined;
+  if (kind === vecKind) {
+    const vec = (maybe as { vec?: () => unknown[] }).vec?.() ?? [];
+    return Array.from(vec).map((entry) => scValToJson(entry));
+  }
+
+  const mapKind =
+    typeof scValType?.scvMap === "function" ? scValType.scvMap() : undefined;
+  if (kind === mapKind) {
+    const map =
+      (
+        maybe as { map?: () => Array<{ key: unknown; val: unknown }> }
+      ).map?.() ?? [];
+    return Object.fromEntries(
+      map.map((entry) => [
+        scValToJson((entry as { key: unknown }).key),
+        scValToJson((entry as { val: unknown }).val),
+      ]),
+    );
+  }
+
+  const bytesKind =
+    typeof scValType?.scvBytes === "function"
+      ? scValType.scvBytes()
+      : undefined;
+  if (kind === bytesKind) {
+    const bytes = (maybe as { bytes?: () => Uint8Array }).bytes?.();
+    return bytes ? Buffer.from(bytes).toString("hex") : undefined;
+  }
+
+  const voidKind =
+    typeof scValType?.scvVoid === "function"
+      ? scValType.scvVoid()
+      : undefined;
+  const errorKind =
+    typeof scValType?.scvError === "function"
+      ? scValType.scvError()
+      : undefined;
+  if (kind === voidKind || kind === errorKind) {
+    return undefined;
   }
 
   return value;
@@ -359,7 +440,8 @@ function deriveEntityId(
     }
   }
   const value = rawEvent.decodedValue;
-  if (value && typeof value === "object") {
+  if (value && typeof value === "object"
+) {
     const candidate =
       (value as Record<string, unknown>).escrow_id ??
       (value as Record<string, unknown>).subscription_id ??

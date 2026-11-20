@@ -31,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `refund_expired_returns_only_what_is_left_after_partial_releases`).
 
 ### Added
+- **Next.js example local demo state tools** (`packages/nextjs-example`):
+  versioned JSON export, validated import, state inspection, and a confirmed
+  reset flow for browser-only form state. Exports exclude chain-derived escrow
+  IDs, secrets, signed transactions, wallet state, and network settings.
+  Includes storage utility tests and a boundary note in the package README.
+- **Marketplace settlement preview** (`preview_settlement`): returns royalty
+  payments in registration order, total royalties, seller proceeds, and split
+  rounding residue in a read-only query. Includes TypeScript bindings (#603).
+- **JSON provenance verification** (`verify --json`): reports manifest
+  artifact matches, hash mismatches, size drift, and missing artifacts (#587).
+- **Deterministic test ledger progression** (`advance_ledger_to`): sets ledger
+  sequence and timestamp on a test environment and rejects rewinds (#595).
 - **Works with OpenZeppelin Stellar Contracts, proven on testnet**
   (`docs/OPENZEPPELIN.md`, `scripts/openzeppelin-token-proof.py`,
   `docs/testnet/openzeppelin-token-receipt.json`): a token built from

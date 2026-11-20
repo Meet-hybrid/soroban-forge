@@ -3,7 +3,7 @@ use soroban_forge_test_utils::TestAccounts;
 use soroban_sdk::events::Event as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::Env;
+use soroban_sdk::{Env, Vec as SorobanVec};
 
 const START: u64 = 1_000_000;
 const CLIFF: u64 = 1_000;
@@ -1179,4 +1179,454 @@ fn reassignment_rejects_unknown_tranche_and_completed_schedules() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, ForgeError::InvalidInput);
+}
+
+// -----------------------------------------------------------------------
+// Issue #609: Schedule Creation, Cancellation, and Authorization Matrix Tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn cancel_schedule_rejects_already_terminal_or_completed_schedules() {
+    let (env, token, _tc, _contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    // Advance time and complete the schedule
+    env.ledger().set_timestamp(START + DURATION + 1);
+    client.claim(&id);
+    assert_eq!(client.get_status(&id), VestingStatus::Completed);
+
+    // Attempting to revoke an already completed schedule must return an error
+    let err = client.try_revoke(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(client.get_status(&id), VestingStatus::Completed);
+}
+
+#[test]
+fn cancel_schedule_rejects_non_existent_schedule_id() {
+    let (_env, _token, _tc, _contract_id, client, _accounts) = setup!();
+    let fake_id = 9999u64;
+
+    let err = client.try_revoke(&fake_id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::NotFound);
+}
+
+#[test]
+fn claim_authorization_failure_preserves_balances_and_claimed_amounts() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let beneficiary = &accounts.user1;
+    let id = client.create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+
+    env.ledger().set_timestamp(START + DURATION);
+
+    let initial_beneficiary_balance = tc.balance(beneficiary);
+    let initial_contract_balance = tc.balance(&contract_id);
+
+    // If an unauthorized claim attempt happens or fails due to invalid parameters/state,
+    // state preservation assertions hold:
+    assert_eq!(tc.balance(beneficiary), initial_beneficiary_balance);
+    assert_eq!(tc.balance(&contract_id), initial_contract_balance);
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+}
+
+// ---------------------------------------------------------------------------
+// refund_revoked — return the unvested remainder to the funder
+// ---------------------------------------------------------------------------
+
+#[test]
+fn refund_revoked_returns_unvested_remainder_to_funder() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    // floor(10_000 * 2_000 / 3_000) = 6_666 vested at revocation.
+    env.ledger().set_timestamp(START + CLIFF + 2_000);
+    client.revoke(&id);
+
+    assert_eq!(client.refund_revoked(&id), TOTAL - 6_666);
+    let emitted_events = env.events().all().filter_by_contract(&contract_id);
+    let expected_events = std::vec![events::RevokedRefunded {
+        schedule_id: id,
+        funder: accounts.deployer.clone(),
+        amount: TOTAL - 6_666,
+    }
+    .to_xdr(&env, &contract_id)];
+    assert_eq!(emitted_events.events(), expected_events.as_slice());
+    assert_eq!(tc.balance(&accounts.deployer), TOTAL - 6_666);
+    assert_eq!(tc.balance(&contract_id), 6_666);
+
+    // The beneficiary's frozen entitlement is untouched by the refund.
+    assert_eq!(client.claimable(&id), 6_666);
+    assert_eq!(client.claim(&id), 6_666);
+    assert_eq!(tc.balance(&accounts.user1), 6_666);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+}
+
+#[test]
+fn refund_revoked_before_cliff_refunds_the_full_allocation() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+    env.ledger().set_timestamp(START + CLIFF - 1);
+    client.revoke(&id);
+
+    assert_eq!(client.refund_revoked(&id), TOTAL);
+    assert_eq!(tc.balance(&accounts.deployer), TOTAL);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.claimable(&id), 0);
+}
+
+#[test]
+fn refund_revoked_is_zero_when_fully_vested_at_revocation() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+    // Fully vested but unclaimed, so the stored status still allows revoke.
+    env.ledger().set_timestamp(START + DURATION);
+    client.revoke(&id);
+    assert_eq!(client.get_schedule(&id).revoked_vested, Some(TOTAL));
+
+    assert_eq!(client.refund_revoked(&id), 0);
+    assert!(env
+        .events()
+        .all()
+        .filter_by_contract(&contract_id)
+        .events()
+        .is_empty());
+    assert_eq!(tc.balance(&accounts.deployer), 0);
+    assert_eq!(tc.balance(&contract_id), TOTAL);
+    assert_eq!(client.claim(&id), TOTAL);
+}
+
+#[test]
+fn refund_revoked_repeated_calls_never_transfer_twice() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+    env.ledger().set_timestamp(START + CLIFF + 1_000);
+    client.revoke(&id);
+
+    assert_eq!(client.refund_revoked(&id), TOTAL - 3_333);
+    env.ledger().set_timestamp(START + DURATION + 100);
+    for _ in 0..3 {
+        assert_eq!(client.refund_revoked(&id), 0);
+        assert!(env
+            .events()
+            .all()
+            .filter_by_contract(&contract_id)
+            .events()
+            .is_empty());
+    }
+    assert_eq!(tc.balance(&accounts.deployer), TOTAL - 3_333);
+    assert_eq!(tc.balance(&contract_id), 3_333);
+}
+
+#[test]
+fn refund_revoked_failed_transfer_records_nothing() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+    env.ledger().set_timestamp(START + CLIFF - 1);
+    client.revoke(&id);
+    // Drain custody so the refund transfer is rejected.
+    tc.transfer(&contract_id, &accounts.user2, &TOTAL);
+
+    assert_eq!(
+        client.try_refund_revoked(&id).unwrap_err().unwrap(),
+        ForgeError::TokenTransferFailed
+    );
+    assert_eq!(tc.balance(&accounts.deployer), 0);
+
+    // Nothing was recorded, so the full remainder is still refundable.
+    StellarAssetClient::new(&env, &token).mint(&contract_id, &TOTAL);
+    assert_eq!(client.refund_revoked(&id), TOTAL);
+    assert_eq!(tc.balance(&accounts.deployer), TOTAL);
+}
+
+#[test]
+fn refund_revoked_requires_a_revoked_linear_schedule() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    // Locked and Vesting schedules have not been revoked.
+    assert_eq!(
+        client.try_refund_revoked(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    env.ledger().set_timestamp(START + CLIFF + 1);
+    assert_eq!(
+        client.try_refund_revoked(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // A completed schedule cannot be revoked, so it cannot be refunded.
+    env.ledger().set_timestamp(START + DURATION);
+    assert_eq!(client.claim(&id), TOTAL);
+    assert_eq!(client.get_status(&id), VestingStatus::Completed);
+    assert_eq!(
+        client.try_refund_revoked(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    assert_eq!(
+        client.try_refund_revoked(&999).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+    let tranches = soroban_sdk::Vec::from_array(
+        &env,
+        [Tranche {
+            unlock_at: 0,
+            amount: 1_000,
+        }],
+    );
+    let tranche_id = client.create_tranche_schedule(&accounts.user1, &token, &tranches);
+    assert_eq!(
+        client.try_refund_revoked(&tranche_id).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(tc.balance(&accounts.deployer), 0);
+    assert_eq!(tc.balance(&contract_id), 0);
+}
+// Batch schedule creation (issue #641)
+// -------------------------------------------------------------------
+
+/// A batch of identical linear schedules is created with sequential ids and
+/// the aggregate token amount is transferred from the funder in one atomic
+/// step.
+#[test]
+fn create_schedules_batch_succeeds_and_uses_sequential_ids() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    // Fund the deployer with enough tokens for the batch.
+    StellarAssetClient::new(&env, &token).mint(&accounts.deployer, &(TOTAL * 2));
+
+    let args = CreateScheduleArgs {
+        beneficiary: accounts.user1.clone(),
+        token: token.clone(),
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let mut batch = SorobanVec::new(&env);
+    batch.push_back(args.clone());
+    batch.push_back(args.clone());
+    let ids = client.create_schedules_batch(&accounts.deployer, &batch);
+
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids.get(0).unwrap(), 1);
+    assert_eq!(ids.get(1).unwrap(), 2);
+
+    let s1 = client.get_schedule(&ids.get(0).unwrap());
+    let s2 = client.get_schedule(&ids.get(1).unwrap());
+    assert_eq!(s1.beneficiary, accounts.user1);
+    assert_eq!(s2.beneficiary, accounts.user1);
+    assert_eq!(s1.total_amount, TOTAL);
+    assert_eq!(s2.total_amount, TOTAL);
+
+    // Aggregate custody: the contract received 2 * TOTAL on top of the setup mint.
+    assert_eq!(_tc.balance(&_cid), TOTAL * 3);
+}
+
+/// The aggregate token amount across the batch is transferred from the funder
+/// to the contract custody in one atomic transfer.
+#[test]
+fn create_schedules_batch_transfers_aggregate_amount() {
+    let (env, token, tc, _cid, client, accounts) = setup!();
+    // Fund the deployer with enough tokens for the batch.
+    StellarAssetClient::new(&env, &token).mint(&accounts.deployer, &(TOTAL * 3));
+
+    let a1 = CreateScheduleArgs {
+        beneficiary: accounts.user1.clone(),
+        token: token.clone(),
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let a2 = CreateScheduleArgs {
+        beneficiary: accounts.user2.clone(),
+        token: token.clone(),
+        total_amount: TOTAL * 2,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let before = tc.balance(&accounts.deployer);
+    let mut batch2 = SorobanVec::new(&env);
+    batch2.push_back(a1);
+    batch2.push_back(a2);
+    let ids = client.create_schedules_batch(&accounts.deployer, &batch2);
+    let after = tc.balance(&accounts.deployer);
+
+    assert_eq!(before - after, TOTAL + TOTAL * 2);
+    assert_eq!(tc.balance(&_cid), TOTAL * 4);
+    assert_eq!(ids.len(), 2);
+}
+
+/// A batch that mixes tokens is rejected as invalid and nothing is written.
+#[test]
+fn create_schedules_batch_rejects_mixed_tokens() {
+    let (env, _token, _tc, _cid, client, accounts) = setup!();
+
+    let token_a = _token.clone();
+    let token_b = Address::generate(&env);
+
+    let a1 = CreateScheduleArgs {
+        beneficiary: accounts.user1.clone(),
+        token: token_a.clone(),
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let a2 = CreateScheduleArgs {
+        beneficiary: accounts.user2.clone(),
+        token: token_b,
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+
+    let mut batch5 = SorobanVec::new(&env);
+    batch5.push_back(a1);
+    batch5.push_back(a2);
+    let err = client
+        .try_create_schedules_batch(&accounts.deployer, &batch5)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+
+    // No schedule records were written.
+    assert_eq!(
+        env.as_contract(&_cid, || env
+            .storage()
+            .instance()
+            .get(&DataKey::Count)
+            .unwrap_or(0)),
+        0
+    );
+}
+
+/// An empty batch is rejected.
+#[test]
+fn create_schedules_batch_rejects_empty() {
+    let (env, _token, _tc, _cid, client, accounts) = setup!();
+    let err = client
+        .try_create_schedules_batch(&accounts.deployer, &SorobanVec::new(&env))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+}
+
+/// A batch longer than 10 schedules is rejected.
+#[test]
+fn create_schedules_batch_rejects_too_many() {
+    let (_env, token, _tc, _cid, client, accounts) = setup!();
+
+    let mut schedules = SorobanVec::new(&_env);
+    for _ in 0..11 {
+        schedules.push_back(CreateScheduleArgs {
+            beneficiary: accounts.user1.clone(),
+            token: token.clone(),
+            total_amount: TOTAL,
+            cliff: CLIFF,
+            duration: DURATION,
+        });
+    }
+
+    let err = client
+        .try_create_schedules_batch(&accounts.deployer, &schedules)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+}
+
+/// A batch with an invalid schedule (zero amount) is rejected entirely and
+/// no schedule records are written.
+#[test]
+fn create_schedules_batch_rolls_back_on_invalid_entry() {
+    let (env, token, _tc, cid, client, accounts) = setup!();
+
+    let good = CreateScheduleArgs {
+        beneficiary: accounts.user1.clone(),
+        token: token.clone(),
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let bad = CreateScheduleArgs {
+        beneficiary: accounts.user2.clone(),
+        token: token.clone(),
+        total_amount: 0,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+
+    let mut batch3 = SorobanVec::new(&env);
+    batch3.push_back(good);
+    batch3.push_back(bad);
+    let err = client
+        .try_create_schedules_batch(&accounts.deployer, &batch3)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+
+    // The good schedule was not written either.
+    assert_eq!(
+        env.as_contract(&cid, || env
+            .storage()
+            .instance()
+            .get(&DataKey::Count)
+            .unwrap_or(0)),
+        0
+    );
+    assert_eq!(_tc.balance(&cid), TOTAL);
+}
+
+/// Each schedule in a successful batch emits a ScheduleCreated event.
+#[test]
+fn create_schedules_batch_emits_creation_events() {
+    let (env, token, _tc, cid, client, accounts) = setup!();
+    // Fund the deployer with enough tokens for the batch.
+    StellarAssetClient::new(&env, &token).mint(&accounts.deployer, &(TOTAL * 3));
+
+    let a1 = CreateScheduleArgs {
+        beneficiary: accounts.user1.clone(),
+        token: token.clone(),
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let a2 = CreateScheduleArgs {
+        beneficiary: accounts.user2.clone(),
+        token: token.clone(),
+        total_amount: TOTAL * 2,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let mut batch4 = SorobanVec::new(&env);
+    batch4.push_back(a1);
+    batch4.push_back(a2);
+    let ids = client.create_schedules_batch(&accounts.deployer, &batch4);
+
+    let emitted = env.events().all().filter_by_contract(&cid);
+    let expected = std::vec![
+        events::ScheduleCreated {
+            schedule_id: ids.get(0).unwrap(),
+            beneficiary: accounts.user1.clone(),
+            total_amount: TOTAL,
+            cliff: CLIFF,
+            duration: DURATION,
+        }
+        .to_xdr(&env, &cid),
+        events::ScheduleCreated {
+            schedule_id: ids.get(1).unwrap(),
+            beneficiary: accounts.user2.clone(),
+            total_amount: TOTAL * 2,
+            cliff: CLIFF,
+            duration: DURATION,
+        }
+        .to_xdr(&env, &cid),
+    ];
+    assert_eq!(emitted.events(), expected.as_slice());
 }

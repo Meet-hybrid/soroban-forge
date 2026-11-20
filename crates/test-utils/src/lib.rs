@@ -7,6 +7,7 @@
 //! - [`TestAccounts`] to obtain deterministic, distinct mock addresses
 //! - [`ttl`] for ledger-sequence manipulation, entry-liveness introspection,
 //!   and the deterministic TTL chaos harness ([`chaos_drive`])
+//! - [`events`] for decoded event inspection and declarative event assertions
 //!
 //! This crate is intended to be used as a `dev-dependency` by contract crates.
 
@@ -18,7 +19,16 @@ pub mod mocks;
 pub mod model;
 pub mod ttl;
 
+/// Structured event introspection. Test-only, so it stays behind the same
+/// `cfg` the rest of this crate's test helpers use.
+#[cfg(any(test, feature = "testutils"))]
+pub mod events;
+
+#[cfg(any(test, feature = "testutils"))]
+pub use events::{assert_contract_event, filter_contract_events, DecodedEvent, MockEventSink};
+
 pub use mocks::{
+    failure_step_for_seed, FailureBoundary, FailureSchedule, FailureToken, FailureTokenClient,
     MockTarget, MockTargetClient, RevertingTarget, RevertingTargetClient, TestAccounts,
 };
 pub use model::{
@@ -26,8 +36,8 @@ pub use model::{
     ModelStepRecord, ModelTrace, ModelTraceFor, OpGenerator,
 };
 pub use ttl::{
-    advance_ledger, assert_no_violations, chaos_drive, entry_is_live, entry_ttl, ChaosStep,
-    ChaosTarget, ChaosTrace, StepOutcome, BUMP_AMOUNT, BUMP_THRESHOLD, DAY_IN_LEDGERS,
+    advance_ledger, advance_ledger_to, assert_no_violations, chaos_drive, entry_is_live, entry_ttl,
+    ChaosStep, ChaosTarget, ChaosTrace, StepOutcome, BUMP_AMOUNT, BUMP_THRESHOLD, DAY_IN_LEDGERS,
 };
 
 /// Create a [`Env`] configured for contract testing.

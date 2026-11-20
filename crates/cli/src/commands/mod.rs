@@ -1,12 +1,16 @@
 pub mod build;
 pub mod compare;
 pub mod deploy;
+pub mod deploy_check;
 pub mod doctor;
 pub mod events;
 pub mod inspect;
 pub mod invoke;
 pub mod lint;
 pub mod new;
+pub mod plan;
+mod process;
 pub mod scaffold_validate;
+pub mod storage_diff;
 pub mod test;
 pub mod verify;
