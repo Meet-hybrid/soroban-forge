@@ -7,6 +7,7 @@
 //! - [`TestAccounts`] to obtain deterministic, distinct mock addresses
 //! - [`ttl`] for ledger-sequence manipulation, entry-liveness introspection,
 //!   and the deterministic TTL chaos harness ([`chaos_drive`])
+//! - [`events`] for decoded event inspection and declarative event assertions
 //!
 //! This crate is intended to be used as a `dev-dependency` by contract crates.
 
@@ -17,6 +18,14 @@ use soroban_sdk::Env;
 pub mod mocks;
 pub mod model;
 pub mod ttl;
+
+/// Structured event introspection. Test-only, so it stays behind the same
+/// `cfg` the rest of this crate's test helpers use.
+#[cfg(any(test, feature = "testutils"))]
+pub mod events;
+
+#[cfg(any(test, feature = "testutils"))]
+pub use events::{assert_contract_event, filter_contract_events, DecodedEvent, MockEventSink};
 
 pub use mocks::{
     failure_step_for_seed, FailureBoundary, FailureSchedule, FailureToken, FailureTokenClient,

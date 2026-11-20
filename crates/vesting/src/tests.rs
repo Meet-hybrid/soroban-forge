@@ -3,7 +3,7 @@ use soroban_forge_test_utils::TestAccounts;
 use soroban_sdk::events::Event as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::Env;
+use soroban_sdk::{Env, Vec as SorobanVec};
 
 const START: u64 = 1_000_000;
 const CLIFF: u64 = 1_000;
@@ -1390,4 +1390,243 @@ fn refund_revoked_requires_a_revoked_linear_schedule() {
     );
     assert_eq!(tc.balance(&accounts.deployer), 0);
     assert_eq!(tc.balance(&contract_id), 0);
+}
+// Batch schedule creation (issue #641)
+// -------------------------------------------------------------------
+
+/// A batch of identical linear schedules is created with sequential ids and
+/// the aggregate token amount is transferred from the funder in one atomic
+/// step.
+#[test]
+fn create_schedules_batch_succeeds_and_uses_sequential_ids() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    // Fund the deployer with enough tokens for the batch.
+    StellarAssetClient::new(&env, &token).mint(&accounts.deployer, &(TOTAL * 2));
+
+    let args = CreateScheduleArgs {
+        beneficiary: accounts.user1.clone(),
+        token: token.clone(),
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let mut batch = SorobanVec::new(&env);
+    batch.push_back(args.clone());
+    batch.push_back(args.clone());
+    let ids = client.create_schedules_batch(&accounts.deployer, &batch);
+
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids.get(0).unwrap(), 1);
+    assert_eq!(ids.get(1).unwrap(), 2);
+
+    let s1 = client.get_schedule(&ids.get(0).unwrap());
+    let s2 = client.get_schedule(&ids.get(1).unwrap());
+    assert_eq!(s1.beneficiary, accounts.user1);
+    assert_eq!(s2.beneficiary, accounts.user1);
+    assert_eq!(s1.total_amount, TOTAL);
+    assert_eq!(s2.total_amount, TOTAL);
+
+    // Aggregate custody: the contract received 2 * TOTAL on top of the setup mint.
+    assert_eq!(_tc.balance(&_cid), TOTAL * 3);
+}
+
+/// The aggregate token amount across the batch is transferred from the funder
+/// to the contract custody in one atomic transfer.
+#[test]
+fn create_schedules_batch_transfers_aggregate_amount() {
+    let (env, token, tc, _cid, client, accounts) = setup!();
+    // Fund the deployer with enough tokens for the batch.
+    StellarAssetClient::new(&env, &token).mint(&accounts.deployer, &(TOTAL * 3));
+
+    let a1 = CreateScheduleArgs {
+        beneficiary: accounts.user1.clone(),
+        token: token.clone(),
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let a2 = CreateScheduleArgs {
+        beneficiary: accounts.user2.clone(),
+        token: token.clone(),
+        total_amount: TOTAL * 2,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let before = tc.balance(&accounts.deployer);
+    let mut batch2 = SorobanVec::new(&env);
+    batch2.push_back(a1);
+    batch2.push_back(a2);
+    let ids = client.create_schedules_batch(&accounts.deployer, &batch2);
+    let after = tc.balance(&accounts.deployer);
+
+    assert_eq!(before - after, TOTAL + TOTAL * 2);
+    assert_eq!(tc.balance(&_cid), TOTAL * 4);
+    assert_eq!(ids.len(), 2);
+}
+
+/// A batch that mixes tokens is rejected as invalid and nothing is written.
+#[test]
+fn create_schedules_batch_rejects_mixed_tokens() {
+    let (env, _token, _tc, _cid, client, accounts) = setup!();
+
+    let token_a = _token.clone();
+    let token_b = Address::generate(&env);
+
+    let a1 = CreateScheduleArgs {
+        beneficiary: accounts.user1.clone(),
+        token: token_a.clone(),
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let a2 = CreateScheduleArgs {
+        beneficiary: accounts.user2.clone(),
+        token: token_b,
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+
+    let mut batch5 = SorobanVec::new(&env);
+    batch5.push_back(a1);
+    batch5.push_back(a2);
+    let err = client
+        .try_create_schedules_batch(&accounts.deployer, &batch5)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+
+    // No schedule records were written.
+    assert_eq!(
+        env.as_contract(&_cid, || env
+            .storage()
+            .instance()
+            .get(&DataKey::Count)
+            .unwrap_or(0)),
+        0
+    );
+}
+
+/// An empty batch is rejected.
+#[test]
+fn create_schedules_batch_rejects_empty() {
+    let (env, _token, _tc, _cid, client, accounts) = setup!();
+    let err = client
+        .try_create_schedules_batch(&accounts.deployer, &SorobanVec::new(&env))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+}
+
+/// A batch longer than 10 schedules is rejected.
+#[test]
+fn create_schedules_batch_rejects_too_many() {
+    let (_env, token, _tc, _cid, client, accounts) = setup!();
+
+    let mut schedules = SorobanVec::new(&_env);
+    for _ in 0..11 {
+        schedules.push_back(CreateScheduleArgs {
+            beneficiary: accounts.user1.clone(),
+            token: token.clone(),
+            total_amount: TOTAL,
+            cliff: CLIFF,
+            duration: DURATION,
+        });
+    }
+
+    let err = client
+        .try_create_schedules_batch(&accounts.deployer, &schedules)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+}
+
+/// A batch with an invalid schedule (zero amount) is rejected entirely and
+/// no schedule records are written.
+#[test]
+fn create_schedules_batch_rolls_back_on_invalid_entry() {
+    let (env, token, _tc, cid, client, accounts) = setup!();
+
+    let good = CreateScheduleArgs {
+        beneficiary: accounts.user1.clone(),
+        token: token.clone(),
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let bad = CreateScheduleArgs {
+        beneficiary: accounts.user2.clone(),
+        token: token.clone(),
+        total_amount: 0,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+
+    let mut batch3 = SorobanVec::new(&env);
+    batch3.push_back(good);
+    batch3.push_back(bad);
+    let err = client
+        .try_create_schedules_batch(&accounts.deployer, &batch3)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+
+    // The good schedule was not written either.
+    assert_eq!(
+        env.as_contract(&cid, || env
+            .storage()
+            .instance()
+            .get(&DataKey::Count)
+            .unwrap_or(0)),
+        0
+    );
+    assert_eq!(_tc.balance(&cid), TOTAL);
+}
+
+/// Each schedule in a successful batch emits a ScheduleCreated event.
+#[test]
+fn create_schedules_batch_emits_creation_events() {
+    let (env, token, _tc, cid, client, accounts) = setup!();
+    // Fund the deployer with enough tokens for the batch.
+    StellarAssetClient::new(&env, &token).mint(&accounts.deployer, &(TOTAL * 3));
+
+    let a1 = CreateScheduleArgs {
+        beneficiary: accounts.user1.clone(),
+        token: token.clone(),
+        total_amount: TOTAL,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let a2 = CreateScheduleArgs {
+        beneficiary: accounts.user2.clone(),
+        token: token.clone(),
+        total_amount: TOTAL * 2,
+        cliff: CLIFF,
+        duration: DURATION,
+    };
+    let mut batch4 = SorobanVec::new(&env);
+    batch4.push_back(a1);
+    batch4.push_back(a2);
+    let ids = client.create_schedules_batch(&accounts.deployer, &batch4);
+
+    let emitted = env.events().all().filter_by_contract(&cid);
+    let expected = std::vec![
+        events::ScheduleCreated {
+            schedule_id: ids.get(0).unwrap(),
+            beneficiary: accounts.user1.clone(),
+            total_amount: TOTAL,
+            cliff: CLIFF,
+            duration: DURATION,
+        }
+        .to_xdr(&env, &cid),
+        events::ScheduleCreated {
+            schedule_id: ids.get(1).unwrap(),
+            beneficiary: accounts.user2.clone(),
+            total_amount: TOTAL * 2,
+            cliff: CLIFF,
+            duration: DURATION,
+        }
+        .to_xdr(&env, &cid),
+    ];
+    assert_eq!(emitted.events(), expected.as_slice());
 }

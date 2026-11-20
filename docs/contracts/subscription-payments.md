@@ -14,6 +14,9 @@ fn is_provider_authorized(subscriber, provider) -> bool
 fn charge(subscription_id) -> Result<i128, ForgeError>
 fn deposit(subscription_id, amount) -> Result<i128, ForgeError>
 fn withdraw_balance(subscription_id, amount) -> Result<i128, ForgeError>
+fn configure_auto_topup(subscription_id, trigger_threshold: i128, topup_amount: i128) -> Result<(), ForgeError>
+fn disable_auto_topup(subscription_id) -> Result<(), ForgeError>
+fn get_auto_topup(subscription_id) -> Option<AutoTopup>
 fn charge_catchup(subscription_id, max_periods: u32) -> Result<i128, ForgeError>
 fn pause(subscription_id) -> Result<(), ForgeError>
 fn resume(subscription_id) -> Result<(), ForgeError>
@@ -224,6 +227,27 @@ pull mode remains direct subscriber-to-provider settlement. The subscription
 record gains an optional `prepaid_balance` field; ABI clients must be regenerated
 for this record shape change.
 
+## Prepaid auto-topup
+
+`configure_auto_topup(subscription_id, trigger_threshold, topup_amount)`
+requires the subscriber and authorizes the contract to pull `topup_amount`
+from the subscriber into custody during billing. It validates
+`topup_amount > 0` and `trigger_threshold >= 0`, rejects a `Cancelled`
+subscription, and replaces any earlier setting. `disable_auto_topup` (also
+subscriber-only, idempotent) removes it; `get_auto_topup` reads it.
+
+| Due prepaid `charge` | Token movement | Result |
+|---|---|---|
+| `prepaid_balance < period_amount` or `< trigger_threshold`, top-up succeeds | subscriber → contract `topup_amount`, then contract → provider period amount | `AutoTopupTriggered { amount, balance_after }`, then the normal debit |
+| Topped-up balance still below the period amount | subscriber → contract `topup_amount` only | credited; usual `PastDue` / retry-limit cancellation (which refunds the whole balance) |
+| Top-up rejected (insufficient funds, deauthorized account) | none | nothing written by the top-up; debit if the old balance still covers the period, otherwise `PastDue` exactly as without auto-topup |
+
+At most one top-up runs per charge, and it runs before the debit transfer
+and before the subscription is stored (transfer before state). Pull mode and
+`charge_catchup` (which refuses prepaid subscriptions) never top up. With
+auto-topup, prepaid conservation reads `Σdeposits + Σtop-ups − Σperiod
+debits − Σwithdrawals − Σcancellation refunds == prepaid_balance`.
+
 ## Secondary Indices
 
 Each subscription is indexed in two secondary lists, written on the `subscribe`Jsuccess path:
@@ -264,6 +288,9 @@ of `0` fails with `ForgeError::InvalidInput`.
   methods. New writes refresh their TTLs.
 - `RenewalPolicy(id)` — separate instance-storage record; the `Subscription`
   wire shape remains unchanged.
+- `AutoTopup(subscription_id)` — persistent `AutoTopup { trigger_threshold,
+  topup_amount }` record; a separate key, so the `Subscription` wire shape is
+  unchanged.
 - `Usage(subscription_id, metric)` — a persistent open-period raw unit counter
   for one metric, stamped with the `last_charged` window it belongs to; removed
   by the charge that closes the period.
@@ -317,6 +344,7 @@ The contract emits typed on-chain lifecycle events for indexers and off-chain mo
 - `Deposited` (topic: `subscription_id: u64`) — successful prepaid deposit; contains `amount` and `balance_after`.
 - `BalanceDebited` (topic: `subscription_id: u64`) — successful prepaid period settlement; contains the exact `amount` and `balance_after`.
 - `BalanceRefunded` (topic: `subscription_id: u64`) — successful subscriber withdrawal or cancellation refund; contains `amount` and `balance_after`.
+- `AutoTopupTriggered` (topic: `subscription_id: u64`) — a prepaid balance was topped up from the subscriber during `charge`; contains the top-up `amount` and the `balance_after` it, before the period's debit.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
 - `Charged` (topic: `subscription_id: u64`) — emitted on successful billing via `charge` (one event) or `charge_catchup` (one event per settled period). Contains `amount`, `last_charged`, and `next_charge_at`.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.

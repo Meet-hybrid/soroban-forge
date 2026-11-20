@@ -314,6 +314,50 @@ test("dao vote receipt query has a typed no-vote-capable result", () => {
   );
 });
 
+test("dao proposal status query exposes executable and retryable readiness flags", () => {
+  const client = clients.dao;
+  assert.equal(typeof client.get_proposal_status, "function");
+  const fn = client.spec
+    .funcs()
+    .find((entry) => entry.name().toString() === "get_proposal_status");
+  assert.ok(fn, "DAO spec must expose get_proposal_status");
+  assert.deepEqual(
+    fn.inputs().map((input) => ({
+      name: input.name().toString(),
+      type: typeName(input.type()),
+    })),
+    [{ name: "proposal_id", type: "u64" }],
+  );
+  assert.deepEqual(fn.outputs().map(typeName), [
+    "result<udt:ProposalStatus,udt:ForgeError>",
+  ]);
+
+  const statusEntry = client.spec.entries.find(
+    (entry) =>
+      entry.switch().name === "scSpecEntryUdtStructV0" &&
+      entry.udtStructV0().name().toString() === "ProposalStatus",
+  );
+  assert.ok(statusEntry, "ProposalStatus UDT must be in the DAO spec");
+  assert.deepEqual(
+    statusEntry
+      .udtStructV0()
+      .fields()
+      .map((field) => ({
+        name: field.name().toString(),
+        type: typeName(field.type()),
+      })),
+    [
+      { name: "against_votes", type: "i128" },
+      { name: "for_votes", type: "i128" },
+      { name: "is_executable", type: "bool" },
+      { name: "is_retryable", type: "bool" },
+      { name: "proposal_id", type: "u64" },
+      { name: "state", type: "udt:ProposalState" },
+      { name: "voting_ends", type: "u64" },
+    ],
+  );
+});
+
 test("marketplace settlement preview decodes ordered royalty payments and conserves gross", () => {
   const client = clients.marketplace;
   const method = "preview_settlement";

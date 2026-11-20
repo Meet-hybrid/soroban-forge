@@ -91,6 +91,22 @@
       ]
     },
     {
+      "name": "create_schedules_batch",
+      "inputs": [
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "schedules",
+          "type": "vec<udt:CreateScheduleArgs>"
+        }
+      ],
+      "outputs": [
+        "result<vec<u64>,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "create_tranche_schedule",
       "inputs": [
         {
@@ -257,9 +273,61 @@
           "type": "i128"
         }
       ]
+    },
+    {
+      "name": "ScheduleCreated",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "total_amount",
+          "type": "i128"
+        },
+        {
+          "name": "cliff",
+          "type": "u64"
+        },
+        {
+          "name": "duration",
+          "type": "u64"
+        }
+      ]
     }
   ],
   "types": [
+    {
+      "kind": "struct",
+      "name": "CreateScheduleArgs",
+      "fields": [
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "cliff",
+          "type": "u64"
+        },
+        {
+          "name": "duration",
+          "type": "u64"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "total_amount",
+          "type": "i128"
+        }
+      ]
+    },
     {
       "kind": "error-enum",
       "name": "ForgeError",

@@ -101,6 +101,18 @@
       ]
     },
     {
+      "name": "get_proposal_status",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:ProposalStatus,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_proposals",
       "inputs": [
         {
@@ -535,6 +547,40 @@
         {
           "name": "Cancelled",
           "types": []
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ProposalStatus",
+      "fields": [
+        {
+          "name": "against_votes",
+          "type": "i128"
+        },
+        {
+          "name": "for_votes",
+          "type": "i128"
+        },
+        {
+          "name": "is_executable",
+          "type": "bool"
+        },
+        {
+          "name": "is_retryable",
+          "type": "bool"
+        },
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "state",
+          "type": "udt:ProposalState"
+        },
+        {
+          "name": "voting_ends",
+          "type": "u64"
         }
       ]
     },

@@ -167,7 +167,7 @@
 #[cfg(test)]
 extern crate std;
 
-use soroban_forge_shared_utils::ForgeError;
+use soroban_forge_shared_utils::{transfer_to_contract, ForgeError};
 use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, Address, Env, Vec};
 
 /// Maximum number of tranches a single schedule may carry.
@@ -205,6 +205,37 @@ pub trait SorobanForgeVesting {
         cliff: u64,
         duration: u64,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+
+    /// Create multiple linear vesting schedules in one atomic call.
+    ///
+    /// `schedules` is a batch of [`CreateScheduleArgs`]; every entry must
+    /// specify the same token contract. The funder authorizes the batch and
+    /// funds the aggregate token amount in a single SEP-41 transfer before any
+    /// schedule record is written, so a failed transfer rolls the whole batch
+    /// back.
+    ///
+    /// Batches are limited to at most 10 schedules. Each schedule is validated
+    /// individually (`total_amount > 0`, `duration > 0`, `cliff <= duration`),
+    /// and any invalid entry rejects the entire batch.
+    ///
+    /// Sequential ids are allocated from the shared counter, and each creation
+    /// emits a [`ScheduleCreated`] event.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — the batch is empty or longer than 10,
+    ///   the entries specify different tokens, or any entry has
+    ///   `total_amount <= 0`, `duration == 0`, `cliff > duration`, or a
+    ///   beneficiary equal to the funder.
+    /// * [`ForgeError::ArithmeticOverflow`] — the aggregate token amount across
+    ///   all schedules would overflow `i128`.
+    /// * [`ForgeError::TokenTransferFailed`] — the aggregate transfer from the
+    ///   funder to the contract failed.
+    fn create_schedules_batch(
+        env: Env,
+        funder: Address,
+        schedules: Vec<CreateScheduleArgs>,
+    ) -> Result<Vec<u64>, ForgeError>;
 
     /// Create a new tranche (discrete unlock) vesting schedule for
     /// `beneficiary`.
@@ -426,6 +457,27 @@ pub struct Tranche {
     pub amount: i128,
 }
 
+/// Arguments for creating a single linear vesting schedule via
+/// [`create_schedules_batch`](Self::create_schedules_batch).
+///
+/// Mirrors the scalar arguments of [`create_schedule`](Self::create_schedule)
+/// so a batch of identical-shaped grants can be validated and funded in one
+/// atomic call.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateScheduleArgs {
+    /// Recipient of the vested tokens.
+    pub beneficiary: Address,
+    /// Token contract whose balance is drawn down.
+    pub token: Address,
+    /// Total amount to vest linearly between `cliff` and `duration`.
+    pub total_amount: i128,
+    /// Seconds after `start` at which claims become possible.
+    pub cliff: u64,
+    /// Seconds after `start` at which the schedule is fully vested.
+    pub duration: u64,
+}
+
 /// A vesting schedule whose unlock table is an explicit list of tranches
 /// instead of a cliff-plus-ramp.
 ///
@@ -581,6 +633,87 @@ impl Vesting {
             .instance()
             .set(&DataKey::TrancheSchedule(id), &schedule);
         Ok(id)
+    }
+
+    /// Create multiple linear vesting schedules in one atomic call.
+    ///
+    /// See the trait documentation for the validation, funding, and event
+    /// semantics.
+    pub fn create_schedules_batch(
+        env: Env,
+        funder: Address,
+        schedules: Vec<CreateScheduleArgs>,
+    ) -> Result<Vec<u64>, ForgeError> {
+        // ---- validation (no state written yet) -------------------------------
+        if schedules.is_empty() || schedules.len() > 10 {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let token = &schedules.get(0).unwrap().token;
+        for args in &schedules {
+            if &args.token != token {
+                return Err(ForgeError::InvalidInput);
+            }
+            if args.total_amount <= 0 {
+                return Err(ForgeError::InvalidInput);
+            }
+            if args.duration == 0 {
+                return Err(ForgeError::InvalidInput);
+            }
+            if args.cliff > args.duration {
+                return Err(ForgeError::InvalidInput);
+            }
+            if funder == args.beneficiary {
+                return Err(ForgeError::InvalidInput);
+            }
+        }
+
+        // Aggregate token amount across the whole batch (checked arithmetic).
+        let total_amount: i128 = schedules.iter().try_fold(0i128, |acc, args| {
+            acc.checked_add(args.total_amount)
+                .ok_or(ForgeError::ArithmeticOverflow)
+        })?;
+
+        // ---- funding (transfer-before-state) --------------------------------
+        funder.require_auth();
+        transfer_to_contract(&env, token, &funder, total_amount)?;
+
+        // ---- record each schedule -----------------------------------------
+        let mut ids = Vec::new(&env);
+        let start = env.ledger().timestamp();
+        for args in &schedules {
+            let id = Self::next_id(&env)?;
+            let mut schedule = VestingSchedule {
+                funder: funder.clone(),
+                beneficiary: args.beneficiary.clone(),
+                token: args.token.clone(),
+                total_amount: args.total_amount,
+                start,
+                cliff: args.cliff,
+                duration: args.duration,
+                claimed: 0,
+                reassignment_vested: 0,
+                beneficiary_claimed: 0,
+                reassignment_count: 0,
+                revoked_vested: None,
+                status: VestingStatus::Locked,
+            };
+            schedule.status = Self::current_status(&schedule, start)?;
+            env.storage()
+                .instance()
+                .set(&DataKey::Schedule(id), &schedule);
+            events::schedule_created(
+                &env,
+                id,
+                &args.beneficiary,
+                args.total_amount,
+                args.cliff,
+                args.duration,
+            );
+            ids.push_back(id);
+        }
+
+        Ok(ids)
     }
 
     /// Revoke a linear schedule before completion and permanently stop
@@ -1198,6 +1331,34 @@ pub mod events {
             schedule_id,
             funder: funder.clone(),
             amount,
+        }
+        .publish(env);
+    }
+
+    #[contractevent]
+    pub struct ScheduleCreated {
+        #[topic]
+        pub schedule_id: u64,
+        pub beneficiary: Address,
+        pub total_amount: i128,
+        pub cliff: u64,
+        pub duration: u64,
+    }
+
+    pub fn schedule_created(
+        env: &Env,
+        schedule_id: u64,
+        beneficiary: &Address,
+        total_amount: i128,
+        cliff: u64,
+        duration: u64,
+    ) {
+        ScheduleCreated {
+            schedule_id,
+            beneficiary: beneficiary.clone(),
+            total_amount,
+            cliff,
+            duration,
         }
         .publish(env);
     }

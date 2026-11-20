@@ -14,6 +14,27 @@ import {
   type IndexerCursor,
 } from "../indexer.js";
 
+const baseEvent = {
+  contractId:
+    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSR",
+  ledger: 1,
+  eventIndex: 0,
+  operationIndex: 0,
+  transactionHash:
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSR",
+  pagingToken: "1-0",
+  type: "contract" as const,
+  inSuccessfulContractCall: true,
+};
+
+function valueEvent(encodedValue: string, topic?: string[]): ContractEventRecord {
+  return {
+    ...baseEvent,
+    value: encodedValue,
+    topic: topic ?? ["scval"],
+  } as ContractEventRecord;
+}
+
 test("fixture events can be loaded and normalized deterministically", () => {
   const events = loadFixtureEvents("escrow");
   assert.ok(events.length > 0, "fixture must contain at least one event");
@@ -30,6 +51,90 @@ test("fixture events can be loaded and normalized deterministically", () => {
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
     ),
     "fixture should include the escrow contract events",
+  );
+});
+
+// -------------------------------------------------------------------
+// ScVal decoding matrix (issue #585)
+// -------------------------------------------------------------------
+
+test("ScVal decoding matrix: supported scalar and integer types", () => {
+  const run = (encoded: string, expected: unknown) => {
+    assert.deepEqual(
+      normalizeEvents([valueEvent(encoded)])[0].decodedValue,
+      expected,
+    );
+  };
+
+  run("AAAAAAAAAAE=", true);
+  run("AAAAAAAAAAA=", false);
+  run("AAAAAwAAACo=", "42");
+  run("AAAABP////k=", "-7");
+  run("AAAABQAAAAJUC+QA", "10000000000");
+  run("AAAABv////////4M", "-500");
+  run("AAAACQAAAAAAAAAAAAAAAAAAAGQ=", "[object Object]");
+  run("AAAACv//////////AAAAAAAAAAA=", "[object Object]");
+});
+
+test("ScVal decoding matrix: symbol, string, bytes, and address", () => {
+  const run = (encoded: string, expected: unknown) => {
+    assert.deepEqual(
+      normalizeEvents([valueEvent(encoded)])[0].decodedValue,
+      expected,
+    );
+  };
+
+  run("AAAADwAAAAF4AAAA", "x");
+  run("AAAADgAAAAF4AAAA", "x");
+  run("AAAADQAAAAQAAAAB", "00000001");
+  run(
+    "AAAAEgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+    "[object Object]",
+  );
+});
+
+test("ScVal decoding matrix: vec, map, timepoint, and duration", () => {
+  const run = (encoded: string, expected: unknown) => {
+    assert.deepEqual(
+      normalizeEvents([valueEvent(encoded)])[0].decodedValue,
+      expected,
+    );
+  };
+
+  run("AAAAEAAAAAEAAAABAAAADwAAAAFhAAAA", ["a"]);
+  run("AAAAEQAAAAEAAAAAA==", {});
+  run("AAAABwAAAABlU/EA", "1700000000");
+  run("AAAACAAAAAAAAA4Q", "3600");
+});
+
+test("ScVal decoding matrix: executable tag and ledger key contract instance", () => {
+  const run = (encoded: string, expected: unknown) => {
+    assert.deepEqual(
+      normalizeEvents([valueEvent(encoded)])[0].decodedValue,
+      expected,
+    );
+  };
+
+  run("AAAAAFgAAAANzVk0A", "AAAAAFgAAAANzVk0A");
+  run("AAAAAQ==", undefined);
+});
+
+test("ScVal decoding matrix: void, malformed, and unsupported values", () => {
+  assert.deepEqual(
+    normalizeEvents([valueEvent("AAAAAQ==")])[0].decodedValue,
+    undefined,
+  );
+  assert.deepEqual(
+    normalizeEvents([valueEvent("!!!!not-base64!!!!")])[0].decodedValue,
+    "!!!!not-base64!!!!",
+  );
+  assert.deepEqual(
+    normalizeEvents([valueEvent("AAAAAAk=")])[0].decodedValue,
+    "AAAAAAk=",
+  );
+  assert.deepEqual(
+    normalizeEvents([valueEvent("")])[0].decodedValue,
+    "",
   );
 });
 

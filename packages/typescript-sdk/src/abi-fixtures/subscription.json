@@ -71,6 +71,26 @@
       ]
     },
     {
+      "name": "configure_auto_topup",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "trigger_threshold",
+          "type": "i128"
+        },
+        {
+          "name": "topup_amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "deposit",
       "inputs": [
         {
@@ -84,6 +104,30 @@
       ],
       "outputs": [
         "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "disable_auto_topup",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_auto_topup",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "option<udt:AutoTopup>"
       ]
     },
     {
@@ -352,6 +396,24 @@
   ],
   "events": [
     {
+      "name": "AutoTopupTriggered",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "balance_after",
+          "type": "i128"
+        }
+      ]
+    },
+    {
       "name": "BalanceDebited",
       "dataFormat": "scSpecEventDataFormatMap",
       "params": [
@@ -483,6 +545,20 @@
     }
   ],
   "types": [
+    {
+      "kind": "struct",
+      "name": "AutoTopup",
+      "fields": [
+        {
+          "name": "topup_amount",
+          "type": "i128"
+        },
+        {
+          "name": "trigger_threshold",
+          "type": "i128"
+        }
+      ]
+    },
     {
       "kind": "error-enum",
       "name": "ForgeError",

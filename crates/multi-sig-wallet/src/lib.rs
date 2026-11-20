@@ -168,17 +168,14 @@
 //!
 //! Three decisions define the model:
 //!
-//! - **Enforced at submission, not execution.** A `submit_withdrawal` whose
+//! - **Enforced at submission, re-checked at execution.** A `submit_withdrawal` whose
 //!   amount would push the token's in-window total past the limit is
 //!   rejected immediately with [`ForgeError::WithdrawalLimitExceeded`],
 //!   distinct from `InvalidInput` so a caller can tell "valid but too large
 //!   right now" from a malformed argument. The limit is an *admission gate
 //!   on the approval queue*: a withdrawal that could never be authorised
 //!   should never consume an owner's signature, and a rejected submission
-//!   leaves no partial state to unwind. This deliberately diverges from the
-//!   balance check above, which stays at execution time because custody can
-//!   move underneath a pending tx; a limit is a policy the owners set on
-//!   purpose and cannot drift on its own.
+//!   leaves no partial state to unwind.
 //! - **A withdrawal counts from its submission time until
 //!   `submission + window` elapses**, whether or not it ever executes, and
 //!   pending withdrawals count alongside executed ones. Reserving window
@@ -187,17 +184,21 @@
 //!   collectively drain the wallet once confirmed. An entry is in-window
 //!   while `now - submitted_at < window`, so it leaves the window exactly
 //!   at `submitted_at + window`.
-//! - **Execution does not re-validate the limit.** Only funding is
-//!   re-checked at execution. The tradeoff is explicit: a limit *reduction*
-//!   never strands already-approved withdrawals (the safer failure mode for
-//!   funds that owners have already signed for), but an in-flight withdrawal
-//!   authorised under a higher limit still executes after a reduction. The
-//!   blast-radius cap applies to what can be *proposed*; owners lowering a
-//!   limit to stop a specific pending withdrawal must `reject` it, which
-//!   immediately makes the transaction terminal.
-//!   Re-checking at execution instead would double-count the window (once
-//!   at submission, once at execution) and would make every reduction
-//!   silently void outstanding approvals.
+//! - **Execution re-validates the limit against the current policy**, so a
+//!   stale proposal approved under an older, higher limit cannot move more
+//!   than the limit in force when it settles. The re-check never
+//!   double-counts: a withdrawal whose own submission entry is still inside
+//!   the current window is already part of the in-window total, so
+//!   execution only requires that total to be within the current limit.
+//!   A withdrawal that is *not* counted — submitted while the token had no
+//!   limit, or longer ago than one current window — is checked like a new
+//!   submission (`total + amount <= limit`) and recorded in the window at
+//!   execution time. Which withdrawals are counted is tracked per tx under
+//!   `DataKey::WithdrawalAdmission(tx_id)`, so the `WalletTx` and
+//!   `WindowEntry` shapes are unchanged. A failed re-check returns
+//!   [`ForgeError::WithdrawalLimitExceeded`] with the tx still `Pending`
+//!   and nothing moved: owners can raise the limit, wait for the window to
+//!   clear, or `reject` it. Funding is re-checked after the limit.
 //!
 //! **Accounting structure.** In-window usage is a compact per-token list of
 //! [`WindowEntry`] records pruned on every read and write, not a bucketed
@@ -224,7 +225,7 @@
 //! unknown token) is represented as `None` or an empty window; the check
 //! reports `WalletNotInitialized` for an uninitialized wallet. These views
 //! do not prune entries or write storage. The limit is enforced at withdrawal
-//! submission as an admission gate, not rechecked when the pending tx executes.
+//! submission as an admission gate and re-checked when the pending tx executes.
 
 //!
 //! ## Ordering discipline (load-bearing)
@@ -455,7 +456,8 @@ pub trait SorobanForgeMultiSigWallet {
     /// enforced here at submission time: the token's in-window total
     /// (pending plus executed withdrawals still inside the window) plus
     /// `amount` must not exceed the limit (see the withdrawal-limits
-    /// section in the module docs).
+    /// section in the module docs). The limit is checked again, against the
+    /// policy then in force, when the withdrawal executes.
     ///
     /// # Errors
     ///
@@ -951,6 +953,11 @@ enum DataKey {
     /// Instance-level execution pause flag. Appended to preserve existing
     /// storage-key discriminants.
     Paused,
+    /// Ledger timestamp at which withdrawal tx `u64` was recorded in its
+    /// token's rolling window; absent when no limit applied at submission.
+    /// Persistent, removed when the tx executes. Appended to preserve
+    /// existing storage-key discriminants.
+    WithdrawalAdmission(u64),
 }
 
 /// The deployable multi-signature wallet contract.
@@ -1243,10 +1250,9 @@ impl MultiSigWallet {
     ///
     /// For typed withdrawal txs this moves the recorded tokens to the
     /// recorded destination before the status flips (transfer first, state
-    /// second — see the module docs). The wallet balance is validated
-    /// against the recorded amount first (`InsufficientFunds`), so a
-    /// withdrawal that exceeds custody fails with balances and tx state
-    /// untouched.
+    /// second — see the module docs). The current rolling limit
+    /// (`WithdrawalLimitExceeded`), then the balance (`InsufficientFunds`),
+    /// are checked first, so a failing withdrawal leaves state untouched.
     ///
     /// For opaque-payload txs this performs a real cross-contract
     /// invocation to the recorded `target` with the stored `payload`.
@@ -1293,6 +1299,7 @@ impl MultiSigWallet {
         // the tx pending and the wallet state untouched.
         match &wallet_tx.kind {
             TxKind::Withdrawal(withdrawal) => {
+                let window_update = Self::recheck_limit_at_execution(&env, tx_id, withdrawal)?;
                 let balance = Self::balance_impl(&env, &withdrawal.token);
                 if balance < withdrawal.amount {
                     return Err(ForgeError::InsufficientFunds);
@@ -1304,6 +1311,14 @@ impl MultiSigWallet {
                     withdrawal.amount,
                 )?;
                 Self::sub_balance(&env, &withdrawal.token, withdrawal.amount)?;
+                if let Some(entries) = window_update {
+                    let key = DataKey::WindowUsage(withdrawal.token.clone());
+                    env.storage().persistent().set(&key, &entries);
+                    bump_entry(&env, &key);
+                }
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::WithdrawalAdmission(tx_id));
             }
             TxKind::LimitChange(change) => {
                 Self::apply_limit_change(&env, change);
@@ -1404,13 +1419,22 @@ impl MultiSigWallet {
         }
         submitter.require_auth();
 
-        // Rolling limits are an admission gate on the approval queue, so
-        // they are enforced here rather than at execution (see the module
-        // docs). A rejected submission writes nothing: the invocation
-        // reverts, so the tx counter and the window are untouched.
-        Self::admit_withdrawal(&env, &token, amount)?;
+        // Rolling limits are an admission gate on the approval queue, and
+        // are re-checked at execution (see the module docs). A rejected
+        // submission writes nothing: the invocation reverts, so the tx
+        // counter and the window are untouched.
+        let admitted = Self::admit_withdrawal(&env, &token, amount)?;
 
         let tx_id = Self::next_id(&env)?;
+        if admitted {
+            // Remember that this withdrawal already occupies the window, so
+            // execution re-checks it without counting it twice.
+            let key = DataKey::WithdrawalAdmission(tx_id);
+            env.storage()
+                .persistent()
+                .set(&key, &env.ledger().timestamp());
+            bump_entry(&env, &key);
+        }
         let wallet_tx = WalletTx {
             tx_id,
             submitter,
@@ -1875,9 +1899,11 @@ impl MultiSigWallet {
     /// Tokens with no configured limit are unconstrained, so nothing is
     /// checked and nothing is recorded: `submit_withdrawal` behaves exactly
     /// as it did before limits existed.
-    fn admit_withdrawal(env: &Env, token: &Address, amount: i128) -> Result<(), ForgeError> {
+    ///
+    /// Returns whether the submission was recorded in the window.
+    fn admit_withdrawal(env: &Env, token: &Address, amount: i128) -> Result<bool, ForgeError> {
         let Some(limit) = Self::withdrawal_limit_impl(env, token) else {
-            return Ok(());
+            return Ok(false);
         };
         let now = env.ledger().timestamp();
         let (mut entries, usage) = Self::pruned_window(env, token, limit.window_seconds, now);
@@ -1899,7 +1925,56 @@ impl MultiSigWallet {
         let key = DataKey::WindowUsage(token.clone());
         env.storage().persistent().set(&key, &entries);
         bump_entry(env, &key);
-        Ok(())
+        Ok(true)
+    }
+
+    /// Re-check withdrawal tx `tx_id` against `withdrawal.token`'s rolling
+    /// limit as it stands at execution time (see the module docs).
+    ///
+    /// Writes nothing. Returns the pruned window list with this withdrawal
+    /// appended when it must be recorded at execution (it is not already
+    /// counted in the current window), for the caller to store **after**
+    /// the transfer succeeds; `None` when there is nothing to record.
+    fn recheck_limit_at_execution(
+        env: &Env,
+        tx_id: u64,
+        withdrawal: &Withdrawal,
+    ) -> Result<Option<soroban_sdk::Vec<WindowEntry>>, ForgeError> {
+        let Some(limit) = Self::withdrawal_limit_impl(env, &withdrawal.token) else {
+            return Ok(None);
+        };
+        let now = env.ledger().timestamp();
+        let (mut entries, usage) =
+            Self::pruned_window(env, &withdrawal.token, limit.window_seconds, now);
+        let admitted_at: Option<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WithdrawalAdmission(tx_id));
+        let counted = admitted_at
+            .is_some_and(|submitted_at| now.saturating_sub(submitted_at) < limit.window_seconds);
+
+        if counted {
+            // Already part of `usage`: adding `amount` again would count it
+            // twice.
+            if usage > limit.amount {
+                return Err(ForgeError::WithdrawalLimitExceeded);
+            }
+            return Ok(None);
+        }
+        match check_window_total(usage, withdrawal.amount, limit.amount) {
+            Ok(()) => {}
+            Err(WindowCheckError::LimitExceeded) => {
+                return Err(ForgeError::WithdrawalLimitExceeded);
+            }
+            Err(WindowCheckError::ArithmeticOverflow) => {
+                return Err(ForgeError::ArithmeticOverflow);
+            }
+        }
+        entries.push_back(WindowEntry {
+            submitted_at: now,
+            amount: withdrawal.amount,
+        });
+        Ok(Some(entries))
     }
 
     /// Read `token`'s in-window [`WindowEntry`] list with expired entries
@@ -2489,6 +2564,12 @@ mod resource_report;
 mod model_check;
 
 #[cfg(test)]
+mod rotation_invariants;
+
+// `macro_use` keeps the `custody!()` / `limited!()` harness macros in scope
+// for `limits_tests`, declared after this module.
+#[cfg(test)]
+#[macro_use]
 mod tests {
     use super::*;
     use soroban_forge_test_utils::{FailureSchedule, MockTarget, MockTargetClient, TestAccounts};
@@ -2538,7 +2619,7 @@ mod tests {
         }};
     }
 
-    const DEPOSIT: i128 = 10_000;
+    pub(crate) const DEPOSIT: i128 = 10_000;
 
     /// A minimal SEP-41-shaped token that can refuse transfers **to** a
     /// chosen recipient. Used to force the wallet's payout transfer to fail
@@ -2596,7 +2677,7 @@ mod tests {
         }
     }
 
-    fn owner_vec(env: &Env, accounts: &TestAccounts) -> soroban_sdk::Vec<Address> {
+    pub(crate) fn owner_vec(env: &Env, accounts: &TestAccounts) -> soroban_sdk::Vec<Address> {
         soroban_sdk::vec![
             env,
             accounts.user1.clone(),
@@ -4741,7 +4822,7 @@ mod tests {
     }
 
     #[test]
-    fn limit_reduction_does_not_invalidate_already_pending_withdrawals() {
+    fn limit_reduction_blocks_stale_approved_withdrawals_at_execution() {
         let (env, client, accounts, token, token_client) = custody!();
         client.deposit(&token, &accounts.user1, &10_000);
         env.ledger().set_timestamp(1_000);
@@ -4758,12 +4839,14 @@ mod tests {
         limited!(client, accounts, token, 500_i128, 3_600_u64);
         assert_eq!(client.get_window_usage(&token), 4_000);
 
-        // Documented choice: execution re-validates funding only, so an
-        // already-approved withdrawal still settles. Owners who need to stop
-        // a specific pending withdrawal use `reject`.
-        client.execute(&pending);
-        assert_eq!(token_client.balance(&accounts.arbiter), 4_000);
-        assert_eq!(client.balance(&token), 6_000);
+        // Execution re-validates the limit in force: the stale approval
+        // cannot move more than the lowered cap, and nothing changes.
+        let err = client.try_execute(&pending).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::WithdrawalLimitExceeded);
+        assert_eq!(client.get_tx(&pending).status, TxStatus::Pending);
+        assert_eq!(token_client.balance(&accounts.arbiter), 0);
+        assert_eq!(client.balance(&token), 10_000);
+        assert_eq!(client.get_window_usage(&token), 4_000);
 
         // New submissions are blocked until the window clears.
         let err = client
@@ -4771,6 +4854,13 @@ mod tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::WithdrawalLimitExceeded);
+
+        // Raising the cap again lets the same approval settle, counted once.
+        limited!(client, accounts, token, 4_000_i128, 3_600_u64);
+        client.execute(&pending);
+        assert_eq!(token_client.balance(&accounts.arbiter), 4_000);
+        assert_eq!(client.balance(&token), 6_000);
+        assert_eq!(client.get_window_usage(&token), 4_000);
     }
 
     #[test]
@@ -5470,6 +5560,11 @@ mod tests {
 }
 
 // Tests for the new submit_call functionality
+// Rolling-limit invariant suite (issue #629), built on `tests`' harness
+// macros.
+#[cfg(test)]
+mod limits_tests;
+
 #[cfg(test)]
 mod call_tests {
     use super::*;

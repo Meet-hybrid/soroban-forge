@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "Shared test utilities for Soroban Forge contracts"
 
+[features]
+# Opt-in for consumers that build this crate outside `cfg(test)`; the event
+# helpers are otherwise compiled only for this crate's own tests.
+testutils = []
+
 [dependencies]
 # `test-utils` exists only to support contract tests, so it always enables the
 # Soroban SDK's test utilities (mock auth, address generation, ...).
