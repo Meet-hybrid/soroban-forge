@@ -280,6 +280,7 @@ export type ActionIneligibilityReason = {tag: "Eligible", values: void} | {tag: 
 
 
 
+
 /**
  * Shared error type used across all Soroban Forge contracts.
  *
@@ -576,6 +577,15 @@ export interface Client {
   execute_release: ({escrow_id}: {escrow_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
+   * Construct and simulate a extend_deadline transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Buyer moves a funded escrow's deadline later. Validation and the
+   * buyer's authorization both run before the record is rewritten at its
+   * existing key; the participant index and any pending release request
+   * are not touched.
+   */
+  extend_deadline: ({escrow_id, new_timeout}: {escrow_id: u64, new_timeout: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
    * Construct and simulate a release_partial transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Release a partial `amount` to the seller now. Buyer-authorized, like
    * `release`; sellers use `request_release`. Clears any
@@ -614,6 +624,12 @@ export interface Client {
    * The pending release request of an escrow, if any.
    */
   get_release_request: ({escrow_id}: {escrow_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Option<ReleaseRequest>>>
+
+  /**
+   * Construct and simulate a extend_basket_deadline transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Basket form of `extend_deadline`, with the same rules.
+   */
+  extend_basket_deadline: ({escrow_id, new_timeout}: {escrow_id: u64, new_timeout: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
    * Construct and simulate a release_partial_basket transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -699,6 +715,8 @@ export class Client extends ContractClient {
         "AAAAAAAAAIRSYWlzZSBhIGRpc3B1dGUgb24gYSBiYXNrZXQuIFRoZSBjbGFpbWFudCBtdXN0IGJlIGEgcGFydHkgYW5kIG11c3QKYXV0aG9yaXplIHRoZSBjYWxsOyBmcmVlemVzIGV2ZXJ5IGxlZyB1bnRpbCB0aGUgYXJiaXRlciByZXNvbHZlcy4AAAAOZGlzcHV0ZV9iYXNrZXQAAAAAAAIAAAAAAAAACWVzY3Jvd19pZAAAAAAAAAYAAAAAAAAACGNsYWltYW50AAAAEwAAAAEAAAPpAAAAAgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAAAAAc9SZWFkIHRoZSBjdXJyZW50IGNyZWF0aW9uLW9yZGVyIGVzY3JvdyBpZHMgZm9yIGEgcGFydGljaXBhbnQgb25lIHBhZ2UKYXQgYSB0aW1lLiBDYW5jZWxsYXRpb24gcmVtb3ZlcyBpZHMgZnJvbSB0aGUgY29tcGFjdGVkIGluZGV4LiBBIGN1cnNvcgppcyBhbiBvZmZzZXQgaW50byB0aGUgY3VycmVudCBsaXN0OyBpZiBhbiBlYXJsaWVyIGlkIGlzIHJlbW92ZWQgYmV0d2VlbgpwYWdlcywgbGF0ZXIgaWRzIG1heSBzaGlmdCBiZWZvcmUgdGhlIGN1cnNvci4gUmVzdGFydCBhdCB6ZXJvIGFmdGVyCm11dGF0aW9ucyB0byBlbnVtZXJhdGUgdGhlIGN1cnJlbnQgbGlzdCBjb21wbGV0ZWx5LiBUaGlzIHZpZXcgaXRzZWxmCm5ldmVyIG11dGF0ZXMgc3RvcmFnZSBhbmQgbmV2ZXIgZXJyb3JzIOKAlCBhbiB1bmtub3duIGFkZHJlc3Mgb3Igb25lIHdpdGgKbm8gZXNjcm93cyBzaW1wbHkgeWllbGRzIGFuIGVtcHR5IHBhZ2UuAAAAABdlc2Nyb3dzX2Zvcl9wYXJ0aWNpcGFudAAAAAADAAAAAAAAAAtwYXJ0aWNpcGFudAAAAAATAAAAAAAAAAZjdXJzb3IAAAAAAAQAAAAAAAAABWxpbWl0AAAAAAAABAAAAAEAAAfQAAAAFlBhcnRpY2lwYW50RXNjcm93c1BhZ2UAAA==",
         "AAAAAAAAAMFQYXkgdGhlIHNlbGxlciBhIHJlbGVhc2UgcmVxdWVzdCB3aG9zZSByZXZpZXcgd2luZG93IGhhcyBlbmRlZCB3aXRob3V0CmEgZGlzcHV0ZS4gUGVybWlzc2lvbmxlc3MsIHNvIHRoZSBzZWxsZXIgKG9yIGEga2VlcGVyKSBjYW4gZmluaXNoIGl0CmV2ZW4gaWYgdGhlIGJ1eWVyIG5ldmVyIHJlc3BvbmRzLiBFaXRoZXIgZXNjcm93IGtpbmQuAAAAAAAAD2V4ZWN1dGVfcmVsZWFzZQAAAAABAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAQAAA+kAAAACAAAH0AAAAApGb3JnZUVycm9yAAA=",
+        "AAAAAAAAADZCYXNrZXQgZm9ybSBvZiBgZXh0ZW5kX2RlYWRsaW5lYCwgd2l0aCB0aGUgc2FtZSBydWxlcy4AAAAAABZleHRlbmRfYmFza2V0X2RlYWRsaW5lAAAAAAACAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAAAAAAtuZXdfdGltZW91dAAAAAAGAAAAAQAAA+kAAAACAAAH0AAAAApGb3JnZUVycm9yAAA=",
+        "AAAAAAAAANpCdXllciBtb3ZlcyBhIGZ1bmRlZCBlc2Nyb3cncyBkZWFkbGluZSBsYXRlci4gVmFsaWRhdGlvbiBhbmQgdGhlCmJ1eWVyJ3MgYXV0aG9yaXphdGlvbiBib3RoIHJ1biBiZWZvcmUgdGhlIHJlY29yZCBpcyByZXdyaXR0ZW4gYXQgaXRzCmV4aXN0aW5nIGtleTsgdGhlIHBhcnRpY2lwYW50IGluZGV4IGFuZCBhbnkgcGVuZGluZyByZWxlYXNlIHJlcXVlc3QKYXJlIG5vdCB0b3VjaGVkLgAAAAAAD2V4dGVuZF9kZWFkbGluZQAAAAACAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAAAAAAtuZXdfdGltZW91dAAAAAAGAAAAAQAAA+kAAAACAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAAIhSZXR1cm4gdGhlIGNhbGxlci1zcGVjaWZpYyByZWFkLW9ubHkgYWN0aW9uIHN1bW1hcnkgZm9yIGEgc2luZ2xlLXRva2VuCmVzY3Jvdy4gVGhpcyBtZXRob2QgcGVyZm9ybXMgbm8gc3RvcmFnZSB3cml0ZXMgb3IgVFRMIGV4dGVuc2lvbnMuAAAAEmdldF9hY3Rpb25fc3VtbWFyeQAAAAAAAgAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAQAAA+kAAAfQAAAAE0VzY3Jvd0FjdGlvblN1bW1hcnkAAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAABVSZWFkIGEgYmFza2V0IHJlY29yZC4AAAAAAAAKZ2V0X2Jhc2tldAAAAAAAAQAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAEAAAPpAAAH0AAAABBCYXNrZXRFc2Nyb3dEYXRhAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAAEFSZXR1cm4gdGhlIGNhbGxlci1zcGVjaWZpYyByZWFkLW9ubHkgYWN0aW9uIHN1bW1hcnkgZm9yIGEgYmFza2V0LgAAAAAAABlnZXRfYmFza2V0X2FjdGlvbl9zdW1tYXJ5AAAAAAAAAgAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAAAAAAGY2FsbGVyAAAAAAATAAAAAQAAA+kAAAfQAAAAE0VzY3Jvd0FjdGlvblN1bW1hcnkAAAAH0AAAAApGb3JnZUVycm9yAAA=",
@@ -729,6 +747,7 @@ export class Client extends ContractClient {
         "AAAABQAAAAAAAAAAAAAADkJhc2tldFJlbGVhc2VkAAAAAAABAAAAD2Jhc2tldF9yZWxlYXNlZAAAAAACAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAQAAAAAAAAAEZGF0YQAAB9AAAAAQQmFza2V0RXNjcm93RGF0YQAAAAAAAAAC",
         "AAAABQAAAAAAAAAAAAAADkJhc2tldFJlc29sdmVkAAAAAAABAAAAD2Jhc2tldF9yZXNvbHZlZAAAAAADAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAQAAAAAAAAAEZGF0YQAAB9AAAAAQQmFza2V0RXNjcm93RGF0YQAAAAAAAAAAAAAAEmluX2Zhdm9yX29mX3NlbGxlcgAAAAAAAQAAAAAAAAAC",
         "AAAABQAAAAAAAAAAAAAACUNhbmNlbGxlZAAAAAAAAAEAAAAJY2FuY2VsbGVkAAAAAAAAAgAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAEAAAAAAAAABGRhdGEAAAfQAAAACkVzY3Jvd0RhdGEAAAAAAAAAAAAC",
+        "AAAABQAAAEBUaGUgYnV5ZXIgbW92ZWQgdGhlIGVzY3JvdydzIGRlYWRsaW5lIGxhdGVyLiBFaXRoZXIgZXNjcm93IGtpbmQuAAAAAAAAABBEZWFkbGluZUV4dGVuZGVkAAAAAQAAABFkZWFkbGluZV9leHRlbmRlZAAAAAAAAAMAAAAAAAAACWVzY3Jvd19pZAAAAAAAAAYAAAABAAAAAAAAAAxvbGRfZGVhZGxpbmUAAAAGAAAAAAAAAAAAAAAMbmV3X2RlYWRsaW5lAAAABgAAAAAAAAAC",
         "AAAABQAAAAAAAAAAAAAACURlcG9zaXRlZAAAAAAAAAEAAAAJZGVwb3NpdGVkAAAAAAAAAgAAAAAAAAAJZXNjcm93X2lkAAAAAAAABgAAAAEAAAAAAAAABGRhdGEAAAfQAAAACkVzY3Jvd0RhdGEAAAAAAAAAAAAC",
         "AAAABQAAAAAAAAAAAAAACERpc3B1dGVkAAAAAQAAAAhkaXNwdXRlZAAAAAIAAAAAAAAACWVzY3Jvd19pZAAAAAAAAAYAAAABAAAAAAAAAARkYXRhAAAH0AAAAApFc2Nyb3dEYXRhAAAAAAAAAAAAAg==",
         "AAAABQAAAAAAAAAAAAAADUVzY3Jvd0NyZWF0ZWQAAAAAAAABAAAADmVzY3Jvd19jcmVhdGVkAAAAAAACAAAAAAAAAAllc2Nyb3dfaWQAAAAAAAAGAAAAAQAAAAAAAAAEZGF0YQAAB9AAAAAKRXNjcm93RGF0YQAAAAAAAAAAAAI=",
@@ -768,10 +787,12 @@ export class Client extends ContractClient {
         resolve_basket: this.txFromJSON<Result<void>>,
         approve_release: this.txFromJSON<Result<void>>,
         execute_release: this.txFromJSON<Result<void>>,
+        extend_deadline: this.txFromJSON<Result<void>>,
         release_partial: this.txFromJSON<Result<void>>,
         request_release: this.txFromJSON<Result<u64>>,
         get_action_summary: this.txFromJSON<Result<EscrowActionSummary>>,
         get_release_request: this.txFromJSON<Option<ReleaseRequest>>,
+        extend_basket_deadline: this.txFromJSON<Result<void>>,
         release_partial_basket: this.txFromJSON<Result<void>>,
         request_release_basket: this.txFromJSON<Result<u64>>,
         escrows_for_participant: this.txFromJSON<ParticipantEscrowsPage>,

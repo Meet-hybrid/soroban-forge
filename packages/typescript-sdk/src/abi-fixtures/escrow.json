@@ -223,6 +223,38 @@
       ]
     },
     {
+      "name": "extend_basket_deadline",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "new_timeout",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "extend_deadline",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "new_timeout",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_action_summary",
       "inputs": [
         {
@@ -647,6 +679,24 @@
         {
           "name": "data",
           "type": "udt:EscrowData"
+        }
+      ]
+    },
+    {
+      "name": "DeadlineExtended",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "old_deadline",
+          "type": "u64"
+        },
+        {
+          "name": "new_deadline",
+          "type": "u64"
         }
       ]
     },
