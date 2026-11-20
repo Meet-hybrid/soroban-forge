@@ -22,8 +22,6 @@ mod decode_failure;
 
 use clap::{Parser, Subcommand};
 use cli::{
-    BuildArgs, CompareArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs,
-    NewArgs, ScaffoldValidateArgs, TestArgs, VerifyArgs,
     BuildArgs, CompareArgs, DeployArgs, DeployCheckArgs, DoctorArgs, EventsArgs, InspectArgs,
     InvokeArgs, LintArgs, NewArgs, ScaffoldValidateArgs, StorageDiffArgs, TestArgs,
     ValidatePlanArgs, VerifyArgs,
@@ -62,7 +60,6 @@ pub enum Commands {
     Events(EventsArgs),
     Inspect(InspectArgs),
     Doctor(DoctorArgs),
-    Compare(CompareArgs),
     #[command(
         about = "Validate a transaction plan and emit a structured report",
         visible_alias = "plan"
@@ -90,7 +87,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,
         Commands::Doctor(args) => commands::doctor::run(args)?,
-        Commands::Compare(args) => commands::compare::run(args)?,
         Commands::ValidatePlan(args) => commands::plan::run(args)?,
         Commands::Compare(args) => commands::compare::run(args)?,
         Commands::StorageDiff(args) => commands::storage_diff::run(args)?,

@@ -59,46 +59,6 @@ Supported contracts:
 Run `bash scripts/deploy-testnet.sh --help` for the complete environment and
 identity configuration.
 
-```bash
-bash scripts/deploy-testnet.sh --dry-run \
-  --receipt artifacts/testnet-deployment-manifest.json
-```
-
-This writes a six-contract JSON template and performs no CLI, network, build,
-funding, or key operations.
-
-## Live deployment
-
-Provide existing Stellar CLI identities; this script never creates, prints,
-funds, stores, or commits private keys.
-
-```bash
-SOURCE_IDENTITY=<FUNDED_IDENTITY> \
-TOKEN_ID=<SEP41_CONTRACT_ID> \
-ESCROW_ID=<OPTIONAL_EXISTING_ID> \
-# Add one identity variable per contract smoke flow...
-bash scripts/deploy-testnet.sh \
-  --receipt artifacts/testnet-deployment-manifest.json
-```
-
-The script builds artifacts, validates their hashes against
-`provenance-manifest.json`, deploys or selects each contract independently,
-then runs one minimal smoke flow. Success and failure receipts include the
-contract ID, WASM hash, deployment transaction, verification status, smoke
-transaction, expected event list, and key state.
-
-Supported contracts:
-
-- escrow
-- vesting
-- multi-sig-wallet
-- dao-governance
-- subscription-payments
-- marketplace-royalties
-
-Run `bash scripts/deploy-testnet.sh --help` for the complete environment and
-identity configuration.
-
 ## Post-deployment smoke check
 
 `scripts/deploy-testnet.sh` records a `read_only` invocation for every

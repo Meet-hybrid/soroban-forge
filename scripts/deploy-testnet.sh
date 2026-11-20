@@ -121,15 +121,6 @@ root=os.environ["ROOT"]
 status=os.environ["RECEIPT_STATUS"]
 entries=[]
 packages=[
-("escrow","soroban-forge-escrow","soroban_forge_escrow.wasm","Escrow","ESCROW_ID"),
-("vesting","soroban-forge-vesting","soroban_forge_vesting.wasm","Vesting","VESTING_ID"),
-("multi-sig-wallet","soroban-forge-multi-sig-wallet","soroban_forge_multi_sig_wallet.wasm","MultiSigWallet","MULTI_SIG_WALLET_ID"),
-("dao-governance","soroban-forge-dao-governance","soroban_forge_dao_governance.wasm","DaoGovernance","DAO_GOVERNANCE_ID"),
-("subscription-payments","soroban-forge-subscription-payments","soroban_forge_subscription_payments.wasm","SubscriptionPayments","SUBSCRIPTION_PAYMENTS_ID"),
-("marketplace-royalties","soroban-forge-marketplace-royalties","soroban_forge_marketplace_royalties.wasm","MarketplaceRoyalties","MARKETPLACE_ROYALTIES_ID"),
-]
-import hashlib
-for key,package,wasm,label,idenv in packages:
 ("escrow","soroban-forge-escrow","soroban_forge_escrow.wasm","Escrow","ESCROW_ID","get_escrow",["--escrow_id","1"]),
 ("vesting","soroban-forge-vesting","soroban_forge_vesting.wasm","Vesting","VESTING_ID","get_schedule",["--schedule_id","1"]),
 ("multi-sig-wallet","soroban-forge-multi-sig-wallet","soroban_forge_multi_sig_wallet.wasm","MultiSigWallet","MULTI_SIG_WALLET_ID","get_threshold",[]),
@@ -242,8 +233,6 @@ smoke_contract() {
       tx="$(printf '%s\n' "$r" | sed -n '1p')"; subscription="$(printf '%s\n' "$r" | sed -n '2p' | tr -d '[:space:]')"
       [ -n "$subscription" ] || fail "subscription smoke: subscribe returned no subscription id"
       assert_transaction "$contract_name" "$tx"
-      invoke "$id" "$SUBSCRIBER_IDENTITY" subscription get_subscription --subscription_id "$subscription" >/dev/null
-      SMOKE_TX="$tx"; SMOKE_EVENTS='["subscribed"]'; SMOKE_STATE="subscription $subscription active"
       invoke "$id" "$SUBSCRIBER_IDENTITY" subscription get_subscription_count >/dev/null
       SMOKE_TX="$tx"; SMOKE_EVENTS='["subscribed"]'; SMOKE_STATE="subscription $subscription active"
       SMOKE_READ_METHOD="get_subscription_count"; SMOKE_READ_ARGS='[]'
@@ -256,9 +245,6 @@ smoke_contract() {
       assert_transaction "$contract_name" "$tx"
       invoke "$id" "$PAYER_IDENTITY" marketplace get_royalty --collection "$payer" >/dev/null
       SMOKE_TX="$tx"; SMOKE_EVENTS='["royalty_configured"]'; SMOKE_STATE="1% royalty configured"
-      ;;
-  esac
-  update_manifest_contract "$key" "$id" "$SMOKE_TX" "passed" "$SMOKE_STATE" "$SMOKE_EVENTS"
       SMOKE_READ_METHOD="get_royalty"; SMOKE_READ_ARGS="[\"--collection\",\"$payer\"]"
       ;;
   esac
@@ -276,8 +262,6 @@ assert_transaction() {
 }
 
 update_manifest_contract() {
-  local key="$1" cid="$2" tx="$3" status="$4" state="$5" events="$6"
-  RECEIPT_KEY="$key" RECEIPT_CID="$cid" RECEIPT_TX="$tx" RECEIPT_STATUS_VALUE="$status" RECEIPT_STATE="$state" RECEIPT_EVENTS="$events" RECEIPT_PATH="$RECEIPT" python3 - <<'PY'
   local key="$1" cid="$2" tx="$3" status="$4" state="$5" events="$6" method="$7" args="$8"
   RECEIPT_KEY="$key" RECEIPT_CID="$cid" RECEIPT_TX="$tx" RECEIPT_STATUS_VALUE="$status" RECEIPT_STATE="$state" RECEIPT_EVENTS="$events" RECEIPT_METHOD="$method" RECEIPT_ARGS="$args" RECEIPT_PATH="$RECEIPT" python3 - <<'PY'
 import json, os
@@ -353,7 +337,6 @@ for spec in "${PACKAGES[@]}"; do
   smoke_contract "$key" "$cid" "$name"
 done
 
-write_manifest "passed"
 RECEIPT_PATH="$RECEIPT" python3 - <<'PY_MANIFEST'
 import json
 import os

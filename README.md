@@ -267,8 +267,6 @@ cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network test
 ```
 
 Commands: `build`, `lint`, `test`, `deploy`, `new`, `scaffold-validate`,
-`verify`, `invoke`, `decode-failure`, `events`, `inspect`, `compare` and `doctor`. Run any
-of them with `--help` for options.
 `verify`, `invoke`, `decode-failure`, `events`, `inspect`, `compare`,
 `storage-diff` and `doctor`. Run any of them with `--help` for options.
 

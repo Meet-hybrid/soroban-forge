@@ -277,14 +277,3 @@ pub struct ValidatePlanArgs {
     #[arg(long, help = "Emit a machine-readable JSON validation report")]
     pub json: bool,
 }
-
-#[derive(Args, Debug, Clone)]
-pub struct CompareArgs {
-    /// Baseline/local WASM artifact.
-    pub old: PathBuf,
-    /// Candidate/new WASM artifact.
-    pub new: PathBuf,
-    /// Emit a machine-readable JSON report.
-    #[arg(long, default_value_t = false)]
-    pub json: bool,
-}
