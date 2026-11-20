@@ -19,6 +19,7 @@ pub mod model;
 pub mod ttl;
 
 pub use mocks::{
+    failure_step_for_seed, FailureBoundary, FailureSchedule, FailureToken, FailureTokenClient,
     MockTarget, MockTargetClient, RevertingTarget, RevertingTargetClient, TestAccounts,
 };
 pub use model::{

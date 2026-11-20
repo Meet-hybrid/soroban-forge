@@ -178,6 +178,19 @@ pub struct CompareArgs {
     pub json: bool,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct StorageDiffArgs {
+    /// Source WASM artifact (the currently deployed contract).
+    #[arg(long, value_name = "PATH")]
+    pub source: PathBuf,
+    /// Target WASM artifact (the proposed replacement contract).
+    #[arg(long, value_name = "PATH")]
+    pub target: PathBuf,
+    /// Emit a machine-readable JSON report; diagnostics go to stderr.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 #[derive(Args, Debug, Clone, Default)]
 pub struct ValidatePlanArgs {
     #[arg(

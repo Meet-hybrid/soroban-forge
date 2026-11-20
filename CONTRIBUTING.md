@@ -39,8 +39,8 @@ contracts for the `wasm32v1-none` target required by soroban-sdk 27.x.
 rustup component add rustfmt clippy
 rustup target add wasm32v1-none
 
-# Install Soroban CLI
-cargo install soroban-cli
+# Install Stellar CLI
+cargo install --locked stellar-cli
 
 # Clone and build
 git clone https://github.com/Meet-hybrid/soroban-forge.git
@@ -48,6 +48,20 @@ cd soroban-forge
 make build
 make test
 ```
+
+### Contributor preflight
+
+Run the offline, read-only preflight before opening a pull request:
+
+```bash
+cargo run -p soroban-forge-cli -- doctor
+```
+
+It reports the expected `develop` PR base, Stellar CLI, Cargo, and the
+`wasm32v1-none` target in one command. It exits `0` when all required checks
+pass and non-zero when any required check fails. See
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for optional artifact checks and
+JSON output.
 
 ## Code Standards
 
