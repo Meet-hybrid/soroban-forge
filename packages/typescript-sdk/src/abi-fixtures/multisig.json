@@ -31,6 +31,22 @@
       ]
     },
     {
+      "name": "cancel_tx",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        },
+        {
+          "name": "submitter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "check_withdrawal",
       "inputs": [
         {
@@ -276,6 +292,13 @@
       ]
     },
     {
+      "name": "is_paused",
+      "inputs": [],
+      "outputs": [
+        "bool"
+      ]
+    },
+    {
       "name": "is_tx_live",
       "inputs": [
         {
@@ -285,6 +308,18 @@
       ],
       "outputs": [
         "bool"
+      ]
+    },
+    {
+      "name": "pause_wallet",
+      "inputs": [
+        {
+          "name": "approvers",
+          "type": "vec<address>"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -333,6 +368,18 @@
       ],
       "outputs": [
         "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "resume_wallet",
+      "inputs": [
+        {
+          "name": "approvers",
+          "type": "vec<address>"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -478,6 +525,20 @@
   ],
   "events": [
     {
+      "name": "TxCancelled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        },
+        {
+          "name": "submitter",
+          "type": "address"
+        }
+      ]
+    },
+    {
       "name": "TxConfirmed",
       "dataFormat": "scSpecEventDataFormatMap",
       "params": [
@@ -542,6 +603,34 @@
         {
           "name": "payload_len",
           "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "WalletPaused",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "wallet",
+          "type": "address"
+        },
+        {
+          "name": "timestamp",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "WalletResumed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "wallet",
+          "type": "address"
+        },
+        {
+          "name": "timestamp",
+          "type": "u64"
         }
       ]
     },
@@ -797,6 +886,10 @@
         },
         {
           "name": "Expired",
+          "types": []
+        },
+        {
+          "name": "Cancelled",
           "types": []
         }
       ]

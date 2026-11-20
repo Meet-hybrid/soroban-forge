@@ -38,9 +38,14 @@ jobs:
         run: |
           # The workspace's cdylib crates are exactly the contract crates.
           stellar contract build --locked --profile release --optimize=false
+      - name: Generate provenance bundle
+        run: scripts/provenance.sh build
+      - name: Verify provenance bundle
+        run: scripts/provenance.sh verify
       - name: Collect artifacts
         run: |
           mkdir -p artifacts
+          cp provenance-manifest.json artifacts/provenance-manifest.json
           shopt -s nullglob
           found=0
           for wasm in target/wasm32v1-none/release/*.wasm; do
@@ -59,7 +64,6 @@ jobs:
           path: artifacts/*.wasm
           retention-days: 90
           compression-level: 9
-
   github-release:
     name: GitHub Release
     needs: publish
@@ -77,4 +81,6 @@ jobs:
         with:
           draft: true
           generate_release_notes: true
-          files: artifacts/**/*.wasm
+          files: |
+            artifacts/**/*.wasm
+            artifacts/provenance-manifest.json

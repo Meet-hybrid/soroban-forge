@@ -43,6 +43,18 @@
       ]
     },
     {
+      "name": "get_royalty_splits",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<vec<udt:RoyaltyShare>,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_settlement_summary",
       "inputs": [
         {

@@ -121,15 +121,15 @@ root=os.environ["ROOT"]
 status=os.environ["RECEIPT_STATUS"]
 entries=[]
 packages=[
-("escrow","soroban-forge-escrow","soroban_forge_escrow.wasm","Escrow","ESCROW_ID"),
-("vesting","soroban-forge-vesting","soroban_forge_vesting.wasm","Vesting","VESTING_ID"),
-("multi-sig-wallet","soroban-forge-multi-sig-wallet","soroban_forge_multi_sig_wallet.wasm","MultiSigWallet","MULTI_SIG_WALLET_ID"),
-("dao-governance","soroban-forge-dao-governance","soroban_forge_dao_governance.wasm","DaoGovernance","DAO_GOVERNANCE_ID"),
-("subscription-payments","soroban-forge-subscription-payments","soroban_forge_subscription_payments.wasm","SubscriptionPayments","SUBSCRIPTION_PAYMENTS_ID"),
-("marketplace-royalties","soroban-forge-marketplace-royalties","soroban_forge_marketplace_royalties.wasm","MarketplaceRoyalties","MARKETPLACE_ROYALTIES_ID"),
+("escrow","soroban-forge-escrow","soroban_forge_escrow.wasm","Escrow","ESCROW_ID","get_escrow",["--escrow_id","1"]),
+("vesting","soroban-forge-vesting","soroban_forge_vesting.wasm","Vesting","VESTING_ID","get_schedule",["--schedule_id","1"]),
+("multi-sig-wallet","soroban-forge-multi-sig-wallet","soroban_forge_multi_sig_wallet.wasm","MultiSigWallet","MULTI_SIG_WALLET_ID","get_threshold",[]),
+("dao-governance","soroban-forge-dao-governance","soroban_forge_dao_governance.wasm","DaoGovernance","DAO_GOVERNANCE_ID","get_bond_config",[]),
+("subscription-payments","soroban-forge-subscription-payments","soroban_forge_subscription_payments.wasm","SubscriptionPayments","SUBSCRIPTION_PAYMENTS_ID","get_subscription_count",[]),
+("marketplace-royalties","soroban-forge-marketplace-royalties","soroban_forge_marketplace_royalties.wasm","MarketplaceRoyalties","MARKETPLACE_ROYALTIES_ID","get_royalty",["--collection","configured-at-runtime"]),
 ]
 import hashlib
-for key,package,wasm,label,idenv in packages:
+for key,package,wasm,label,idenv,method,args in packages:
  p=os.path.join(root,"target","wasm32v1-none","release",wasm)
  sha=None
  size=None
@@ -140,6 +140,7 @@ for key,package,wasm,label,idenv in packages:
   "key":key,"package":package,"name":label,"contract_id":cid,
   "wasm":{"path":"target/wasm32v1-none/release/"+wasm,"sha256":sha,"bytes":size},
   "deployment_transaction":"","verification_status":"pending" if status=="dry_run" else "not_verified",
+  "read_only":{"method":method,"args":args},
   "smoke":{"status":"not_run","transaction":"","events":[],"state":""}
  })
 doc={"schema":"soroban-forge/testnet-deployment@1","status":status,"network":os.environ["RECEIPT_NETWORK"],"contracts":entries}
@@ -172,6 +173,7 @@ PY
 smoke_contract() {
   local key="$1" id="$2" contract_name="$3"
   SMOKE_TX="" SMOKE_EVENTS='[]' SMOKE_STATE="not_checked"
+  SMOKE_READ_METHOD="" SMOKE_READ_ARGS='[]'
 
   [ -n "$TOKEN_ID" ] || fail "$contract_name smoke: TOKEN_ID is required"
   step "$contract_name smoke"
@@ -189,6 +191,7 @@ smoke_contract() {
       assert_transaction "$contract_name" "$deposit_tx"
       assert_transaction "$contract_name" "$release_tx"
       SMOKE_TX="$release_tx"; SMOKE_EVENTS='["escrow_created","deposited","released"]'; SMOKE_STATE="escrow $escrow_no completed"
+      SMOKE_READ_METHOD="get_escrow"; SMOKE_READ_ARGS="[\"--escrow_id\",\"$escrow_no\"]"
       ;;
     vesting)
       [ -n "${BENEFICIARY_IDENTITY:-}" ] && [ -n "${FUNDER_IDENTITY:-}" ] || fail "vesting smoke requires FUNDER_IDENTITY, BENEFICIARY_IDENTITY"
@@ -199,6 +202,7 @@ smoke_contract() {
       assert_transaction "$contract_name" "$tx"
       invoke "$id" "$FUNDER_IDENTITY" vesting get_schedule --schedule_id "$schedule" >/dev/null
       SMOKE_TX="$tx"; SMOKE_EVENTS='["vesting_schedule_created"]'; SMOKE_STATE="schedule $schedule created"
+      SMOKE_READ_METHOD="get_schedule"; SMOKE_READ_ARGS="[\"--schedule_id\",\"$schedule\"]"
       ;;
     multi-sig-wallet)
       [ -n "${OWNER1_IDENTITY:-}" ] && [ -n "${OWNER2_IDENTITY:-}" ] || fail "multi-sig smoke requires OWNER1_IDENTITY, OWNER2_IDENTITY"
@@ -209,6 +213,7 @@ smoke_contract() {
       threshold="$(invoke "$id" "$OWNER1_IDENTITY" wallet get_threshold | tail -1 | tr -d '[:space:]')"
       [ -n "$threshold" ] || fail "multi-sig smoke: get_threshold returned no state"
       SMOKE_TX="$tx"; SMOKE_EVENTS='["wallet_initialized"]'; SMOKE_STATE="threshold $threshold"
+      SMOKE_READ_METHOD="get_threshold"; SMOKE_READ_ARGS='[]'
       ;;
     dao-governance)
       [ -n "${PROPOSER_IDENTITY:-}" ] && [ -n "${TREASURY_IDENTITY:-}" ] || fail "DAO smoke requires PROPOSER_IDENTITY, TREASURY_IDENTITY"
@@ -219,6 +224,7 @@ smoke_contract() {
       assert_transaction "$contract_name" "$bond_tx"
       invoke "$id" "$PROPOSER_IDENTITY" dao get_bond_config >/dev/null
       SMOKE_TX="$bond_tx"; SMOKE_EVENTS='["dao_initialized","bond_configured"]'; SMOKE_STATE="bond 1 configured"
+      SMOKE_READ_METHOD="get_bond_config"; SMOKE_READ_ARGS='[]'
       ;;
     subscription-payments)
       [ -n "${SUBSCRIBER_IDENTITY:-}" ] && [ -n "${PROVIDER_IDENTITY:-}" ] || fail "subscription smoke requires SUBSCRIBER_IDENTITY, PROVIDER_IDENTITY"
@@ -227,8 +233,9 @@ smoke_contract() {
       tx="$(printf '%s\n' "$r" | sed -n '1p')"; subscription="$(printf '%s\n' "$r" | sed -n '2p' | tr -d '[:space:]')"
       [ -n "$subscription" ] || fail "subscription smoke: subscribe returned no subscription id"
       assert_transaction "$contract_name" "$tx"
-      invoke "$id" "$SUBSCRIBER_IDENTITY" subscription get_subscription --subscription_id "$subscription" >/dev/null
+      invoke "$id" "$SUBSCRIBER_IDENTITY" subscription get_subscription_count >/dev/null
       SMOKE_TX="$tx"; SMOKE_EVENTS='["subscribed"]'; SMOKE_STATE="subscription $subscription active"
+      SMOKE_READ_METHOD="get_subscription_count"; SMOKE_READ_ARGS='[]'
       ;;
     marketplace-royalties)
       [ -n "${PAYER_IDENTITY:-}" ] && [ -n "${RECIPIENT_IDENTITY:-}" ] || fail "marketplace smoke requires PAYER_IDENTITY, RECIPIENT_IDENTITY"
@@ -238,9 +245,10 @@ smoke_contract() {
       assert_transaction "$contract_name" "$tx"
       invoke "$id" "$PAYER_IDENTITY" marketplace get_royalty --collection "$payer" >/dev/null
       SMOKE_TX="$tx"; SMOKE_EVENTS='["royalty_configured"]'; SMOKE_STATE="1% royalty configured"
+      SMOKE_READ_METHOD="get_royalty"; SMOKE_READ_ARGS="[\"--collection\",\"$payer\"]"
       ;;
   esac
-  update_manifest_contract "$key" "$id" "$SMOKE_TX" "passed" "$SMOKE_STATE" "$SMOKE_EVENTS"
+  update_manifest_contract "$key" "$id" "$SMOKE_TX" "passed" "$SMOKE_STATE" "$SMOKE_EVENTS" "$SMOKE_READ_METHOD" "$SMOKE_READ_ARGS"
   echo "$contract_name smoke: passed"
 }
 
@@ -254,8 +262,8 @@ assert_transaction() {
 }
 
 update_manifest_contract() {
-  local key="$1" cid="$2" tx="$3" status="$4" state="$5" events="$6"
-  RECEIPT_KEY="$key" RECEIPT_CID="$cid" RECEIPT_TX="$tx" RECEIPT_STATUS_VALUE="$status" RECEIPT_STATE="$state" RECEIPT_EVENTS="$events" RECEIPT_PATH="$RECEIPT" python3 - <<'PY'
+  local key="$1" cid="$2" tx="$3" status="$4" state="$5" events="$6" method="$7" args="$8"
+  RECEIPT_KEY="$key" RECEIPT_CID="$cid" RECEIPT_TX="$tx" RECEIPT_STATUS_VALUE="$status" RECEIPT_STATE="$state" RECEIPT_EVENTS="$events" RECEIPT_METHOD="$method" RECEIPT_ARGS="$args" RECEIPT_PATH="$RECEIPT" python3 - <<'PY'
 import json, os
 p=os.environ["RECEIPT_PATH"]
 with open(p) as f: d=json.load(f)
@@ -263,6 +271,7 @@ for c in d["contracts"]:
     if c["key"]==os.environ["RECEIPT_KEY"]:
         c["contract_id"]=os.environ["RECEIPT_CID"]
         c["verification_status"]="verified"
+        c["read_only"]={"method":os.environ["RECEIPT_METHOD"],"args":json.loads(os.environ["RECEIPT_ARGS"])}
         c["smoke"]={"status":os.environ["RECEIPT_STATUS_VALUE"],"transaction":os.environ["RECEIPT_TX"] or None,"events":json.loads(os.environ["RECEIPT_EVENTS"]),"state":os.environ["RECEIPT_STATE"]}
         break
 with open(p,"w") as f:
@@ -328,5 +337,20 @@ for spec in "${PACKAGES[@]}"; do
   smoke_contract "$key" "$cid" "$name"
 done
 
-write_manifest "passed"
+RECEIPT_PATH="$RECEIPT" python3 - <<'PY_MANIFEST'
+import json
+import os
+
+path = os.environ["RECEIPT_PATH"]
+
+with open(path, encoding="utf-8") as f:
+    manifest = json.load(f)
+
+manifest["status"] = "passed"
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(manifest, f, indent=2)
+    f.write("\n")
+PY_MANIFEST
+
 echo "deployment manifest: $RECEIPT"

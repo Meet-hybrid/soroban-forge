@@ -10,17 +10,21 @@
 //! soroban-forge verify --expected <sha256>
 //! soroban-forge verify --manifest provenance-manifest.json
 //! soroban-forge doctor --wasm target/wasm32v1-none/release/contract.wasm
+//! soroban-forge storage-diff --source old.wasm --target new.wasm
 //! ```
 
 mod cli;
 mod commands;
+mod network_profiles;
+
 #[path = "commands/decode_failure.rs"]
 mod decode_failure;
 
 use clap::{Parser, Subcommand};
 use cli::{
-    BuildArgs, CompareArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs,
-    NewArgs, ScaffoldValidateArgs, TestArgs, VerifyArgs,
+    BuildArgs, CompareArgs, DeployArgs, DeployCheckArgs, DoctorArgs, EventsArgs, InspectArgs,
+    InvokeArgs, LintArgs, NewArgs, ScaffoldValidateArgs, StorageDiffArgs, TestArgs,
+    ValidatePlanArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 
@@ -42,6 +46,12 @@ pub enum Commands {
     Lint(LintArgs),
     Test(TestArgs),
     Deploy(DeployArgs),
+    #[command(
+        name = "deploy-check",
+        visible_alias = "smoke",
+        about = "Check deployed contracts using the deployment manifest"
+    )]
+    DeployCheck(DeployCheckArgs),
     New(NewArgs),
     ScaffoldValidate(ScaffoldValidateArgs),
     Verify(VerifyArgs),
@@ -50,7 +60,13 @@ pub enum Commands {
     Events(EventsArgs),
     Inspect(InspectArgs),
     Doctor(DoctorArgs),
+    #[command(
+        about = "Validate a transaction plan and emit a structured report",
+        visible_alias = "plan"
+    )]
+    ValidatePlan(ValidatePlanArgs),
     Compare(CompareArgs),
+    StorageDiff(StorageDiffArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -62,6 +78,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Lint(args) => commands::lint::run(args)?,
         Commands::Test(args) => commands::test::run(args)?,
         Commands::Deploy(args) => commands::deploy::run(args)?,
+        Commands::DeployCheck(args) => commands::deploy_check::run(args)?,
         Commands::New(args) => commands::new::run(args)?,
         Commands::ScaffoldValidate(args) => commands::scaffold_validate::run(args)?,
         Commands::Verify(args) => commands::verify::run(args)?,
@@ -70,7 +87,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,
         Commands::Doctor(args) => commands::doctor::run(args)?,
+        Commands::ValidatePlan(args) => commands::plan::run(args)?,
         Commands::Compare(args) => commands::compare::run(args)?,
+        Commands::StorageDiff(args) => commands::storage_diff::run(args)?,
     }
 
     Ok(())
@@ -258,6 +277,32 @@ mod tests {
     }
 
     #[test]
+    fn validate_plan_flags_and_alias_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "validate-plan",
+            "--plan",
+            "plan.json",
+            "--expected-network",
+            "testnet",
+            "--json",
+        ])
+        .unwrap();
+        let Commands::ValidatePlan(args) = cli.command else {
+            panic!("expected validate-plan command");
+        };
+        assert_eq!(
+            args.plan.as_deref(),
+            Some(std::path::Path::new("plan.json"))
+        );
+        assert_eq!(args.expected_network.as_deref(), Some("testnet"));
+        assert!(args.json);
+
+        let aliased = Cli::try_parse_from(["soroban-forge", "plan", "plan.json"]).unwrap();
+        assert!(matches!(aliased.command, Commands::ValidatePlan(_)));
+    }
+
+    #[test]
     fn inspect_dry_run_flags_parse() {
         let cli = Cli::try_parse_from([
             "soroban-forge",
@@ -284,6 +329,40 @@ mod tests {
     }
 
     #[test]
+    fn storage_diff_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "storage-diff",
+            "--source",
+            "old.wasm",
+            "--target",
+            "new.wasm",
+            "--json",
+        ])
+        .unwrap();
+
+        let Commands::StorageDiff(args) = cli.command else {
+            panic!("expected storage-diff command");
+        };
+        assert_eq!(args.source, std::path::Path::new("old.wasm"));
+        assert_eq!(args.target, std::path::Path::new("new.wasm"));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn storage_diff_requires_source_and_target() {
+        assert!(Cli::try_parse_from(["soroban-forge", "storage-diff"]).is_err());
+        assert!(
+            Cli::try_parse_from(["soroban-forge", "storage-diff", "--source", "old.wasm",])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["soroban-forge", "storage-diff", "--target", "new.wasm",])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn inspect_contract_json_flags_parse() {
         let cli = Cli::try_parse_from([
             "soroban-forge",
@@ -303,6 +382,43 @@ mod tests {
             Some("CA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAXE")
         );
         assert!(args.json);
-        assert_eq!(args.network, "testnet");
+        assert_eq!(args.network.as_deref(), Some("testnet"));
+    }
+
+    #[test]
+    fn deploy_check_flags_and_smoke_alias_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "deploy-check",
+            "--manifest",
+            "artifacts/testnet-deployment-manifest.json",
+            "--contract",
+            "escrow,vesting",
+            "--network",
+            "testnet",
+            "--source-account",
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            "--json",
+        ])
+        .unwrap();
+
+        let Commands::DeployCheck(args) = cli.command else {
+            panic!("expected deploy-check command");
+        };
+        assert_eq!(
+            args.manifest,
+            std::path::PathBuf::from("artifacts/testnet-deployment-manifest.json")
+        );
+        assert_eq!(args.contract, vec!["escrow", "vesting"]);
+        assert_eq!(args.network.as_deref(), Some("testnet"));
+        assert_eq!(
+            args.source,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+        );
+        assert!(args.json);
+
+        let aliased =
+            Cli::try_parse_from(["soroban-forge", "smoke", "--manifest", "receipt.json"]).unwrap();
+        assert!(matches!(aliased.command, Commands::DeployCheck(_)));
     }
 }

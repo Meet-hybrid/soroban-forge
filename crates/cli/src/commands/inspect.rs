@@ -134,6 +134,12 @@ fn run_dry_run(args: &InspectArgs) -> Result<()> {
 }
 
 fn fetch_state(args: &InspectArgs, contract: &str) -> Result<String> {
+    let network = crate::network_profiles::resolve_network(
+        args.network.as_deref(),
+        args.network_profile.as_deref(),
+        args.rpc_url.as_deref(),
+        args.network_passphrase.as_deref(),
+    )?;
     let mut command = std::process::Command::new("stellar");
     command
         .arg("contract")
@@ -141,10 +147,17 @@ fn fetch_state(args: &InspectArgs, contract: &str) -> Result<String> {
         .arg("--id")
         .arg(contract)
         .arg("--network")
-        .arg(&args.network)
+        .arg(&network.name)
         .arg("--")
         .arg("inspect")
         .arg("--json");
+
+    if let Some(rpc_url) = network.rpc_url {
+        command.arg("--rpc-url").arg(rpc_url);
+    }
+    if let Some(passphrase) = network.network_passphrase {
+        command.arg("--network-passphrase").arg(passphrase);
+    }
 
     if let Some(source) = &args.source {
         command.arg("--source").arg(source);
@@ -285,7 +298,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn sha256_hex_file(path: &Path) -> Result<String> {
+/// Returns the lowercase SHA-256 of an artifact file, for deterministic reporting.
+pub fn sha256_hex_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     Ok(sha256_hex(&bytes))
 }
@@ -300,7 +314,8 @@ fn expect_valid_sha256(input: &str) -> Result<String> {
     Ok(input.to_ascii_lowercase())
 }
 
-fn infer_package_from_wasm_name(path: &Path) -> Result<String> {
+/// Infers the Forge contract package name from a WASM artifact file name.
+pub fn infer_package_from_wasm_name(path: &Path) -> Result<String> {
     let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -342,7 +357,10 @@ mod tests {
             contract: None,
             keys: vec![],
             json: false,
-            network: "testnet".to_string(),
+            network: Some("testnet".to_string()),
+            network_profile: None,
+            rpc_url: None,
+            network_passphrase: None,
             source: None,
             wasm: Some(wasm.clone()),
             expected: Some("not-a-hash".to_string()),
@@ -364,7 +382,10 @@ mod tests {
             contract: None,
             keys: vec![],
             json: false,
-            network: "testnet".to_string(),
+            network: Some("testnet".to_string()),
+            network_profile: None,
+            rpc_url: None,
+            network_passphrase: None,
             source: None,
             wasm: Some(wasm.clone()),
             expected: Some("a".repeat(64)),
