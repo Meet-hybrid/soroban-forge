@@ -303,6 +303,18 @@
       ]
     },
     {
+      "name": "preflight_deposit",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "udt:DepositPreflight"
+      ]
+    },
+    {
       "name": "refund",
       "inputs": [
         {
@@ -893,6 +905,70 @@
         {
           "name": "timeout",
           "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "DepositPreflight",
+      "fields": [
+        {
+          "name": "allowance",
+          "type": "option<i128>"
+        },
+        {
+          "name": "buyer",
+          "type": "option<address>"
+        },
+        {
+          "name": "buyer_balance",
+          "type": "option<i128>"
+        },
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "required_amount",
+          "type": "i128"
+        },
+        {
+          "name": "status",
+          "type": "udt:DepositPreflightStatus"
+        },
+        {
+          "name": "token",
+          "type": "option<address>"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "DepositPreflightStatus",
+      "variants": [
+        {
+          "name": "Sufficient",
+          "types": []
+        },
+        {
+          "name": "InsufficientBalance",
+          "types": []
+        },
+        {
+          "name": "InsufficientAllowance",
+          "types": []
+        },
+        {
+          "name": "Unavailable",
+          "types": []
+        },
+        {
+          "name": "InvalidInput",
+          "types": []
+        },
+        {
+          "name": "UnknownEscrow",
+          "types": []
         }
       ]
     },
