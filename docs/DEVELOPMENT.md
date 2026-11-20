@@ -565,3 +565,35 @@ The project uses `-D warnings` (fail on warnings). Fix issues reported by clippy
 ## WASM Size Budget
 
 Contracts have a maximum size of 150,000 bytes. This is enforced in CI.
+
+### Deployment attestation bundles
+
+Release provenance is emitted by `scripts/provenance.sh build` as
+`provenance-manifest.json` using schema `soroban-forge/provenance@2`. The bundle
+contains the source revision, Rust/Cargo/Stellar tool versions, target and
+profile, Cargo.lock SHA-256, artifact SHA-256/size values, optional deployment
+receipt entries, and a canonical bundle SHA-256.
+
+A clean checkout is reproducible: the manifest timestamp is derived from the
+current commit rather than wall-clock time. Tampering with any field covered by
+`bundle_sha256` causes local verification to fail. The digest is integrity
+metadata, not cryptographic signing.
+
+```bash
+# Build, then verify locally without network access
+scripts/provenance.sh build
+scripts/provenance.sh verify
+scripts/provenance.sh verify --json
+
+# Optionally match deployment contract IDs from a receipt against live WASM
+DEPLOYMENT_RECEIPT=docs/testnet/testnet-deployment.json \
+STELLAR_RPC_URL=https://soroban-testnet.stellar.org \
+NETWORK_PASSPHRASE='Test SDF Network ; September 2015' \
+scripts/provenance.sh verify --network
+```
+
+Network verification is opt-in and requires an RPC endpoint. It fetches each
+configured contract ID and compares the deployed WASM SHA-256 with the matching
+artifact in the bundle. Provenance does not replace an audit, does not provide
+cryptographic signing, and does not assert that a deployment is safe or
+authorized.

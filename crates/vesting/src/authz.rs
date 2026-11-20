@@ -813,3 +813,65 @@ fn create_schedule_rejects_funder_signer_mismatch() {
     );
     assert_auth_abort!(res);
 }
+
+// -----------------------------------------------------------------------
+// refund_revoked authorization & negative-auth tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn refund_revoked_accepts_funder_signature_alone() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let id = client.create_schedule(funder, &accounts.user1, &token, &TOTAL, &CLIFF, &DURATION);
+    client.revoke(&id);
+
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "refund_revoked",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let refunded = client
+        .try_refund_revoked(&id)
+        .expect("outer ok")
+        .expect("refund ok");
+    assert_eq!(refunded, TOTAL);
+    assert_eq!(tc.balance(funder), TOTAL);
+    assert_eq!(tc.balance(&contract_id), 0);
+}
+
+#[test]
+fn refund_revoked_rejects_signature_from_non_funder() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    client.revoke(&id);
+
+    // Neither the beneficiary nor a third party may take the refund.
+    for signer in [beneficiary, &accounts.user2] {
+        env.mock_auths(&[MockAuth {
+            address: signer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "refund_revoked",
+                args: (id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_refund_revoked(&id);
+        assert_auth_abort!(res);
+        assert_eq!(tc.balance(funder), 0);
+        assert_eq!(tc.balance(signer), 0);
+        assert_eq!(tc.balance(&contract_id), TOTAL);
+    }
+
+    // Nothing was recorded: the funder can still take the full refund.
+    env.mock_all_auths();
+    assert_eq!(client.refund_revoked(&id), TOTAL);
+}

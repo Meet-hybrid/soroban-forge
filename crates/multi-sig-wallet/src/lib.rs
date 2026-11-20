@@ -13,10 +13,13 @@
 //! ```text
 //! submit --(confirm × n)--> threshold met --execute--> Executed
 //! submit --reject--> Rejected (terminal)
+//! submit --cancel_tx (submitter)--> Cancelled (terminal)
 //! submit_call --(confirm × n)--> threshold met --execute--> Executed (+ typed call invoked)
 //! submit_call --reject--> Rejected (terminal)
+//! submit_call --cancel_tx (submitter)--> Cancelled (terminal)
 //! submit_withdrawal --(confirm × n)--> threshold met --execute--> Executed (+ tokens moved)
 //! submit_withdrawal --reject--> Rejected (terminal)
+//! submit_withdrawal --cancel_tx (submitter)--> Cancelled (terminal)
 //! set_withdrawal_limit --(confirm × n)--> threshold met --execute--> Executed (limit applied)
 //! remove_withdrawal_limit --(confirm × n)--> threshold met --execute--> Executed (limit dropped)
 //! add_owner --(confirm × n)--> threshold met --execute--> Executed (owner added)
@@ -33,6 +36,8 @@
 //!   call with `target`, `function`, and `arguments`.
 //! - `confirm` requires an owner that has not confirmed already.
 //! - `reject` requires an owner that has not already signalled on the tx.
+//! - `cancel_tx` requires the original submitter; it withdraws a still-pending
+//!   tx before it is executed.
 //! - `execute` may be called by anyone; it only succeeds once the threshold is
 //!   met. For opaque-payload txs it performs a real cross-contract
 //!   invocation to the recorded `target`. For typed call txs it invokes
@@ -103,6 +108,19 @@
 //!   leave its stored record unchanged.
 //! - **Executed txs can never be rejected** (there is nothing to stop), and
 //!   rejections are never revoked (un-confirm is out of scope).
+//!
+//! ## Submitter cancellation
+//!
+//! A submitter who realises that a destination, call argument, or amount was
+//! misconfigured can withdraw their own pending proposal via `cancel_tx`
+//! instead of asking another owner to veto it or waiting for the deadline.
+//! The entrypoint is deliberately narrower than `reject`: only the recorded
+//! submitter may call it, and only while the tx is `Pending`. Identity is
+//! checked before `submitter.require_auth()`, so a third party cannot spend
+//! the submitter's authorization on a tx they did not create. Cancellation is
+//! terminal — the status becomes `Cancelled`, `is_live` returns `false`, and
+//! no further confirm, reject, or execute call is accepted. Existing
+//! confirmations and rejections are retained on the record for audit.
 //!
 //! ## Custody model
 //!
@@ -349,6 +367,26 @@ pub trait SorobanForgeMultiSigWallet {
         env: Env,
         tx_id: u64,
         signer: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Withdraw a pending transaction submitted by `submitter`.
+    ///
+    /// Only the recorded submitter may cancel, and only while the tx is
+    /// `Pending`. Cancellation is terminal: the status becomes `Cancelled`,
+    /// the tx is no longer live, and it can never be confirmed, rejected, or
+    /// executed. Confirmations and rejections already on the record are kept
+    /// for audit (see the submitter-cancellation section in the module docs).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction exists for `tx_id`.
+    /// * [`ForgeError::Unauthorized`] — `submitter` is not the recorded
+    ///   submitter.
+    /// * [`ForgeError::InvalidInput`] — the tx is no longer `Pending`.
+    fn cancel_tx(
+        env: Env,
+        tx_id: u64,
+        submitter: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
     /// Execute `tx_id` once approvals meet the configured threshold.
@@ -701,6 +739,8 @@ pub enum TxStatus {
     Rejected,
     /// Expired before reaching the approval threshold; terminal.
     Expired,
+    /// Withdrawn by its submitter before execution; terminal.
+    Cancelled,
 }
 
 /// Read-only snapshot of a transaction's status and approval progress.
@@ -1166,6 +1206,33 @@ impl MultiSigWallet {
             .set(&DataKey::Tx(tx_id), &wallet_tx);
         bump_entry(&env, &DataKey::Tx(tx_id));
         events::rejected(&env, &wallet_tx);
+        Ok(())
+    }
+
+    /// Withdraw a still-pending transaction submitted by `submitter`.
+    ///
+    /// Only the recorded submitter may cancel. The identity check runs before
+    /// `require_auth`, so a third party cannot consume a signature they never
+    /// gave. Any non-`Pending` tx — including one lazily evaluated as
+    /// `Expired` by [`Self::get_tx_impl`] — returns `InvalidInput` without
+    /// mutation, making cancellation strictly a pre-threshold operation.
+    /// Existing confirmations and rejections stay on the record for audit.
+    pub fn cancel_tx(env: Env, tx_id: u64, submitter: Address) -> Result<(), ForgeError> {
+        let mut wallet_tx = Self::get_tx_impl(&env, tx_id)?;
+        if wallet_tx.status != TxStatus::Pending {
+            return Err(ForgeError::InvalidInput);
+        }
+        if submitter != wallet_tx.submitter {
+            return Err(ForgeError::Unauthorized);
+        }
+        submitter.require_auth();
+
+        wallet_tx.status = TxStatus::Cancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Tx(tx_id), &wallet_tx);
+        bump_entry(&env, &DataKey::Tx(tx_id));
+        events::cancelled(&env, &wallet_tx);
         Ok(())
     }
 
@@ -2285,6 +2352,13 @@ mod events {
     }
 
     #[contractevent]
+    pub struct TxCancelled {
+        #[topic]
+        pub tx_id: u64,
+        pub submitter: Address,
+    }
+
+    #[contractevent]
     pub struct WalletPaused {
         #[topic]
         pub wallet: Address,
@@ -2372,6 +2446,15 @@ mod events {
         }
         .publish(env);
     }
+
+    pub fn cancelled(env: &Env, tx: &WalletTx) {
+        TxCancelled {
+            tx_id: tx.tx_id,
+            submitter: tx.submitter.clone(),
+        }
+        .publish(env);
+    }
+
     #[allow(dead_code)]
     pub fn expired(env: &Env, tx_id: u64, expired_at: u64) {
         TxExpired { tx_id, expired_at }.publish(env);
@@ -3327,6 +3410,188 @@ mod tests {
             data[0].val,
             soroban_sdk::xdr::ScVal::Address(accounts.user2.into())
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Submitter cancellation
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn cancel_tx_marks_pending_tx_cancelled_and_not_live() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
+        client.confirm(&tx_id, &accounts.user2);
+
+        assert!(client.is_live(&tx_id));
+        client.cancel_tx(&tx_id, &accounts.user1);
+
+        let tx = client.get_tx(&tx_id);
+        assert_eq!(tx.status, TxStatus::Cancelled);
+        assert_eq!(tx.submitter, accounts.user1);
+        assert_eq!(tx.confirmations.len(), 1);
+        assert!(!client.is_live(&tx_id));
+        assert!(!client.is_tx_live(&tx_id));
+        let cancelled = client.get_transactions_by_status(&TxStatus::Cancelled, &0, &10);
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled.get_unchecked(0).tx_id, tx_id);
+    }
+
+    #[test]
+    fn cancel_tx_by_non_submitter_is_unauthorized() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
+
+        // Another owner and a non-owner both fail the recorded-submitter check.
+        for stranger in [&accounts.user2, &accounts.arbiter] {
+            let err = client.try_cancel_tx(&tx_id, stranger).unwrap_err().unwrap();
+            assert_eq!(err, ForgeError::Unauthorized);
+            assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+            assert!(client.is_live(&tx_id));
+        }
+    }
+
+    #[test]
+    fn cancel_tx_missing_tx_is_not_found() {
+        let (_env, client, accounts) = setup!();
+        let err = client
+            .try_cancel_tx(&999, &accounts.user1)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn double_cancel_is_invalid() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
+        client.cancel_tx(&tx_id, &accounts.user1);
+        let err = client
+            .try_cancel_tx(&tx_id, &accounts.user1)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Cancelled);
+    }
+
+    #[test]
+    fn cancel_tx_on_executed_tx_is_invalid() {
+        let (env, client, accounts) = setup!();
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, MockTarget, ());
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env), &None);
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        client.execute(&tx_id);
+        let before = client.get_tx(&tx_id);
+        let err = client
+            .try_cancel_tx(&tx_id, &accounts.user1)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        let after = client.get_tx(&tx_id);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.confirmations, before.confirmations);
+        assert_eq!(after.rejections, before.rejections);
+    }
+
+    #[test]
+    fn cancel_tx_on_rejected_tx_is_invalid() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
+        client.reject(&tx_id, &accounts.user2);
+        let err = client
+            .try_cancel_tx(&tx_id, &accounts.user1)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        let tx = client.get_tx(&tx_id);
+        assert_eq!(tx.status, TxStatus::Rejected);
+        assert_eq!(tx.rejections.len(), 1);
+    }
+
+    #[test]
+    fn cancel_tx_on_expired_tx_is_invalid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(MultiSigWallet, ());
+        let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        client.initialize(&owner_vec(&env, &accounts), &2_u32);
+
+        env.ledger().set_timestamp(1_000);
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &Some(2_000));
+        env.ledger().set_timestamp(2_000);
+        let err = client
+            .try_cancel_tx(&tx_id, &accounts.user1)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        assert_eq!(client.get_tx(&tx_id).status, TxStatus::Expired);
+        assert!(!client.is_live(&tx_id));
+    }
+
+    #[test]
+    fn cancelled_tx_cannot_be_confirmed_rejected_or_executed() {
+        let (env, client, accounts) = setup!();
+        let mock_target_id = Address::generate(&env);
+        env.register_at(&mock_target_id, MockTarget, ());
+        let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env), &None);
+        client.confirm(&tx_id, &accounts.user2);
+        client.confirm(&tx_id, &accounts.user3);
+        client.cancel_tx(&tx_id, &accounts.user1);
+        let before = client.get_tx(&tx_id);
+        assert_eq!(before.confirmations.len(), 2);
+
+        let err = client
+            .try_confirm(&tx_id, &accounts.user2)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        let err = client
+            .try_reject(&tx_id, &accounts.user2)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+        let err = client.try_execute(&tx_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+
+        let after = client.get_tx(&tx_id);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.confirmations, before.confirmations);
+        assert_eq!(after.rejections, before.rejections);
+    }
+
+    #[test]
+    fn cancel_tx_emits_event_with_tx_id_and_submitter() {
+        let (env, client, accounts) = setup!();
+        let tx_id = client.submit(&accounts.user1, &target(&env), &payload(&env), &None);
+        client.cancel_tx(&tx_id, &accounts.user1);
+
+        let events = events_named(&env, &client.address, "tx_cancelled");
+        assert_eq!(events.len(), 1);
+        let (topics, data) = &events[0];
+        assert_eq!(u64::from_val(&env, &topics.get_unchecked(1)), tx_id);
+        assert_eq!(
+            Address::from_val(&env, &data.get(Symbol::new(&env, "submitter")).unwrap()),
+            accounts.user1
+        );
+    }
+
+    #[test]
+    fn cancel_tx_works_for_typed_call_and_withdrawal() {
+        let (env, client, accounts) = setup!();
+        let call_target = Address::generate(&env);
+        let fn_name = Symbol::new(&env, "test");
+        let args = soroban_sdk::vec![&env, Val::from_u32(42).into()];
+        let call_id = client.submit_call(&accounts.user2, &call_target, &fn_name, &args, &None);
+        client.cancel_tx(&call_id, &accounts.user2);
+        assert_eq!(client.get_tx(&call_id).status, TxStatus::Cancelled);
+
+        let token = Address::generate(&env);
+        let withdrawal_id =
+            client.submit_withdrawal(&accounts.user3, &token, &accounts.user1, &100_i128);
+        client.cancel_tx(&withdrawal_id, &accounts.user3);
+        assert_eq!(client.get_tx(&withdrawal_id).status, TxStatus::Cancelled);
     }
 
     #[test]
