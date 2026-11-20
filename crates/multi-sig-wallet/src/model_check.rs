@@ -245,10 +245,12 @@ impl LifecycleModel for MultiSigLifecycleModel {
     }
 
     fn is_terminal(&self, state: &Self::State) -> bool {
-        state
-            .current_tx
-            .as_ref()
-            .is_some_and(|tx| tx.status == TxStatus::Executed || tx.status == TxStatus::Rejected)
+        state.current_tx.as_ref().is_some_and(|tx| {
+            matches!(
+                tx.status,
+                TxStatus::Executed | TxStatus::Rejected | TxStatus::Cancelled
+            )
+        })
     }
 }
 
@@ -431,7 +433,10 @@ impl OpGenerator<MultiSigLifecycleModel> for MultiSigOpGenerator {
                         owner_idx: 0,
                     }, // Invalid: pending tx already in flight
                 },
-                TxStatus::Executed | TxStatus::Rejected | TxStatus::Expired => match choice {
+                TxStatus::Executed
+                | TxStatus::Rejected
+                | TxStatus::Expired
+                | TxStatus::Cancelled => match choice {
                     0..=3 => MultiSigModelOp::Deposit { amount: 100_000 },
                     4..=6 => MultiSigModelOp::SubmitWithdrawal {
                         amount: 50_000,

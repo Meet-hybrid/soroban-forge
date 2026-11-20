@@ -22,10 +22,51 @@ cargo run -p soroban-forge-cli -- new my-token --path ./custom/path/my-token
 The generated crate is a standalone project that compiles with `cargo check`
 without depending on the workspace layout or a stale shared-utils version pin.
 
+Run the contributor preflight before opening a pull request or deploying a contract:
+
+### Reusable network profiles
+
+Network-aware commands (`deploy`, `invoke`, `events`, and `inspect`) accept a
+named profile from `~/.config/soroban-forge/networks.toml`. Set
+`SOROBAN_FORGE_NETWORK_PROFILES` to use another file. The format is TOML:
+
+```toml
+[profiles.local]
+rpc_url = "http://127.0.0.1:8000"
+network_passphrase = "Standalone Network ; February 2017"
+
+[profiles.testnet-custom]
+rpc_url = "https://rpc.testnet.example"
+network_passphrase = "Test SDF Network ; September 2015"
+```
+
+Select a profile with `--network-profile`:
+
+```bash
+cargo run -p soroban-forge-cli -- invoke \
+  --contract CAAAA \
+  --function balance \
+  --network-profile local
+
+cargo run -p soroban-forge-cli -- deploy target/contract.wasm \
+  --network-profile testnet-custom
+```
+
+Precedence is: explicit `--network`, `--rpc-url`, and `--network-passphrase` values
+override profile values; profile values override the existing defaults (normally
+`testnet` with Stellar CLI default RPC/passphrase behavior). `--network-profile`
+must name a complete profile. Missing RPC URLs or passphrases, malformed URLs,
+unknown names, unreadable files, and malformed TOML fail before command execution
+with an actionable error.
+
+Profile files are configuration only: secret material is forbidden. Do not put
+secret seeds, private keys, source-account secrets, environment substitutions,
+or similarly named credential fields in a profile; such fields are rejected.
+
 Run the local environment preflight before deploying a contract:
 
 ```bash
-# Check stellar, cargo, and the wasm32v1-none target
+# Check the expected develop base, stellar, cargo, and the wasm32v1-none target
 cargo run -p soroban-forge-cli -- doctor
 
 # Also verify that a selected artifact exists and is non-empty
@@ -33,13 +74,14 @@ cargo run -p soroban-forge-cli -- doctor \
   --wasm target/wasm32v1-none/release/soroban_forge_escrow.wasm
 ```
 
-`doctor` never installs tools or performs network checks. It runs every check in order and prints
+`doctor` identifies `develop` as the expected PR base branch and never installs tools or performs network checks. It runs every check in order and prints
 PASS/FAIL rows plus an exact remediation command for each failure. `stellar --version` and
 `cargo --version` are reported when available; if an existing binary returns a non-zero status or
 no usable version, the check remains PASS with `version unknown`. The target check only passes when
 `rustup target list --installed` succeeds and includes `wasm32v1-none`. The optional artifact check
-distinguishes a missing path, directory, empty file, and filesystem error. Any required failure
-causes the command to exit non-zero and lists the failed checks in the summary.
+distinguishes a missing path, directory, empty file, and filesystem error. The command exits `0`
+only when every required check passes; any required failure exits non-zero and lists the failed
+checks in the summary.
 
 Validate a transaction plan before signing or submitting it:
 
@@ -564,3 +606,35 @@ The project uses `-D warnings` (fail on warnings). Fix issues reported by clippy
 ## WASM Size Budget
 
 Contracts have a maximum size of 150,000 bytes. This is enforced in CI.
+
+### Deployment attestation bundles
+
+Release provenance is emitted by `scripts/provenance.sh build` as
+`provenance-manifest.json` using schema `soroban-forge/provenance@2`. The bundle
+contains the source revision, Rust/Cargo/Stellar tool versions, target and
+profile, Cargo.lock SHA-256, artifact SHA-256/size values, optional deployment
+receipt entries, and a canonical bundle SHA-256.
+
+A clean checkout is reproducible: the manifest timestamp is derived from the
+current commit rather than wall-clock time. Tampering with any field covered by
+`bundle_sha256` causes local verification to fail. The digest is integrity
+metadata, not cryptographic signing.
+
+```bash
+# Build, then verify locally without network access
+scripts/provenance.sh build
+scripts/provenance.sh verify
+scripts/provenance.sh verify --json
+
+# Optionally match deployment contract IDs from a receipt against live WASM
+DEPLOYMENT_RECEIPT=docs/testnet/testnet-deployment.json \
+STELLAR_RPC_URL=https://soroban-testnet.stellar.org \
+NETWORK_PASSPHRASE='Test SDF Network ; September 2015' \
+scripts/provenance.sh verify --network
+```
+
+Network verification is opt-in and requires an RPC endpoint. It fetches each
+configured contract ID and compares the deployed WASM SHA-256 with the matching
+artifact in the bundle. Provenance does not replace an audit, does not provide
+cryptographic signing, and does not assert that a deployment is safe or
+authorized.

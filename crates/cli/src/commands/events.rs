@@ -1,7 +1,8 @@
 use crate::cli::{EventsArgs, EventsFormat};
+use crate::commands::process::{ensure_success, CommandOutput};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::{collections::HashSet, process::Command, thread, time::Duration};
+use std::{collections::HashSet, io, process::Command, thread, time::Duration};
 
 const POLL_EVENT_COUNT: &str = "100";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -36,39 +37,58 @@ fn event_values(value: &Value) -> Result<Vec<&Value>> {
 }
 
 fn run_once(args: &EventsArgs, start_ledger: Option<u64>) -> Result<Vec<Value>> {
-    let output = event_command(args, start_ledger)
-        .output()
-        .context("failed to run stellar events")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "stellar events failed with status {}: {}",
-            output.status,
-            stderr.trim()
-        );
-    }
+    run_once_with(args, start_ledger, |command| {
+        command.output().map(CommandOutput::from_output)
+    })
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: Value = if stdout.trim().is_empty() {
+/// Fetch one batch of events through an injected command runner.
+///
+/// Production passes [`Command::output`]; tests pass a closure that returns a
+/// fabricated [`CommandOutput`], so both the success and failure paths run
+/// without spawning the Stellar CLI.
+fn run_once_with<F>(args: &EventsArgs, start_ledger: Option<u64>, execute: F) -> Result<Vec<Value>>
+where
+    F: FnOnce(&mut Command) -> io::Result<CommandOutput>,
+{
+    let mut command = event_command(args, start_ledger)?;
+    let output = execute(&mut command).context("failed to run stellar events")?;
+    ensure_success("event retrieval", &output)?;
+
+    let value: Value = if output.stdout.trim().is_empty() {
         Value::Array(Vec::new())
     } else {
-        serde_json::from_str(stdout.trim()).context("failed to parse stellar events JSON output")?
+        serde_json::from_str(output.stdout.trim())
+            .context("failed to parse stellar events JSON output")?
     };
     Ok(event_values(&value)?.into_iter().cloned().collect())
 }
 
-fn event_command(args: &EventsArgs, start_ledger: Option<u64>) -> Command {
+fn event_command(args: &EventsArgs, start_ledger: Option<u64>) -> Result<Command> {
+    let network = crate::network_profiles::resolve_network(
+        args.network.as_deref(),
+        args.network_profile.as_deref(),
+        args.rpc_url.as_deref(),
+        args.network_passphrase.as_deref(),
+    )?;
     let mut command = Command::new("stellar");
     command
         .arg("events")
         .arg("--id")
         .arg(&args.contract)
         .arg("--network")
-        .arg(&args.network)
+        .arg(network.name)
         .arg("--output")
         .arg("json")
         .arg("--count")
         .arg(POLL_EVENT_COUNT);
+
+    if let Some(rpc_url) = network.rpc_url {
+        command.arg("--rpc-url").arg(rpc_url);
+    }
+    if let Some(passphrase) = network.network_passphrase {
+        command.arg("--network-passphrase").arg(passphrase);
+    }
 
     if let Some(ledger) = start_ledger {
         command.arg("--start-ledger").arg(ledger.to_string());
@@ -76,7 +96,7 @@ fn event_command(args: &EventsArgs, start_ledger: Option<u64>) -> Command {
     if let Some(event_type) = &args.event_type {
         command.arg("--type").arg(event_type);
     }
-    command
+    Ok(command)
 }
 
 fn matches_topic(event: &Value, topic: Option<&str>) -> bool {
@@ -274,5 +294,68 @@ mod tests {
         let pretty = format_event(&event, EventsFormat::Pretty).unwrap();
         assert!(pretty.contains("\x1b[1;36m[Transfer]\x1b[0m"));
         assert!(pretty.contains("\"topic\""));
+    }
+
+    fn events_args() -> EventsArgs {
+        EventsArgs {
+            contract: "C123".to_owned(),
+            since: None,
+            event_type: None,
+            topic: None,
+            network: Some("testnet".to_owned()),
+            network_profile: None,
+            rpc_url: None,
+            network_passphrase: None,
+            stream: false,
+            format: EventsFormat::Pretty,
+            jsonl: false,
+        }
+    }
+
+    #[test]
+    fn event_retrieval_success_parses_events_without_spawning_stellar() {
+        let events = run_once_with(&events_args(), None, |command| {
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert!(args.iter().any(|arg| arg == "events"));
+            assert!(args.iter().any(|arg| arg == "C123"));
+            Ok(CommandOutput::new(
+                true,
+                r#"{"events":[{"id":"1"},{"id":"2"}]}"#,
+                "",
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["id"], "1");
+    }
+
+    #[test]
+    fn event_retrieval_failure_returns_error_with_context() {
+        let error = run_once_with(&events_args(), None, |_| {
+            Ok(CommandOutput::new(
+                false,
+                "",
+                "rpc unavailable: connection refused",
+            ))
+        })
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("event retrieval failed"));
+        assert!(message.contains("rpc unavailable"));
+    }
+
+    #[test]
+    fn event_retrieval_spawn_failure_returns_error_with_context() {
+        let error = run_once_with(&events_args(), None, |_| {
+            Err(io::Error::new(io::ErrorKind::NotFound, "stellar not found"))
+        })
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("failed to run stellar events"));
     }
 }

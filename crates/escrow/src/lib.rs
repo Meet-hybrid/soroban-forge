@@ -196,6 +196,10 @@
 //!   authorization.
 //! - `resolve` — arbiter only; the decision is final.
 //! - `cancel` — buyer, while `Pending`.
+//! - `extend_deadline` / `extend_basket_deadline` — **buyer** authorizes,
+//!   while `Funded`: moves the deadline later (`created_at + new_timeout`),
+//!   even after the current deadline has passed. A pending release request
+//!   is left as it is.
 //!
 //! ## Storage and TTL
 //!
@@ -631,6 +635,32 @@ pub trait SorobanForgeEscrow {
     /// * [`ForgeError::NotFound`] — no basket with this id.
     /// * [`ForgeError::InvalidInput`] — the basket is not `Pending`.
     fn cancel_basket(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    // -------------------------------------------------------------------
+    // Deadline extension
+    // -------------------------------------------------------------------
+
+    /// Move a funded single-token escrow's deadline later by replacing its
+    /// `timeout`: the deadline becomes `created_at + new_timeout`. Requires
+    /// the **buyer**; only valid while `Funded`.
+    ///
+    /// Allowed after the current deadline has passed, so a buyer can re-open
+    /// a late delivery as long as they have not refunded. A pending release
+    /// request is left untouched. Emits `DeadlineExtended`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no single-token escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — not `Funded`, or `new_timeout` does
+    ///   not exceed the current `timeout`.
+    /// * [`ForgeError::ArithmeticOverflow`] — `created_at + new_timeout`
+    ///   overflows.
+    fn extend_deadline(env: Env, escrow_id: u64, new_timeout: u64) -> Result<(), ForgeError>;
+
+    /// Basket form of [`Self::extend_deadline`]. Same rules and errors;
+    /// `NotFound` when no basket has this id.
+    fn extend_basket_deadline(env: Env, escrow_id: u64, new_timeout: u64)
+        -> Result<(), ForgeError>;
 
     /// Read the full basket record, including per-leg `released` accounting.
     ///
@@ -1833,6 +1863,59 @@ impl Escrow {
     }
 
     // -------------------------------------------------------------------
+    // Deadline extension
+    // -------------------------------------------------------------------
+
+    /// Buyer moves a funded escrow's deadline later. Validation and the
+    /// buyer's authorization both run before the record is rewritten at its
+    /// existing key; the participant index and any pending release request
+    /// are not touched.
+    pub fn extend_deadline(env: Env, escrow_id: u64, new_timeout: u64) -> Result<(), ForgeError> {
+        let escrow = Self::load_escrow(&env, escrow_id)?;
+        let (old_deadline, new_deadline) = extended_deadline(
+            &escrow.status,
+            escrow.created_at,
+            escrow.timeout,
+            new_timeout,
+        )?;
+        escrow.buyer.require_auth();
+
+        let mut extended = escrow;
+        extended.timeout = new_timeout;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &extended);
+        bump_entry(&env, &DataKey::Escrow(escrow_id));
+        events::deadline_extended(&env, escrow_id, old_deadline, new_deadline);
+        Ok(())
+    }
+
+    /// Basket form of `extend_deadline`, with the same rules.
+    pub fn extend_basket_deadline(
+        env: Env,
+        escrow_id: u64,
+        new_timeout: u64,
+    ) -> Result<(), ForgeError> {
+        let basket = Self::load_basket(&env, escrow_id)?;
+        let (old_deadline, new_deadline) = extended_deadline(
+            &basket.status,
+            basket.created_at,
+            basket.timeout,
+            new_timeout,
+        )?;
+        basket.buyer.require_auth();
+
+        let mut extended = basket;
+        extended.timeout = new_timeout;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Basket(escrow_id), &extended);
+        bump_entry(&env, &DataKey::Basket(escrow_id));
+        events::deadline_extended(&env, escrow_id, old_deadline, new_deadline);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
     // Release with a review window
     // -------------------------------------------------------------------
 
@@ -2640,6 +2723,23 @@ fn escrow_deadline(created_at: u64, timeout: u64) -> Result<u64, ForgeError> {
         .ok_or(ForgeError::ArithmeticOverflow)
 }
 
+/// Validate a deadline extension for either record kind and return the
+/// `(old, new)` deadlines. Only a `Funded` escrow may be extended, and only to
+/// a strictly later deadline.
+fn extended_deadline(
+    status: &EscrowStatus,
+    created_at: u64,
+    timeout: u64,
+    new_timeout: u64,
+) -> Result<(u64, u64), ForgeError> {
+    if *status != EscrowStatus::Funded || new_timeout <= timeout {
+        return Err(ForgeError::InvalidInput);
+    }
+    let old_deadline = escrow_deadline(created_at, timeout)?;
+    let new_deadline = escrow_deadline(created_at, new_timeout)?;
+    Ok((old_deadline, new_deadline))
+}
+
 fn request_release_ineligibility(
     now: u64,
     deadline: u64,
@@ -2942,6 +3042,15 @@ mod events {
         pub release_at: u64,
     }
 
+    /// The buyer moved the escrow's deadline later. Either escrow kind.
+    #[contractevent]
+    pub struct DeadlineExtended {
+        #[topic]
+        pub escrow_id: u64,
+        pub old_deadline: u64,
+        pub new_deadline: u64,
+    }
+
     #[contractevent]
     pub struct RefundExpired {
         #[topic]
@@ -3104,6 +3213,15 @@ mod events {
         .publish(env);
     }
 
+    pub fn deadline_extended(env: &Env, escrow_id: u64, old_deadline: u64, new_deadline: u64) {
+        DeadlineExtended {
+            escrow_id,
+            old_deadline,
+            new_deadline,
+        }
+        .publish(env);
+    }
+
     pub fn refund_expired(env: &Env, escrow_id: u64, refunded_amount: i128, timestamp: u64) {
         RefundExpired {
             escrow_id,
@@ -3246,6 +3364,9 @@ mod review_tests;
 
 #[cfg(test)]
 mod action_summary_tests;
+
+#[cfg(test)]
+mod deadline_tests;
 
 #[cfg(test)]
 mod props;

@@ -258,6 +258,8 @@ cargo run -p soroban-forge-cli -- validate-plan --plan crates/cli/fixtures/plans
 cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --jsonl
 # Compare two local WASM contract interfaces
 cargo run -p soroban-forge-cli -- compare old.wasm new.wasm --json
+# Compare storage-relevant schemas for upgrade/migration risk
+cargo run -p soroban-forge-cli -- storage-diff --source old.wasm --target new.wasm --json
 # Follow live events, optionally filtering to a decoded topic name
 cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network testnet --stream --topic Transfer
 # Emit one decoded event object per line for machine processing
@@ -265,8 +267,8 @@ cargo run -p soroban-forge-cli -- events --contract <CONTRACT_ID> --network test
 ```
 
 Commands: `build`, `lint`, `test`, `deploy`, `new`, `scaffold-validate`,
-`verify`, `invoke`, `decode-failure`, `events`, `inspect`, `compare` and `doctor`. Run any
-of them with `--help` for options.
+`verify`, `invoke`, `decode-failure`, `events`, `inspect`, `compare`,
+`storage-diff` and `doctor`. Run any of them with `--help` for options.
 
 ### 5. Deploy to testnet
 

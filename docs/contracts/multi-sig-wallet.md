@@ -119,8 +119,8 @@ still used if a limit is configured again.
 positive amount, the same rolling-limit arithmetic as submission, then the
 wallet's recorded custody balance. This is a snapshot at the current ledger
 timestamp, not a promise about later execution: submission reserves window
-capacity, while custody funding is rechecked when the approved transaction
-executes. The generated TypeScript client has not been regenerated for these
+capacity, and both the rolling limit and custody funding are rechecked when
+the approved transaction executes (see below). The generated TypeScript client has not been regenerated for these
 new views; future client regeneration will include them.
 
 Example: with a 1,000-unit limit per 600 seconds, a 700-unit withdrawal
@@ -129,6 +129,27 @@ and `reset_at = 10,600`. A check for 400 at 10,599 returns
 `CheckResult::LimitExceeded`, matching submission enforcement. At 10,600 the
 700-unit entry is expired; the same check is allowed if the wallet has enough
 recorded balance.
+
+### Execution-time limit re-check
+
+`execute` re-checks a withdrawal against the token's limit **in force at
+execution**, before custody funding, so a proposal approved under an older,
+higher limit cannot settle past a lowered one. A withdrawal is never counted
+twice:
+
+- Admitted at submission and still inside the current window — it is
+  already in the window total, so execution requires `total <= limit`.
+- Not counted — submitted while the token had no limit, or more than one
+  window ago — it is checked like a new submission (`total + amount <=
+  limit`) and recorded in the window when it executes.
+- No limit configured at execution — no limit check.
+
+A failed re-check returns `WithdrawalLimitExceeded` and leaves the
+transaction `Pending` with nothing moved; owners can raise the limit, wait
+for the window to clear, or `reject` it. Which withdrawals were admitted is
+tracked per transaction under the persistent `WithdrawalAdmission(tx_id)` key
+(removed on execution), so the `WalletTx` and `WindowEntry` shapes are
+unchanged.
 
 ## States
 
