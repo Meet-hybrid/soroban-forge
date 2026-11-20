@@ -374,6 +374,25 @@ pub trait SorobanForgeSubscriptionPayments {
     fn cancel(env: Env, subscription_id: u64)
         -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
+    /// Cancel `subscription_id` on the provider's side, returning any unspent
+    /// prepaid balance to the subscriber.
+    ///
+    /// Requires the provider. Valid when `Active`, `Paused`, or `PastDue`.
+    /// A positive `prepaid_balance` is transferred back to the subscriber
+    /// before the cancellation is stored, leaving `Some(0)`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no subscription with this id.
+    /// * [`ForgeError::InvalidInput`] — the subscription is already
+    ///   `Cancelled`.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the refund; nothing is changed.
+    fn cancel_by_provider(
+        env: Env,
+        subscription_id: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
     /// Read a stored subscription by id (read-only view).
     fn get_subscription(
         env: Env,
@@ -1100,37 +1119,28 @@ impl SubscriptionPayments {
     /// Requires the subscriber. Valid when `Active`, `Paused`, or `PastDue`. Cancelling
     /// an already-cancelled subscription is rejected.
     pub fn cancel(env: Env, subscription_id: u64) -> Result<(), ForgeError> {
-        let mut subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
         if subscription.status == SubscriptionStatus::Cancelled {
             return Err(ForgeError::InvalidInput);
         }
         subscription.subscriber.require_auth();
+        Self::settle_cancellation(&env, subscription_id, subscription)
+    }
 
-        let mut refund = None;
-        if let Some(balance) = subscription.prepaid_balance {
-            if balance > 0 {
-                let transfer_result = token::TokenClient::new(&env, &subscription.token)
-                    .try_transfer(
-                        &env.current_contract_address(),
-                        &subscription.subscriber,
-                        &balance,
-                    );
-                if !matches!(transfer_result, Ok(Ok(()))) {
-                    return Err(ForgeError::TokenTransferFailed);
-                }
-                subscription.prepaid_balance = Some(0);
-                refund = Some(balance);
-            }
+    /// Cancel a subscription on the provider's side, refunding any unspent
+    /// prepaid balance to the subscriber.
+    ///
+    /// Requires the provider. Valid when `Active`, `Paused`, or `PastDue`;
+    /// cancelling an already-cancelled subscription is rejected. Settles
+    /// exactly like the subscriber's `cancel`: the refund transfer runs
+    /// before the cancellation is stored.
+    pub fn cancel_by_provider(env: Env, subscription_id: u64) -> Result<(), ForgeError> {
+        let subscription = Self::get_subscription_impl(&env, subscription_id)?;
+        if subscription.status == SubscriptionStatus::Cancelled {
+            return Err(ForgeError::InvalidInput);
         }
-
-        subscription.status = SubscriptionStatus::Cancelled;
-        subscription.paused_at = None;
-        Self::store_subscription(&env, subscription_id, &subscription);
-        if let Some(amount) = refund {
-            events::balance_refunded(&env, subscription_id, amount, 0);
-        }
-        events::cancelled(&env, &subscription);
-        Ok(())
+        subscription.provider.require_auth();
+        Self::settle_cancellation(&env, subscription_id, subscription)
     }
 
     /// Read a stored subscription by id (read-only view).
@@ -1210,6 +1220,44 @@ impl SubscriptionPayments {
         }
         let ids = Self::index_ids(&env, &DataKey::ProviderSubscriptions(provider));
         Self::resolve_page(&env, &ids, offset, limit)
+    }
+
+    /// Refund any positive prepaid balance to the subscriber, then store the
+    /// subscription as `Cancelled` with `paused_at` cleared.
+    ///
+    /// Shared by `cancel` and `cancel_by_provider`; callers have already
+    /// checked the status and authorized. The refund transfer runs before the
+    /// state write, so a rejected transfer leaves the record unchanged.
+    fn settle_cancellation(
+        env: &Env,
+        subscription_id: u64,
+        mut subscription: Subscription,
+    ) -> Result<(), ForgeError> {
+        let mut refund = None;
+        if let Some(balance) = subscription.prepaid_balance {
+            if balance > 0 {
+                let transfer_result = token::TokenClient::new(env, &subscription.token)
+                    .try_transfer(
+                        &env.current_contract_address(),
+                        &subscription.subscriber,
+                        &balance,
+                    );
+                if !matches!(transfer_result, Ok(Ok(()))) {
+                    return Err(ForgeError::TokenTransferFailed);
+                }
+                subscription.prepaid_balance = Some(0);
+                refund = Some(balance);
+            }
+        }
+
+        subscription.status = SubscriptionStatus::Cancelled;
+        subscription.paused_at = None;
+        Self::store_subscription(env, subscription_id, &subscription);
+        if let Some(amount) = refund {
+            events::balance_refunded(env, subscription_id, amount, 0);
+        }
+        events::cancelled(env, &subscription);
+        Ok(())
     }
 
     /// Create a new subscription through the single shared creation path used
@@ -1685,7 +1733,9 @@ mod model_check;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_forge_test_utils::TestAccounts;
+    use soroban_forge_test_utils::{
+        FailureBoundary, FailureSchedule, FailureToken, FailureTokenClient, TestAccounts,
+    };
     use soroban_sdk::testutils::{storage::Persistent, Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{Address, Env};
@@ -1744,6 +1794,52 @@ mod tests {
         assert_eq!(subscription.last_charged, START);
         assert_eq!(subscription.paused_at, None);
         assert_eq!(subscription.failed_attempts, 0);
+    }
+
+    #[test]
+    fn failure_token_seeded_catchup_failure_rolls_back_all_periods() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(START);
+        let token = env.register(FailureToken, ());
+        let token_client = FailureTokenClient::new(&env, &token);
+        let contract_id = env.register(SubscriptionPayments, ());
+        let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        token_client.mint(&accounts.user1, &10_000_i128);
+        let subscription_id = client.subscribe(
+            &accounts.user1,
+            &accounts.validator,
+            &token,
+            &AMOUNT,
+            &PERIOD,
+        );
+        let schedule = FailureSchedule::seeded(1, FailureBoundary::BeforeBatchStep);
+        let step = schedule.failing_step().expect("seeded step");
+        token_client.set_fail_at_transfer(&step);
+        let before = client.get_subscription(&subscription_id);
+        let subscriber_before = token_client.balance(&accounts.user1);
+        let provider_before = token_client.balance(&accounts.validator);
+        env.ledger().set_timestamp(START + PERIOD * 3);
+
+        let err = client
+            .try_charge_catchup(&subscription_id, &3)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::TokenTransferFailed);
+        let after = client.get_subscription(&subscription_id);
+        assert_eq!(after.last_charged, before.last_charged);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.failed_attempts, before.failed_attempts);
+        assert_eq!(after.prepaid_balance, before.prepaid_balance);
+        assert_eq!(token_client.balance(&accounts.user1), subscriber_before);
+        assert_eq!(token_client.balance(&accounts.validator), provider_before);
+        assert!(token_client.transfer_trace().is_empty());
+        assert_eq!(
+            schedule.attempt_trace(step),
+            (1..=step).collect::<std::vec::Vec<u32>>()
+        );
+        assert!(env.events().all().events().is_empty());
     }
 
     #[test]

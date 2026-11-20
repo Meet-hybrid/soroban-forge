@@ -967,6 +967,197 @@ fn a_failed_settlement_publishes_no_metering_events() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn arrears_reconciliation_matrix_is_exact_partial_repeat_safe_and_atomic() {
+    let (env, _token, token_client, client, accounts, subscription_id) =
+        setup_with_quotas!(calls_and_bytes);
+    let calls = Symbol::new(&env, CALLS);
+    let provider = client.get_subscription(&subscription_id).provider.clone();
+    let due = AMOUNT + 50;
+
+    client.record_usage(&subscription_id, &calls, &11_001);
+    assert_eq!(client.quote_period(&subscription_id), due);
+    assert_eq!(client.deposit(&subscription_id, &due), due);
+    let deposits = events_named(&env, &client.address, "deposited");
+    assert_eq!(deposits.len(), 1);
+    assert_eq!(data_field(&deposits[0].1, "amount"), sc_i128(due));
+    assert_eq!(data_field(&deposits[0].1, "balance_after"), sc_i128(due));
+
+    env.ledger().set_timestamp(START + PERIOD);
+    assert_eq!(client.charge(&subscription_id), due);
+    let charged = events_named(&env, &client.address, "charged");
+    let debited = events_named(&env, &client.address, "balance_debited");
+
+    let settled = client.get_subscription(&subscription_id);
+    assert_eq!(settled.prepaid_balance, Some(0));
+    assert_eq!(settled.last_charged, START + PERIOD);
+    assert_eq!(settled.status, SubscriptionStatus::Active);
+    assert_eq!(settled.failed_attempts, 0);
+    assert_eq!(settled.paused_at, None);
+    assert_eq!(settled.quotas, calls_and_bytes(&env));
+    assert_eq!(token_client.balance(&accounts.user1), 10_000_000 - due);
+    assert_eq!(token_client.balance(&provider), due);
+    assert_eq!(token_client.balance(&client.address), 0);
+    let usage_after = client.get_usage(&subscription_id, &calls);
+    assert_eq!(usage_after.units, 0);
+    assert_eq!(usage_after.period_start, START + PERIOD);
+    assert_eq!(client.quote_period(&subscription_id), AMOUNT);
+
+    assert_eq!(charged.len(), 1);
+    assert_eq!(data_field(&charged[0].1, "amount"), sc_i128(due));
+    assert_eq!(
+        data_field(&charged[0].1, "last_charged"),
+        ScVal::U64(START + PERIOD)
+    );
+    assert_eq!(
+        data_field(&charged[0].1, "next_charge_at"),
+        ScVal::U64(START + PERIOD * 2)
+    );
+    assert_eq!(debited.len(), 1);
+    assert_eq!(data_field(&debited[0].1, "amount"), sc_i128(due));
+    assert_eq!(data_field(&debited[0].1, "balance_after"), sc_i128(0));
+
+    let before_repeat = client.get_subscription(&subscription_id);
+    let subscriber_before = token_client.balance(&accounts.user1);
+    let provider_before = token_client.balance(&provider);
+    let contract_before = token_client.balance(&client.address);
+    assert_eq!(client.charge(&subscription_id), 0);
+    assert_no_reconciliation_events(&env, &client.address);
+    assert_eq!(client.get_subscription(&subscription_id), before_repeat);
+    assert_eq!(token_client.balance(&accounts.user1), subscriber_before);
+    assert_eq!(token_client.balance(&provider), provider_before);
+    assert_eq!(token_client.balance(&client.address), contract_before);
+
+    client.record_usage(&subscription_id, &calls, &11_001);
+    let partial = AMOUNT / 2;
+    assert_eq!(client.deposit(&subscription_id, &partial), partial);
+    let before_insufficient = client.get_subscription(&subscription_id);
+    let quote_before = client.quote_period(&subscription_id);
+    let usage_before = client.get_usage(&subscription_id, &calls);
+    let subscriber_before = token_client.balance(&accounts.user1);
+    let provider_before = token_client.balance(&provider);
+    let contract_before = token_client.balance(&client.address);
+    assert_eq!(quote_before, due);
+    assert_eq!(usage_before.units, 11_001);
+    assert_eq!(usage_before.period_start, START + PERIOD);
+
+    env.ledger().set_timestamp(START + PERIOD * 2);
+    assert_eq!(client.charge(&subscription_id), 0);
+    assert_no_reconciliation_events(&env, &client.address);
+    let mut expected_after_failure = before_insufficient.clone();
+    expected_after_failure.status = SubscriptionStatus::PastDue;
+    expected_after_failure.failed_attempts = before_insufficient.failed_attempts + 1;
+    assert_eq!(
+        client.get_subscription(&subscription_id),
+        expected_after_failure
+    );
+    assert_eq!(client.quote_period(&subscription_id), quote_before);
+    assert_eq!(client.get_usage(&subscription_id, &calls), usage_before);
+    assert_eq!(token_client.balance(&accounts.user1), subscriber_before);
+    assert_eq!(token_client.balance(&provider), provider_before);
+    assert_eq!(token_client.balance(&client.address), contract_before);
+
+    let before_invalid = client.get_subscription(&subscription_id);
+    let err = client
+        .try_deposit(&subscription_id, &0)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_no_reconciliation_events(&env, &client.address);
+    assert_eq!(client.get_subscription(&subscription_id), before_invalid);
+    assert_eq!(client.quote_period(&subscription_id), quote_before);
+    assert_eq!(client.get_usage(&subscription_id, &calls), usage_before);
+    assert_eq!(token_client.balance(&accounts.user1), subscriber_before);
+    assert_eq!(token_client.balance(&provider), provider_before);
+    assert_eq!(token_client.balance(&client.address), contract_before);
+
+    assert_eq!(client.deposit(&subscription_id, &(due - partial)), due);
+    assert_eq!(client.charge(&subscription_id), due);
+    let charged = events_named(&env, &client.address, "charged");
+    let debited = events_named(&env, &client.address, "balance_debited");
+    let settled = client.get_subscription(&subscription_id);
+    assert_eq!(settled.prepaid_balance, Some(0));
+    assert_eq!(settled.last_charged, START + PERIOD * 2);
+    assert_eq!(settled.status, SubscriptionStatus::Active);
+    assert_eq!(settled.failed_attempts, 0);
+    assert_eq!(settled.paused_at, None);
+    assert_eq!(token_client.balance(&accounts.user1), 10_000_000 - due * 2);
+    assert_eq!(token_client.balance(&provider), due * 2);
+    assert_eq!(token_client.balance(&client.address), 0);
+    let usage_after = client.get_usage(&subscription_id, &calls);
+    assert_eq!(usage_after.units, 0);
+    assert_eq!(usage_after.period_start, START + PERIOD * 2);
+    assert_eq!(client.quote_period(&subscription_id), AMOUNT);
+    assert_eq!(charged.len(), 1);
+    assert_eq!(data_field(&charged[0].1, "amount"), sc_i128(due));
+    assert_eq!(
+        data_field(&charged[0].1, "last_charged"),
+        ScVal::U64(START + PERIOD * 2)
+    );
+    assert_eq!(debited.len(), 1);
+    assert_eq!(data_field(&debited[0].1, "amount"), sc_i128(due));
+    assert_eq!(data_field(&debited[0].1, "balance_after"), sc_i128(0));
+
+    let before_repeat = client.get_subscription(&subscription_id);
+    let subscriber_before = token_client.balance(&accounts.user1);
+    let provider_before = token_client.balance(&provider);
+    assert_eq!(client.charge(&subscription_id), 0);
+    assert_no_reconciliation_events(&env, &client.address);
+    assert_eq!(client.get_subscription(&subscription_id), before_repeat);
+    assert_eq!(token_client.balance(&accounts.user1), subscriber_before);
+    assert_eq!(token_client.balance(&provider), provider_before);
+}
+
+#[test]
+fn metered_catchup_errors_leave_reconciliation_inputs_untouched() {
+    let (env, token, token_client, client, accounts, _subscription_id) = setup!();
+    let provider = accounts.validator.clone();
+    let subscriber = Address::generate(&env);
+    let subscription_id = client.subscribe(&subscriber, &provider, &token, &AMOUNT, &PERIOD);
+    client.set_quotas(&subscription_id, &calls_and_bytes(&env));
+    let calls = Symbol::new(&env, CALLS);
+    client.record_usage(&subscription_id, &calls, &11_001);
+    env.ledger().set_timestamp(START + PERIOD);
+
+    let before = client.get_subscription(&subscription_id);
+    let quote_before = client.quote_period(&subscription_id);
+    let usage_before = client.get_usage(&subscription_id, &calls);
+    let subscriber_before = token_client.balance(&subscriber);
+    let provider_before = token_client.balance(&provider);
+    let contract_before = token_client.balance(&client.address);
+    assert_eq!(quote_before, AMOUNT + 50);
+
+    assert_eq!(
+        client
+            .try_charge_catchup(&subscription_id, &33)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_no_reconciliation_events(&env, &client.address);
+    assert_eq!(client.get_subscription(&subscription_id), before);
+    assert_eq!(client.quote_period(&subscription_id), quote_before);
+    assert_eq!(client.get_usage(&subscription_id, &calls), usage_before);
+    assert_eq!(token_client.balance(&subscriber), subscriber_before);
+    assert_eq!(token_client.balance(&provider), provider_before);
+    assert_eq!(token_client.balance(&client.address), contract_before);
+
+    assert_eq!(
+        client
+            .try_charge_catchup(&subscription_id, &1)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::TokenTransferFailed
+    );
+    assert_no_reconciliation_events(&env, &client.address);
+    assert_eq!(client.get_subscription(&subscription_id), before);
+    assert_eq!(client.quote_period(&subscription_id), quote_before);
+    assert_eq!(client.get_usage(&subscription_id, &calls), usage_before);
+    assert_eq!(token_client.balance(&subscriber), subscriber_before);
+    assert_eq!(token_client.balance(&provider), provider_before);
+    assert_eq!(token_client.balance(&client.address), contract_before);
+}
+
+#[test]
 fn charge_transfers_the_derived_amount_from_subscriber_to_provider() {
     let (env, _token, _tc, client, accounts, subscription_id) = setup_with_quotas!(calls_and_bytes);
     client.record_usage(&subscription_id, &Symbol::new(&env, CALLS), &11_001);
@@ -1102,6 +1293,21 @@ fn events_named(
             Some((body.topics[1..].to_vec(), body.data.clone()))
         })
         .collect()
+}
+
+fn assert_no_reconciliation_events(env: &Env, contract: &Address) {
+    for name in [
+        "charged",
+        "balance_debited",
+        "deposited",
+        "balance_refunded",
+        "usage_recorded",
+    ] {
+        assert!(
+            events_named(env, contract, name).is_empty(),
+            "unexpected {name} event"
+        );
+    }
 }
 
 /// Read one field out of a contract event's data, which the SDK encodes as an

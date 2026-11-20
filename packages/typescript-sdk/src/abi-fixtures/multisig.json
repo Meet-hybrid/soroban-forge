@@ -31,6 +31,22 @@
       ]
     },
     {
+      "name": "cancel_tx",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        },
+        {
+          "name": "submitter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "check_withdrawal",
       "inputs": [
         {
@@ -509,6 +525,20 @@
   ],
   "events": [
     {
+      "name": "TxCancelled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        },
+        {
+          "name": "submitter",
+          "type": "address"
+        }
+      ]
+    },
+    {
       "name": "TxConfirmed",
       "dataFormat": "scSpecEventDataFormatMap",
       "params": [
@@ -856,6 +886,10 @@
         },
         {
           "name": "Expired",
+          "types": []
+        },
+        {
+          "name": "Cancelled",
           "types": []
         }
       ]
