@@ -179,6 +179,23 @@ pub trait SorobanForgeMarketplaceRoyalties {
         collection: Address,
     ) -> Result<Royalty, soroban_forge_shared_utils::ForgeError>;
 
+    /// Read every recipient and basis-point rate configured for `collection`
+    /// (read-only view), in registration order.
+    ///
+    /// Returns the multi-recipient split when one is stored; a legacy
+    /// single-recipient configuration reads back as a one-item list holding
+    /// its recipient and rate. Requires no authorization and never writes
+    /// storage or extends a TTL.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no royalty configuration exists for
+    ///   `collection`.
+    fn get_royalty_splits(
+        env: Env,
+        collection: Address,
+    ) -> Result<soroban_sdk::Vec<RoyaltyShare>, soroban_forge_shared_utils::ForgeError>;
+
     /// Read the cumulative settlement totals for `collection` (read-only
     /// view); `NotFound` until the first successful settlement.
     fn get_settlement_summary(
@@ -723,6 +740,23 @@ impl MarketplaceRoyalties {
             .persistent()
             .get(&DataKey::Royalty(collection))
             .ok_or(ForgeError::NotFound)
+    }
+
+    /// Read the full recipient split for `collection` (read-only view).
+    ///
+    /// Uses the same split resolution as settlement: `DataKey::Splits` when
+    /// present, otherwise the legacy single-recipient `DataKey::Royalty`
+    /// record as a one-item list. Performs no storage writes or TTL bumps.
+    pub fn get_royalty_splits(
+        env: Env,
+        collection: Address,
+    ) -> Result<soroban_sdk::Vec<RoyaltyShare>, ForgeError> {
+        let royalty: Royalty = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Royalty(collection))
+            .ok_or(ForgeError::NotFound)?;
+        royalty_splits(&env, &royalty)
     }
 
     /// Read the cumulative settlement totals for `collection` (read-only
@@ -1448,6 +1482,163 @@ mod tests {
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::NotFound);
+    }
+
+    // -------------------------------------------------------------------
+    // get_royalty_splits — read-only split introspection
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn get_royalty_splits_returns_every_recipient_in_order() {
+        let (env, client, accounts) = setup!();
+        let splits = soroban_sdk::vec![
+            &env,
+            RoyaltyShare {
+                recipient: accounts.user2.clone(),
+                bps: 300,
+            },
+            RoyaltyShare {
+                recipient: accounts.user3.clone(),
+                bps: 0,
+            },
+            RoyaltyShare {
+                recipient: accounts.validator.clone(),
+                bps: 700,
+            },
+        ];
+        client.set_royalty_splits(&accounts.arbiter, &splits);
+        assert_eq!(client.get_royalty_splits(&accounts.arbiter), splits);
+    }
+
+    #[test]
+    fn get_royalty_splits_reports_single_recipient_configuration() {
+        let (env, client, accounts) = setup!();
+        assert_eq!(
+            client.get_royalty_splits(&accounts.arbiter),
+            soroban_sdk::vec![
+                &env,
+                RoyaltyShare {
+                    recipient: accounts.user2.clone(),
+                    bps: 500,
+                }
+            ]
+        );
+
+        // `set_royalty` replaces an earlier multi-recipient split.
+        let splits = soroban_sdk::vec![
+            &env,
+            RoyaltyShare {
+                recipient: accounts.user3.clone(),
+                bps: 100,
+            },
+            RoyaltyShare {
+                recipient: accounts.validator.clone(),
+                bps: 200,
+            },
+        ];
+        client.set_royalty_splits(&accounts.arbiter, &splits);
+        client.set_royalty(&accounts.arbiter, &accounts.user1, &250_u32);
+        assert_eq!(
+            client.get_royalty_splits(&accounts.arbiter),
+            soroban_sdk::vec![
+                &env,
+                RoyaltyShare {
+                    recipient: accounts.user1.clone(),
+                    bps: 250,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn get_royalty_splits_falls_back_to_legacy_record_without_split_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(MarketplaceRoyalties, ());
+        let client = SorobanForgeMarketplaceRoyaltiesClient::new(&env, &contract_id);
+        let accounts = TestAccounts::generate(&env);
+        client.set_royalty(&accounts.arbiter, &accounts.user2, &500_u32);
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Splits(accounts.arbiter.clone()));
+        });
+
+        assert_eq!(
+            client.get_royalty_splits(&accounts.arbiter),
+            soroban_sdk::vec![
+                &env,
+                RoyaltyShare {
+                    recipient: accounts.user2.clone(),
+                    bps: 500,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn get_royalty_splits_unconfigured_collection_is_not_found() {
+        let (_env, client, accounts) = setup!();
+        assert_eq!(
+            client.try_get_royalty_splits(&accounts.validator),
+            Err(Ok(ForgeError::NotFound))
+        );
+    }
+
+    #[test]
+    fn get_royalty_splits_on_empty_contract_is_not_found() {
+        let env = Env::default();
+        let contract_id = env.register(MarketplaceRoyalties, ());
+        let client = SorobanForgeMarketplaceRoyaltiesClient::new(&env, &contract_id);
+        let collection = Address::generate(&env);
+        assert_eq!(
+            client.try_get_royalty_splits(&collection),
+            Err(Ok(ForgeError::NotFound))
+        );
+    }
+
+    #[test]
+    fn get_royalty_splits_is_read_only() {
+        let (env, client, accounts) = setup!();
+        let collection = &accounts.arbiter;
+        let contract_id = client.address.clone();
+        let splits = soroban_sdk::vec![
+            &env,
+            RoyaltyShare {
+                recipient: accounts.user2.clone(),
+                bps: 400,
+            },
+            RoyaltyShare {
+                recipient: accounts.user3.clone(),
+                bps: 600,
+            },
+        ];
+        client.set_royalty_splits(collection, &splits);
+
+        // Move close enough to expiry that any bump would be observable.
+        let royalty_key = DataKey::Royalty(collection.clone());
+        let splits_key = DataKey::Splits(collection.clone());
+        let ledger = env.ledger().sequence();
+        let timestamp = env.ledger().timestamp();
+        advance_ledger_to(&env, ledger + BUMP_AMOUNT - BUMP_THRESHOLD + 1, timestamp);
+        let royalty_ttl = entry_ttl(&env, &contract_id, &royalty_key);
+        let splits_ttl = entry_ttl(&env, &contract_id, &splits_key);
+        assert!(splits_ttl < BUMP_THRESHOLD);
+
+        env.set_auths(&[]);
+        assert_eq!(client.get_royalty_splits(collection), splits);
+        assert!(env.events().all().events().is_empty());
+        assert_eq!(entry_ttl(&env, &contract_id, &royalty_key), royalty_ttl);
+        assert_eq!(entry_ttl(&env, &contract_id, &splits_key), splits_ttl);
+        env.as_contract(&contract_id, || {
+            let stored: soroban_sdk::Vec<RoyaltyShare> =
+                env.storage().persistent().get(&splits_key).unwrap();
+            assert_eq!(stored, splits);
+            assert!(!env
+                .storage()
+                .persistent()
+                .has(&DataKey::Summary(collection.clone())));
+        });
     }
 
     // -------------------------------------------------------------------
