@@ -21,11 +21,12 @@
 
 use crate::{DataKey, Escrow, EscrowData, EscrowDataV1, EscrowStatus, SorobanForgeEscrowClient};
 use soroban_forge_shared_utils::{xdr_round_trip, ForgeError};
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_forge_test_utils::{FailureToken, FailureTokenClient};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{
     xdr::{FromXdr, ToXdr},
-    Address, Env,
+    Address, Env, Vec,
 };
 
 const START: u64 = 1_000_000;
@@ -256,6 +257,38 @@ fn deposit_with_insufficient_balance_fails_cleanly() {
     assert_eq!(tc.balance(&contract_id), 0);
     // State untouched: still Pending, retryable after topping up.
     assert_eq!(client.get_status(&id), EscrowStatus::Pending);
+}
+
+#[test]
+fn failure_token_pre_transfer_rejection_rolls_back_deposit_and_is_retryable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(START);
+    let token = env.register(FailureToken, ());
+    let token_client = FailureTokenClient::new(&env, &token);
+    let contract_id = env.register(Escrow, ());
+    let client = SorobanForgeEscrowClient::new(&env, &contract_id);
+    let accounts = soroban_forge_test_utils::TestAccounts::generate(&env);
+    token_client.mint(&accounts.user1, &AMOUNT);
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    token_client.set_fail_before_transfer(&true);
+
+    let err = client.try_deposit(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::TokenTransferFailed);
+    let record = client.get_escrow(&id);
+    assert_eq!(record.status, EscrowStatus::Pending);
+    assert_eq!(record.released, 0);
+    assert_eq!(token_client.balance(buyer), AMOUNT);
+    assert_eq!(token_client.balance(&contract_id), 0);
+    assert!(token_client.transfer_trace().is_empty());
+    assert!(env.events().all().events().is_empty());
+
+    token_client.set_fail_before_transfer(&false);
+    client.deposit(&id);
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+    assert_eq!(token_client.balance(&contract_id), AMOUNT);
+    assert_eq!(token_client.transfer_trace(), Vec::from_slice(&env, &[1]));
 }
 
 // -----------------------------------------------------------------------

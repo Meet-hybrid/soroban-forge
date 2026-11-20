@@ -285,7 +285,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn sha256_hex_file(path: &Path) -> Result<String> {
+/// Returns the lowercase SHA-256 of an artifact file, for deterministic reporting.
+pub fn sha256_hex_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     Ok(sha256_hex(&bytes))
 }
@@ -300,7 +301,8 @@ fn expect_valid_sha256(input: &str) -> Result<String> {
     Ok(input.to_ascii_lowercase())
 }
 
-fn infer_package_from_wasm_name(path: &Path) -> Result<String> {
+/// Infers the Forge contract package name from a WASM artifact file name.
+pub fn infer_package_from_wasm_name(path: &Path) -> Result<String> {
     let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())

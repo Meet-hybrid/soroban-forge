@@ -597,6 +597,128 @@ fn blank_envelope_aborts_reject_without_changing_tx() {
 }
 
 // -----------------------------------------------------------------------
+// cancel_tx — submitter-only withdrawal of a pending tx
+// -----------------------------------------------------------------------
+
+#[test]
+fn cancel_accepts_the_submitter_signature() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let target = env.register(MockTarget, ());
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
+    client.confirm(&tx_id, &accounts.user2);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel_tx",
+            args: (tx_id, &accounts.user1).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_cancel_tx(&tx_id, &accounts.user1)
+        .expect("outer ok")
+        .expect("contract ok");
+    let tx = client.get_tx(&tx_id);
+    assert_eq!(tx.status, TxStatus::Cancelled);
+    assert_eq!(tx.confirmations.len(), 1);
+}
+
+#[test]
+fn cancel_returns_unauthorized_for_a_non_submitter_with_an_armed_signature() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let target = env.register(MockTarget, ());
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
+
+    // A different owner signs a call claiming to be the submitter. The
+    // recorded-submitter check runs before require_auth, so this is a typed
+    // rejection rather than a host abort and the tx stays live.
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user2,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel_tx",
+            args: (tx_id, &accounts.user2).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_cancel_tx(&tx_id, &accounts.user2);
+    assert!(matches!(
+        res,
+        Err(Ok(soroban_forge_shared_utils::ForgeError::Unauthorized))
+    ));
+    assert_eq!(client.get_tx(&tx_id).status, TxStatus::Pending);
+}
+
+#[test]
+fn cancel_rejects_signature_replayed_for_another_tx() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let target = env.register(MockTarget, ());
+    let first_tx = client.submit(&accounts.user1, &target, &payload(&env), &None);
+    let second_tx = client.submit(&accounts.user1, &target, &payload(&env), &None);
+
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel_tx",
+            args: (first_tx, &accounts.user1).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_cancel_tx(&second_tx, &accounts.user1));
+    assert_eq!(client.get_tx(&first_tx).status, TxStatus::Pending);
+    assert_eq!(client.get_tx(&second_tx).status, TxStatus::Pending);
+}
+
+#[test]
+fn blank_envelope_aborts_cancel_without_changing_tx() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let target = env.register(MockTarget, ());
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
+    env.set_auths(&[]);
+
+    assert_auth_abort!(client.try_cancel_tx(&tx_id, &accounts.user1));
+    let tx = client.get_tx(&tx_id);
+    assert_eq!(tx.status, TxStatus::Pending);
+    assert_eq!(tx.confirmations.len(), 0);
+}
+
+#[test]
+fn cancel_authorization_tree_is_the_submitter_entrypoint_frame() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let target = env.register(MockTarget, ());
+    let tx_id = client.submit(&accounts.user1, &target, &payload(&env), &None);
+    let submitter = &accounts.user1;
+
+    client.cancel_tx(&tx_id, submitter);
+
+    assert_eq!(
+        env.auths(),
+        [(
+            submitter.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "cancel_tx"),
+                    (tx_id, submitter.clone()).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
+}
+
+// -----------------------------------------------------------------------
 // deposit — depositor-authorized custody pull
 // -----------------------------------------------------------------------
 

@@ -7,14 +7,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// A provenance manifest produced by `scripts/provenance.sh`
-/// (schema `soroban-forge/provenance@1`).
+/// (schema `soroban-forge/provenance@1` or `@2`).
 #[derive(Debug, Deserialize)]
 struct Manifest {
     schema: String,
     git_commit: Option<String>,
+    source_revision: Option<String>,
     generated_at: Option<String>,
     target: Option<String>,
+    cli_version: Option<String>,
+    lockfile_sha256: Option<String>,
+    bundle_sha256: Option<String>,
     artifacts: Vec<ManifestArtifact>,
+    #[serde(default)]
+    deployments: Vec<ManifestDeployment>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -22,6 +28,15 @@ struct ManifestArtifact {
     name: String,
     sha256: String,
     bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ManifestDeployment {
+    network: Option<String>,
+    contract_id: Option<String>,
+    contract_name: Option<String>,
+    artifact: Option<String>,
+    artifact_sha256: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
@@ -139,6 +154,9 @@ fn verify_manifest(manifest_path: &str, json: bool) -> Result<()> {
             ("git_commit", &manifest.git_commit),
             ("generated_at", &manifest.generated_at),
             ("target", &manifest.target),
+            ("cli_version", &manifest.cli_version),
+            ("lockfile_sha256", &manifest.lockfile_sha256),
+            ("bundle_sha256", &manifest.bundle_sha256),
         ] {
             if let Some(value) = value {
                 println!("  {label:<13} {value}");
@@ -177,6 +195,12 @@ fn verify_manifest(manifest_path: &str, json: bool) -> Result<()> {
 #[derive(Serialize)]
 struct ManifestSummary<'a> {
     ok: bool,
+    schema: &'a str,
+    source_revision: Option<&'a str>,
+    lockfile_sha256: Option<&'a str>,
+    bundle_sha256: Option<&'a str>,
+    cli_version: Option<&'a str>,
+    deployments: &'a [ManifestDeployment],
     artifacts: Vec<ArtifactResult<'a>>,
 }
 
@@ -217,6 +241,12 @@ enum ArtifactStatus {
 fn summarize_manifest<'a>(manifest: &'a Manifest, dir: &Path) -> Result<ManifestSummary<'a>> {
     let mut summary = ManifestSummary {
         ok: true,
+        schema: &manifest.schema,
+        source_revision: manifest.source_revision.as_deref(),
+        lockfile_sha256: manifest.lockfile_sha256.as_deref(),
+        bundle_sha256: manifest.bundle_sha256.as_deref(),
+        cli_version: manifest.cli_version.as_deref(),
+        deployments: &manifest.deployments,
         artifacts: Vec::with_capacity(manifest.artifacts.len()),
     };
     for artifact in &manifest.artifacts {
@@ -263,9 +293,11 @@ fn parse_manifest(path: &Path) -> Result<Manifest> {
         .with_context(|| format!("failed to read provenance manifest at {}", path.display()))?;
     let mut manifest: Manifest = serde_json::from_str(&raw)
         .with_context(|| format!("malformed provenance manifest at {}", path.display()))?;
-    if manifest.schema != "soroban-forge/provenance@1" {
+    if manifest.schema != "soroban-forge/provenance@1"
+        && manifest.schema != "soroban-forge/provenance@2"
+    {
         bail!(
-            "unsupported provenance manifest schema `{}` (expected `soroban-forge/provenance@1`)",
+            "unsupported provenance manifest schema `{}` (expected `soroban-forge/provenance@1` or `@2`)",
             manifest.schema
         );
     }
