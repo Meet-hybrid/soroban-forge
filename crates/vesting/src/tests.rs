@@ -1236,3 +1236,158 @@ fn claim_authorization_failure_preserves_balances_and_claimed_amounts() {
     assert_eq!(tc.balance(&contract_id), initial_contract_balance);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
 }
+
+// ---------------------------------------------------------------------------
+// refund_revoked — return the unvested remainder to the funder
+// ---------------------------------------------------------------------------
+
+#[test]
+fn refund_revoked_returns_unvested_remainder_to_funder() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    // floor(10_000 * 2_000 / 3_000) = 6_666 vested at revocation.
+    env.ledger().set_timestamp(START + CLIFF + 2_000);
+    client.revoke(&id);
+
+    assert_eq!(client.refund_revoked(&id), TOTAL - 6_666);
+    let emitted_events = env.events().all().filter_by_contract(&contract_id);
+    let expected_events = std::vec![events::RevokedRefunded {
+        schedule_id: id,
+        funder: accounts.deployer.clone(),
+        amount: TOTAL - 6_666,
+    }
+    .to_xdr(&env, &contract_id)];
+    assert_eq!(emitted_events.events(), expected_events.as_slice());
+    assert_eq!(tc.balance(&accounts.deployer), TOTAL - 6_666);
+    assert_eq!(tc.balance(&contract_id), 6_666);
+
+    // The beneficiary's frozen entitlement is untouched by the refund.
+    assert_eq!(client.claimable(&id), 6_666);
+    assert_eq!(client.claim(&id), 6_666);
+    assert_eq!(tc.balance(&accounts.user1), 6_666);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+}
+
+#[test]
+fn refund_revoked_before_cliff_refunds_the_full_allocation() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+    env.ledger().set_timestamp(START + CLIFF - 1);
+    client.revoke(&id);
+
+    assert_eq!(client.refund_revoked(&id), TOTAL);
+    assert_eq!(tc.balance(&accounts.deployer), TOTAL);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.claimable(&id), 0);
+}
+
+#[test]
+fn refund_revoked_is_zero_when_fully_vested_at_revocation() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+    // Fully vested but unclaimed, so the stored status still allows revoke.
+    env.ledger().set_timestamp(START + DURATION);
+    client.revoke(&id);
+    assert_eq!(client.get_schedule(&id).revoked_vested, Some(TOTAL));
+
+    assert_eq!(client.refund_revoked(&id), 0);
+    assert!(env
+        .events()
+        .all()
+        .filter_by_contract(&contract_id)
+        .events()
+        .is_empty());
+    assert_eq!(tc.balance(&accounts.deployer), 0);
+    assert_eq!(tc.balance(&contract_id), TOTAL);
+    assert_eq!(client.claim(&id), TOTAL);
+}
+
+#[test]
+fn refund_revoked_repeated_calls_never_transfer_twice() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+    env.ledger().set_timestamp(START + CLIFF + 1_000);
+    client.revoke(&id);
+
+    assert_eq!(client.refund_revoked(&id), TOTAL - 3_333);
+    env.ledger().set_timestamp(START + DURATION + 100);
+    for _ in 0..3 {
+        assert_eq!(client.refund_revoked(&id), 0);
+        assert!(env
+            .events()
+            .all()
+            .filter_by_contract(&contract_id)
+            .events()
+            .is_empty());
+    }
+    assert_eq!(tc.balance(&accounts.deployer), TOTAL - 3_333);
+    assert_eq!(tc.balance(&contract_id), 3_333);
+}
+
+#[test]
+fn refund_revoked_failed_transfer_records_nothing() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+    env.ledger().set_timestamp(START + CLIFF - 1);
+    client.revoke(&id);
+    // Drain custody so the refund transfer is rejected.
+    tc.transfer(&contract_id, &accounts.user2, &TOTAL);
+
+    assert_eq!(
+        client.try_refund_revoked(&id).unwrap_err().unwrap(),
+        ForgeError::TokenTransferFailed
+    );
+    assert_eq!(tc.balance(&accounts.deployer), 0);
+
+    // Nothing was recorded, so the full remainder is still refundable.
+    StellarAssetClient::new(&env, &token).mint(&contract_id, &TOTAL);
+    assert_eq!(client.refund_revoked(&id), TOTAL);
+    assert_eq!(tc.balance(&accounts.deployer), TOTAL);
+}
+
+#[test]
+fn refund_revoked_requires_a_revoked_linear_schedule() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    // Locked and Vesting schedules have not been revoked.
+    assert_eq!(
+        client.try_refund_revoked(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    env.ledger().set_timestamp(START + CLIFF + 1);
+    assert_eq!(
+        client.try_refund_revoked(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // A completed schedule cannot be revoked, so it cannot be refunded.
+    env.ledger().set_timestamp(START + DURATION);
+    assert_eq!(client.claim(&id), TOTAL);
+    assert_eq!(client.get_status(&id), VestingStatus::Completed);
+    assert_eq!(
+        client.try_refund_revoked(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    assert_eq!(
+        client.try_refund_revoked(&999).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+    let tranches = soroban_sdk::Vec::from_array(
+        &env,
+        [Tranche {
+            unlock_at: 0,
+            amount: 1_000,
+        }],
+    );
+    let tranche_id = client.create_tranche_schedule(&accounts.user1, &token, &tranches);
+    assert_eq!(
+        client.try_refund_revoked(&tranche_id).unwrap_err().unwrap(),
+        ForgeError::NotFound
+    );
+    assert_eq!(tc.balance(&accounts.deployer), 0);
+    assert_eq!(tc.balance(&contract_id), 0);
+}

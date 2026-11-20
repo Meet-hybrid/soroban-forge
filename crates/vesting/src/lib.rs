@@ -72,7 +72,7 @@
 //!   recorded on the linear schedule without authorizing (mirroring escrow's
 //!   non-consenting parties). `create_tranche_schedule` also requires its
 //!   beneficiary.
-//! - `revoke` requires the funder recorded at creation.
+//! - `revoke` and `refund_revoked` require the funder recorded at creation.
 //! - `reassign_beneficiary` requires the funder recorded at creation.
 //! - `claim` requires the current beneficiary; `claim_for` requires the
 //!   explicitly named beneficiary and can pay frozen balances from prior
@@ -110,12 +110,22 @@
 //!
 //! Revocation is pure state-machine logic: it writes the frozen amount and
 //! the status and moves no tokens. The frozen remainder is settled through
-//! the same SEP-41 transfer path as any other claim (issue #50), and the
-//! unvested remainder stays custodied by the contract — refunding it to the
-//! funder is settlement logic out of scope here. Revocation itself adds no
-//! storage tier (issue #55). There is no tranche `revoke`: a tranche table
-//! is immutable and fully pre-funded by construction, and an unmet future
-//! tranche already never unlocks.
+//! the same SEP-41 transfer path as any other claim (issue #50). Revocation
+//! itself adds no storage tier (issue #55). There is no tranche `revoke`: a
+//! tranche table is immutable and fully pre-funded by construction, and an
+//! unmet future tranche already never unlocks.
+//!
+//! ## Revoked refund
+//!
+//! The unvested remainder of a revoked linear schedule —
+//! `total_amount - revoked_vested` — is returned to the funder by
+//! `refund_revoked`, which requires the funder recorded at creation. The
+//! amount already refunded is tracked under its own
+//! `DataKey::RevokedRefund(u64)` key rather than a new `VestingSchedule`
+//! field, so stored schedule records keep their exact shape. The refund
+//! transfers before that key is written, and once the remainder has been
+//! returned a repeat call returns `0` without issuing a transfer. A schedule
+//! revoked after it had fully vested has nothing to refund and returns `0`.
 //!
 //! ## Upgrade compatibility
 //!
@@ -135,7 +145,9 @@
 //!   `DataKey::TrancheSchedule(u64)`, and `DataKey::Count` keys retain their
 //!   meaning. `FormerBeneficiaryClaim(u64, Address)` is additive; all remain
 //!   in instance storage pending the persistent-storage migration (issue
-//!   #55). The SEP-41 settlement path (issue #50) is unchanged.
+//!   #55). `RevokedRefund(u64)` is likewise additive and leaves the stored
+//!   `VestingSchedule` shape unchanged. The SEP-41 settlement path (issue
+//!   #50) is unchanged.
 //! - `claimable`, `claimable_for`, `get_status`, `get_schedule`, and
 //!   `get_tranche_schedule` are read-only views.
 //!
@@ -239,6 +251,29 @@ pub trait SorobanForgeVesting {
     /// * [`ForgeError::Unauthorized`] — the funder authorization is missing
     ///   or invalid (a non-funder caller is rejected at the host).
     fn revoke(env: Env, schedule_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Return the unvested remainder of a revoked linear schedule to its
+    /// funder, and return the amount transferred.
+    ///
+    /// Refunds `total_amount - revoked_vested - already_refunded`. The SEP-41
+    /// transfer runs before the refunded amount is recorded. Returns `0`
+    /// without a transfer when nothing is left to refund (fully vested at
+    /// revocation, or already refunded). Requires the `funder` recorded at
+    /// creation.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no linear schedule with this id (a
+    ///   tranche id is `NotFound` here).
+    /// * [`ForgeError::InvalidInput`] — the schedule is not `Revoked`.
+    /// * [`ForgeError::ArithmeticOverflow`] — the refundable amount does not
+    ///   fit the recorded totals.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the refund; nothing is recorded.
+    fn refund_revoked(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 
     /// Reassign a linear schedule's unvested balance to a new beneficiary.
     /// Vested-but-unclaimed tokens at the reassignment timestamp stay with
@@ -434,6 +469,9 @@ enum DataKey {
     Count,
     /// Frozen, unclaimed amount owed to a former beneficiary.
     FormerBeneficiaryClaim(u64, Address),
+    /// Unvested amount of a revoked linear schedule already refunded to its
+    /// funder. Absent until the first refund.
+    RevokedRefund(u64),
 }
 
 /// A stored schedule of either kind, as returned by [`Vesting::load`].
@@ -582,6 +620,56 @@ impl Vesting {
                 Ok(())
             }
         }
+    }
+
+    /// Refund the unvested remainder of a revoked linear schedule to its
+    /// funder and return the amount transferred.
+    ///
+    /// The refundable amount is `total_amount - revoked_vested -
+    /// already_refunded`, computed with checked arithmetic. The SEP-41
+    /// transfer runs before the refunded total is written, so a failed
+    /// transfer records nothing. When nothing is refundable the call returns
+    /// `0` without a transfer, a write, or an event, so repeating it can never
+    /// pay twice.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no linear schedule with this id.
+    /// * [`ForgeError::InvalidInput`] — the schedule is not `Revoked`.
+    /// * [`ForgeError::ArithmeticOverflow`] — the refundable amount does not
+    ///   fit the recorded totals.
+    /// * [`ForgeError::TokenTransferFailed`] — the token rejected the refund.
+    pub fn refund_revoked(env: Env, schedule_id: u64) -> Result<i128, ForgeError> {
+        let schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(ForgeError::NotFound)?;
+        let revoked_vested = match (&schedule.status, schedule.revoked_vested) {
+            (VestingStatus::Revoked, Some(frozen)) => frozen,
+            _ => return Err(ForgeError::InvalidInput),
+        };
+        schedule.funder.require_auth();
+
+        let key = DataKey::RevokedRefund(schedule_id);
+        let refunded: i128 = env.storage().instance().get(&key).unwrap_or(0);
+        let amount = schedule
+            .total_amount
+            .checked_sub(revoked_vested)
+            .and_then(|unvested| unvested.checked_sub(refunded))
+            .filter(|amount| *amount >= 0)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        if amount == 0 {
+            return Ok(0);
+        }
+
+        transfer_from_contract(&env, &schedule.token, &schedule.funder, amount)?;
+        let total_refunded = refunded
+            .checked_add(amount)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        env.storage().instance().set(&key, &total_refunded);
+        events::revoked_refunded(&env, schedule_id, &schedule.funder, amount);
+        Ok(amount)
     }
 
     /// Reassign only a linear schedule's unvested balance.
@@ -1067,7 +1155,8 @@ impl Vesting {
     }
 }
 
-/// Events emitted to both beneficiaries when a linear schedule is reassigned.
+/// Events emitted when a linear schedule is reassigned (to both
+/// beneficiaries) or when a revoked schedule's unvested remainder is refunded.
 pub mod events {
     use soroban_sdk::{contractevent, Address, Env};
 
@@ -1091,6 +1180,26 @@ pub mod events {
         pub old_beneficiary: Address,
         pub vested_unclaimed: i128,
         pub reassignment_count: u32,
+    }
+
+    /// The unvested remainder of a revoked schedule was returned to its
+    /// funder.
+    #[contractevent]
+    pub struct RevokedRefunded {
+        #[topic]
+        pub schedule_id: u64,
+        #[topic]
+        pub funder: Address,
+        pub amount: i128,
+    }
+
+    pub fn revoked_refunded(env: &Env, schedule_id: u64, funder: &Address, amount: i128) {
+        RevokedRefunded {
+            schedule_id,
+            funder: funder.clone(),
+            amount,
+        }
+        .publish(env);
     }
 
     pub fn beneficiary_reassigned(

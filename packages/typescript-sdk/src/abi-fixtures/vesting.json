@@ -163,6 +163,18 @@
       ]
     },
     {
+      "name": "refund_revoked",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "revoke",
       "inputs": [
         {
@@ -225,6 +237,24 @@
         {
           "name": "reassignment_count",
           "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "RevokedRefunded",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
         }
       ]
     }
