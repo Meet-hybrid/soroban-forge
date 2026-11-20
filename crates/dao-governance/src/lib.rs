@@ -110,7 +110,8 @@
 //!   self-authorization covers the outgoing transfer.
 //! - `cancel_proposal` requires the original proposer and freezes a
 //!   not-yet-executed proposal; the refund runs in that same call.
-//! - `get_proposal` and `get_bond_config` are read-only views.
+//! - `get_proposal`, `get_proposal_status`, and `get_bond_config` are read-only
+//!   views.
 //!
 //! The `Queued` state is reserved for an optional timelock that lands in a
 //! follow-up; it is not reachable through the current public interface.
@@ -277,6 +278,12 @@ pub trait SorobanForgeDaoGovernance {
         proposal_id: u64,
     ) -> Result<Proposal, soroban_forge_shared_utils::ForgeError>;
 
+    /// Read a read-only proposal status summary (read-only view).
+    fn get_proposal_status(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<ProposalStatus, soroban_forge_shared_utils::ForgeError>;
+
     /// Return the total number of proposals created (read-only view).
     fn get_proposal_count(env: Env) -> u64;
 
@@ -424,6 +431,32 @@ pub struct DependencyView {
     pub requires: soroban_sdk::Vec<u64>,
     /// Proposal whose execution blocks this proposal.
     pub conflicts_with: Option<u64>,
+}
+
+/// A read-only summary of a proposal's readiness state.
+///
+/// Returned by [`SorobanForgeDaoGovernance::get_proposal_status`].
+/// Distinguishes executable, retryable, expired, rejected, and terminal
+/// states where applicable.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalStatus {
+    /// Tally of "against" votes in governance-token units.
+    pub against_votes: i128,
+    /// Tally of "for" votes in governance-token units.
+    pub for_votes: i128,
+    /// Whether the proposal can be executed now (i.e. `Succeeded` with
+    /// dependencies met and voting deadline passed).
+    pub is_executable: bool,
+    /// Whether the proposal is in a retryable state (e.g. `Succeeded` whose
+    /// target invocation previously failed; bond still in custody).
+    pub is_retryable: bool,
+    /// Unique proposal identifier.
+    pub proposal_id: u64,
+    /// Current lifecycle state of the proposal.
+    pub state: ProposalState,
+    /// Ledger timestamp at which voting closes (0 if proposal is not `Active`).
+    pub voting_ends: u64,
 }
 
 /// Bump a persistent entry's TTL to the workspace policy's 30-day horizon
@@ -924,6 +957,35 @@ impl DaoGovernance {
         Self::get_proposal_impl(&env, proposal_id)
     }
 
+    /// Read a read-only proposal status summary (read-only view).
+    ///
+    /// Pure view: never writes storage, extends TTLs, or emits events. An
+    /// unknown proposal yields [`ForgeError::NotFound`]. A `Succeeded`
+    /// proposal is executable once voting has closed and all dependencies
+    /// are satisfied; it stays retryable while its bond is still in custody
+    /// and no dependency has permanently blocked execution.
+    pub fn get_proposal_status(env: Env, proposal_id: u64) -> Result<ProposalStatus, ForgeError> {
+        let proposal = Self::get_proposal_impl(&env, proposal_id)?;
+        let dependency_check = Self::check_dependencies(&env, &proposal);
+        let succeeded = proposal.state == ProposalState::Succeeded;
+        let active = proposal.state == ProposalState::Active;
+        let deadline_passed = env.ledger().timestamp() >= proposal.voting_ends;
+        let dependencies_met = dependency_check.is_ok();
+        let dependencies_recoverable =
+            matches!(dependency_check, Ok(()) | Err(ForgeError::DeadlineReached));
+        Ok(ProposalStatus {
+            against_votes: proposal.against_votes,
+            for_votes: proposal.for_votes,
+            is_executable: succeeded && deadline_passed && dependencies_met,
+            is_retryable: succeeded
+                && proposal.bond_state == BondState::Posted
+                && dependencies_recoverable,
+            proposal_id: proposal.proposal_id,
+            state: proposal.state,
+            voting_ends: if active { proposal.voting_ends } else { 0 },
+        })
+    }
+
     /// Return a proposal's dependency edges for indexers.
     pub fn get_dependencies(env: Env, proposal_id: u64) -> Result<DependencyView, ForgeError> {
         let proposal = Self::get_proposal_impl(&env, proposal_id)?;
@@ -1255,7 +1317,9 @@ mod tests {
     use super::*;
 
     use soroban_forge_test_utils::{FailureSchedule, MockTarget, MockTargetClient, TestAccounts};
-    use soroban_sdk::testutils::{storage::Instance as _, Address as _, Events as _, Ledger as _};
+    use soroban_sdk::testutils::{
+        storage::Instance as _, storage::Persistent as _, Address as _, Events as _, Ledger as _,
+    };
 
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{Bytes, Env};
@@ -2284,6 +2348,219 @@ mod tests {
         let (_env, client, _accounts, _id, _target_id) = setup!();
         let err = client.try_get_proposal(&999).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn proposal_status_missing_is_not_found() {
+        let (_env, client, _accounts, _id, _target_id) = setup!();
+        let err = client.try_get_proposal_status(&999).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::NotFound);
+    }
+
+    #[test]
+    fn proposal_status_tracks_active_readiness() {
+        let (_env, client, accounts, proposal_id, _target_id) = setup!();
+        let status = client.get_proposal_status(&proposal_id);
+        assert_eq!(status.proposal_id, proposal_id);
+        assert_eq!(status.state, ProposalState::Active);
+        assert_eq!(status.for_votes, 0);
+        assert_eq!(status.against_votes, 0);
+        assert_eq!(status.voting_ends, START + DURATION);
+        assert!(!status.is_executable);
+        assert!(!status.is_retryable);
+
+        client.vote(&proposal_id, &accounts.user2, &true);
+        let status = client.get_proposal_status(&proposal_id);
+        assert_eq!(status.for_votes, FUNDS);
+        assert_eq!(status.against_votes, 0);
+        assert_eq!(status.voting_ends, START + DURATION);
+        assert!(!status.is_executable);
+        assert!(!status.is_retryable);
+    }
+
+    #[test]
+    fn proposal_status_marks_succeeded_executable_then_terminal() {
+        let (env, client, accounts, proposal_id, _target_id) = setup!();
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+
+        client.execute(&proposal_id);
+        let status = client.get_proposal_status(&proposal_id);
+        assert_eq!(status.state, ProposalState::Succeeded);
+        assert_eq!(status.for_votes, FUNDS);
+        assert_eq!(status.voting_ends, 0);
+        assert!(status.is_executable);
+        assert!(status.is_retryable);
+
+        client.execute(&proposal_id);
+        let status = client.get_proposal_status(&proposal_id);
+        assert_eq!(status.state, ProposalState::Executed);
+        assert_eq!(status.voting_ends, 0);
+        assert!(!status.is_executable);
+        assert!(!status.is_retryable);
+    }
+
+    #[test]
+    fn proposal_status_keeps_failed_dispatch_retryable() {
+        let (env, _token, _token_client, _contract_id, client, accounts) = bonded_env!();
+        let target_id = env.register(MockTarget, ());
+        let target = MockTargetClient::new(&env, &target_id);
+        target.set_revert(&true);
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.vote(&proposal_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+
+        let status = client.get_proposal_status(&proposal_id);
+        assert_eq!(status.state, ProposalState::Succeeded);
+        assert!(status.is_executable);
+        assert!(status.is_retryable);
+
+        let err = client.try_execute(&proposal_id).unwrap_err().unwrap();
+        assert_eq!(err, ForgeError::ContractInvocationFailed);
+        let status = client.get_proposal_status(&proposal_id);
+        assert_eq!(status.state, ProposalState::Succeeded);
+        assert!(status.is_executable);
+        assert!(status.is_retryable);
+
+        target.set_revert(&false);
+        client.execute(&proposal_id);
+        let status = client.get_proposal_status(&proposal_id);
+        assert_eq!(status.state, ProposalState::Executed);
+        assert!(!status.is_executable);
+        assert!(!status.is_retryable);
+    }
+
+    #[test]
+    fn proposal_status_waits_for_pending_dependency() {
+        let (env, client, accounts, parent_id, target_id) = setup!();
+        let child_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::vec![&env, parent_id],
+            &None,
+        );
+        client.vote(&child_id, &accounts.user2, &true);
+        client.vote(&parent_id, &accounts.user2, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&child_id);
+
+        let status = client.get_proposal_status(&child_id);
+        assert_eq!(status.state, ProposalState::Succeeded);
+        assert!(!status.is_executable);
+        assert!(status.is_retryable);
+
+        client.execute(&parent_id);
+        let status = client.get_proposal_status(&child_id);
+        assert!(!status.is_executable);
+        assert!(status.is_retryable);
+
+        client.execute(&parent_id);
+        let status = client.get_proposal_status(&child_id);
+        assert_eq!(status.state, ProposalState::Succeeded);
+        assert!(status.is_executable);
+        assert!(status.is_retryable);
+    }
+
+    #[test]
+    fn proposal_status_blocks_retry_when_dependency_is_defeated() {
+        let (env, client, accounts, parent_id, target_id) = setup!();
+        let child_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::vec![&env, parent_id],
+            &None,
+        );
+        client.vote(&child_id, &accounts.user2, &true);
+        client.vote(&parent_id, &accounts.user2, &false);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&child_id);
+        client.execute(&parent_id);
+
+        let status = client.get_proposal_status(&child_id);
+        assert_eq!(status.state, ProposalState::Succeeded);
+        assert!(!status.is_executable);
+        assert!(!status.is_retryable);
+    }
+
+    #[test]
+    fn proposal_status_reports_defeated_and_cancelled_as_terminal() {
+        let (env, client, accounts, defeated_id, target_id) = setup!();
+        client.vote(&defeated_id, &accounts.user2, &false);
+        let cancelled_id = client.propose(
+            &accounts.user3,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&defeated_id);
+        client.cancel_proposal(&cancelled_id, &accounts.user3);
+
+        let status = client.get_proposal_status(&defeated_id);
+        assert_eq!(status.state, ProposalState::Defeated);
+        assert_eq!(status.for_votes, 0);
+        assert_eq!(status.against_votes, FUNDS);
+        assert_eq!(status.voting_ends, 0);
+        assert!(!status.is_executable);
+        assert!(!status.is_retryable);
+
+        let status = client.get_proposal_status(&cancelled_id);
+        assert_eq!(status.state, ProposalState::Cancelled);
+        assert_eq!(status.voting_ends, 0);
+        assert!(!status.is_executable);
+        assert!(!status.is_retryable);
+    }
+
+    #[test]
+    fn proposal_status_query_does_not_mutate_state_or_emit_events() {
+        let (env, _token, _token_client, contract_id, client, accounts, target_id) = fresh_bond!();
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.vote(&proposal_id, &accounts.user2, &true);
+
+        let proposal_before = client.get_proposal(&proposal_id);
+        let ttl_before = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Proposal(proposal_id))
+        });
+        let events_before = env.events().all().events().len();
+        let sequence_before = env.ledger().sequence();
+
+        let _ = client.get_proposal_status(&proposal_id);
+
+        assert_eq!(client.get_proposal(&proposal_id), proposal_before);
+        assert_eq!(
+            env.as_contract(&contract_id, || {
+                env.storage()
+                    .persistent()
+                    .get_ttl(&DataKey::Proposal(proposal_id))
+            }),
+            ttl_before,
+            "status query changed TTL"
+        );
+        assert_eq!(env.events().all().events().len(), events_before);
+        assert_eq!(env.ledger().sequence(), sequence_before);
     }
 
     #[test]

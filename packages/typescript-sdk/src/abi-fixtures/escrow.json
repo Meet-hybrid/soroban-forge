@@ -99,6 +99,42 @@
       ]
     },
     {
+      "name": "create_escrow_with_arbiter_fee",
+      "inputs": [
+        {
+          "name": "buyer",
+          "type": "address"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "arbiter",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "timeout",
+          "type": "u64"
+        },
+        {
+          "name": "arbiter_fee_bps",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "create_escrow_with_review",
       "inputs": [
         {
@@ -271,6 +307,18 @@
       ]
     },
     {
+      "name": "get_arbiter_fee_bps",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "u32"
+      ]
+    },
+    {
       "name": "get_basket",
       "inputs": [
         {
@@ -332,6 +380,18 @@
       ],
       "outputs": [
         "result<udt:EscrowStatus,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "preflight_deposit",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "udt:DepositPreflight"
       ]
     },
     {
@@ -715,6 +775,28 @@
       ]
     },
     {
+      "name": "DisputeResolvedWithFee",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "arbiter_fee",
+          "type": "i128"
+        },
+        {
+          "name": "seller_award",
+          "type": "i128"
+        },
+        {
+          "name": "buyer_award",
+          "type": "i128"
+        }
+      ]
+    },
+    {
       "name": "Disputed",
       "dataFormat": "scSpecEventDataFormatMap",
       "params": [
@@ -943,6 +1025,70 @@
         {
           "name": "timeout",
           "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "DepositPreflight",
+      "fields": [
+        {
+          "name": "allowance",
+          "type": "option<i128>"
+        },
+        {
+          "name": "buyer",
+          "type": "option<address>"
+        },
+        {
+          "name": "buyer_balance",
+          "type": "option<i128>"
+        },
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "required_amount",
+          "type": "i128"
+        },
+        {
+          "name": "status",
+          "type": "udt:DepositPreflightStatus"
+        },
+        {
+          "name": "token",
+          "type": "option<address>"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "DepositPreflightStatus",
+      "variants": [
+        {
+          "name": "Sufficient",
+          "types": []
+        },
+        {
+          "name": "InsufficientBalance",
+          "types": []
+        },
+        {
+          "name": "InsufficientAllowance",
+          "types": []
+        },
+        {
+          "name": "Unavailable",
+          "types": []
+        },
+        {
+          "name": "InvalidInput",
+          "types": []
+        },
+        {
+          "name": "UnknownEscrow",
+          "types": []
         }
       ]
     },

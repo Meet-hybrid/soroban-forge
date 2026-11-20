@@ -48,6 +48,31 @@ pub struct DeployArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct DeployCheckArgs {
+    /// Deployment manifest emitted by `scripts/deploy-testnet.sh`.
+    #[arg(long, default_value = "artifacts/testnet-deployment-manifest.json")]
+    pub manifest: PathBuf,
+    /// Contract key to check; repeat or comma-separate to select several.
+    #[arg(long, value_delimiter = ',')]
+    pub contract: Vec<String>,
+    /// Network override; defaults to the manifest network, then `testnet`.
+    #[arg(long)]
+    pub network: Option<String>,
+    /// Public source account for the simulation-only read check.
+    ///
+    /// The all-zero account is used by default; `--send no` never signs, so
+    /// no secret key is involved.
+    #[arg(
+        long = "source-account",
+        default_value = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+    )]
+    pub source: String,
+    /// Emit a machine-readable JSON summary.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct NewArgs {
     /// Contract name (alphanumeric, hyphens, or underscores).
     pub name: String,

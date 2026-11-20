@@ -148,31 +148,49 @@ fn validate_rpc_url(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
 
-    fn temp_profiles(contents: &str) -> tempfile::NamedTempFile {
+    static PROFILE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ProfileEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        _file: tempfile::NamedTempFile,
+    }
+
+    impl Drop for ProfileEnvGuard {
+        fn drop(&mut self) {
+            env::remove_var("SOROBAN_FORGE_NETWORK_PROFILES");
+        }
+    }
+
+    fn profile_env(contents: &str) -> ProfileEnvGuard {
+        let lock = PROFILE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let file = tempfile::NamedTempFile::new().expect("temp profile file");
         fs::write(file.path(), contents).expect("write profile file");
-        file
+        env::set_var("SOROBAN_FORGE_NETWORK_PROFILES", file.path());
+        ProfileEnvGuard {
+            _lock: lock,
+            _file: file,
+        }
     }
 
     #[test]
     fn resolves_named_profile() {
-        let file = temp_profiles(
+        let _guard = profile_env(
             "[profiles.local]\nrpc_url = \"http://127.0.0.1:8000\"\nnetwork_passphrase = \"Standalone Network ; February 2017\"\n",
         );
-        env::set_var("SOROBAN_FORGE_NETWORK_PROFILES", file.path());
         let resolved = resolve_network(None, Some("local"), None, None).expect("resolve profile");
         assert_eq!(resolved.name, "local");
         assert_eq!(resolved.rpc_url.as_deref(), Some("http://127.0.0.1:8000"));
-        env::remove_var("SOROBAN_FORGE_NETWORK_PROFILES");
     }
 
     #[test]
     fn explicit_flags_override_profile() {
-        let file = temp_profiles(
+        let _guard = profile_env(
             "[profiles.custom]\nrpc_url = \"https://profile.example\"\nnetwork_passphrase = \"Profile passphrase\"\n",
         );
-        env::set_var("SOROBAN_FORGE_NETWORK_PROFILES", file.path());
         let resolved = resolve_network(
             Some("override"),
             Some("custom"),
@@ -189,38 +207,31 @@ mod tests {
             resolved.network_passphrase.as_deref(),
             Some("Override passphrase")
         );
-        env::remove_var("SOROBAN_FORGE_NETWORK_PROFILES");
     }
 
     #[test]
     fn unknown_profile_is_actionable() {
-        let file = temp_profiles("[profiles.local]\nrpc_url = \"https://local.example\"\nnetwork_passphrase = \"Local\"\n");
-        env::set_var("SOROBAN_FORGE_NETWORK_PROFILES", file.path());
+        let _guard = profile_env("[profiles.local]\nrpc_url = \"https://local.example\"\nnetwork_passphrase = \"Local\"\n");
         let error =
             resolve_network(None, Some("missing"), None, None).expect_err("unknown profile");
         assert!(error
             .to_string()
             .contains("unknown network profile 'missing'"));
-        env::remove_var("SOROBAN_FORGE_NETWORK_PROFILES");
     }
 
     #[test]
     fn incomplete_profile_is_rejected() {
-        let file = temp_profiles("[profiles.local]\nrpc_url = \"https://local.example\"\n");
-        env::set_var("SOROBAN_FORGE_NETWORK_PROFILES", file.path());
+        let _guard = profile_env("[profiles.local]\nrpc_url = \"https://local.example\"\n");
         let error =
             resolve_network(None, Some("local"), None, None).expect_err("incomplete profile");
         assert!(error.to_string().contains("missing network_passphrase"));
-        env::remove_var("SOROBAN_FORGE_NETWORK_PROFILES");
     }
 
     #[test]
     fn malformed_profile_file_is_rejected() {
-        let file = temp_profiles("[profiles.local\nrpc_url =");
-        env::set_var("SOROBAN_FORGE_NETWORK_PROFILES", file.path());
+        let _guard = profile_env("[profiles.local\nrpc_url =");
         let error = resolve_network(None, Some("local"), None, None).expect_err("malformed file");
         assert!(error.to_string().contains("malformed network profile file"));
-        env::remove_var("SOROBAN_FORGE_NETWORK_PROFILES");
     }
 
     #[test]
@@ -233,12 +244,10 @@ mod tests {
 
     #[test]
     fn secret_fields_are_rejected() {
-        let file = temp_profiles(
+        let _guard = profile_env(
             "[profiles.local]\nrpc_url = \"https://local.example\"\nnetwork_passphrase = \"Local\"\nsecret_key = \"SAAAA\"\n",
         );
-        env::set_var("SOROBAN_FORGE_NETWORK_PROFILES", file.path());
         let error = resolve_network(None, Some("local"), None, None).expect_err("secret field");
         assert!(error.to_string().contains("malformed network profile file"));
-        env::remove_var("SOROBAN_FORGE_NETWORK_PROFILES");
     }
 }

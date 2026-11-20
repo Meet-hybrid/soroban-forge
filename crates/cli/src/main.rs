@@ -22,8 +22,9 @@ mod decode_failure;
 
 use clap::{Parser, Subcommand};
 use cli::{
-    BuildArgs, CompareArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs,
-    NewArgs, ScaffoldValidateArgs, StorageDiffArgs, TestArgs, ValidatePlanArgs, VerifyArgs,
+    BuildArgs, CompareArgs, DeployArgs, DeployCheckArgs, DoctorArgs, EventsArgs, InspectArgs,
+    InvokeArgs, LintArgs, NewArgs, ScaffoldValidateArgs, StorageDiffArgs, TestArgs,
+    ValidatePlanArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 
@@ -45,6 +46,12 @@ pub enum Commands {
     Lint(LintArgs),
     Test(TestArgs),
     Deploy(DeployArgs),
+    #[command(
+        name = "deploy-check",
+        visible_alias = "smoke",
+        about = "Check deployed contracts using the deployment manifest"
+    )]
+    DeployCheck(DeployCheckArgs),
     New(NewArgs),
     ScaffoldValidate(ScaffoldValidateArgs),
     Verify(VerifyArgs),
@@ -71,6 +78,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Lint(args) => commands::lint::run(args)?,
         Commands::Test(args) => commands::test::run(args)?,
         Commands::Deploy(args) => commands::deploy::run(args)?,
+        Commands::DeployCheck(args) => commands::deploy_check::run(args)?,
         Commands::New(args) => commands::new::run(args)?,
         Commands::ScaffoldValidate(args) => commands::scaffold_validate::run(args)?,
         Commands::Verify(args) => commands::verify::run(args)?,
@@ -375,5 +383,42 @@ mod tests {
         );
         assert!(args.json);
         assert_eq!(args.network.as_deref(), Some("testnet"));
+    }
+
+    #[test]
+    fn deploy_check_flags_and_smoke_alias_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "deploy-check",
+            "--manifest",
+            "artifacts/testnet-deployment-manifest.json",
+            "--contract",
+            "escrow,vesting",
+            "--network",
+            "testnet",
+            "--source-account",
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            "--json",
+        ])
+        .unwrap();
+
+        let Commands::DeployCheck(args) = cli.command else {
+            panic!("expected deploy-check command");
+        };
+        assert_eq!(
+            args.manifest,
+            std::path::PathBuf::from("artifacts/testnet-deployment-manifest.json")
+        );
+        assert_eq!(args.contract, vec!["escrow", "vesting"]);
+        assert_eq!(args.network.as_deref(), Some("testnet"));
+        assert_eq!(
+            args.source,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+        );
+        assert!(args.json);
+
+        let aliased =
+            Cli::try_parse_from(["soroban-forge", "smoke", "--manifest", "receipt.json"]).unwrap();
+        assert!(matches!(aliased.command, Commands::DeployCheck(_)));
     }
 }
