@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node --experimental-strip-types --test src/app/state-transitions.test.ts src/tests/demo-state.test.ts"
+    "test": "node --experimental-strip-types --test src/app/state-transitions.test.ts src/app/diagnostics.test.ts src/tests/demo-state.test.ts"
   },
   "dependencies": {
     "@creit.tech/stellar-wallets-kit": "^2.8.0",

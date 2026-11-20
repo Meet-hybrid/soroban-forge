@@ -32,6 +32,11 @@ import {
   type ContractType,
 } from "./state";
 import VestingDashboard from "./vesting-dashboard";
+import DiagnosticsPanel from "./diagnostics-panel";
+import {
+  type DiagnosticsConfig,
+  type DiagnosticsProbes,
+} from "./diagnostics";
 import { Server } from "@stellar/stellar-sdk/rpc";
 import {
   createPendingReceipt,
@@ -66,6 +71,13 @@ const NETWORK_PASSPHRASE = networks.testnet.networkPassphrase;
 const CONTRACT_ID = networks.testnet.contractId;
 const VESTING_CONTRACT_ID =
   "CCSBFC3YMSGREWJ65RWR6TT3YPH3AJ7UDTJBMWUJCOLUEBELUJBXH2ZT";
+
+const DIAGNOSTICS_CONFIG: DiagnosticsConfig = {
+  networkName: "Stellar Testnet",
+  networkPassphrase: NETWORK_PASSPHRASE,
+  rpcUrl: RPC_URL,
+  contractId: CONTRACT_ID,
+};
 
 function doesNotSupportNetworkCheck(error: unknown): boolean {
   return (
@@ -117,22 +129,61 @@ export default function Home() {
   const [walletBusy, setWalletBusy] = useState(false);
   const [friendbotBusy, setFriendbotBusy] = useState(false);
 
-  const ensureTestnetWallet = useCallback(async (): Promise<boolean> => {
+  const readWalletNetwork = useCallback(async () => {
     try {
       const walletNetwork = await StellarWalletsKit.getNetwork();
-      if (walletNetwork.networkPassphrase !== NETWORK_PASSPHRASE) {
-        throw new Error(
-          `Wallet network mismatch: the connected wallet is set to ${walletNetwork.network}; this example requires Stellar Testnet.`
-        );
-      }
-      return true;
+      return {
+        network:
+          typeof walletNetwork.network === "string"
+            ? walletNetwork.network
+            : "unknown",
+        networkPassphrase:
+          typeof walletNetwork.networkPassphrase === "string"
+            ? walletNetwork.networkPassphrase
+            : "",
+      };
     } catch (error) {
       if (doesNotSupportNetworkCheck(error)) {
-        return false;
+        return null;
       }
       throw error;
     }
   }, []);
+
+  const ensureTestnetWallet = useCallback(async (): Promise<boolean> => {
+    const walletNetwork = await readWalletNetwork();
+    if (walletNetwork === null) {
+      return false;
+    }
+    if (walletNetwork.networkPassphrase !== NETWORK_PASSPHRASE) {
+      throw new Error(
+        `Wallet network mismatch: the connected wallet is set to ${walletNetwork.network}; this example requires Stellar Testnet.`
+      );
+    }
+    return true;
+  }, [readWalletNetwork]);
+
+  const diagnosticsServer = useMemo(() => new Server(RPC_URL), []);
+
+  const probeDiagnosticsContract = useCallback(async () => {
+    if (!client) {
+      throw new Error("Connect a wallet before running the read-only contract probe.");
+    }
+    await client.escrows_for_participant({
+      participant: CONTRACT_ID,
+      cursor: 0,
+      limit: 1,
+    });
+  }, [client]);
+
+  const diagnosticsProbes = useMemo<DiagnosticsProbes>(
+    () => ({
+      getLatestLedger: () => diagnosticsServer.getLatestLedger(),
+      probeContract: client ? probeDiagnosticsContract : undefined,
+      getWalletNetwork: account ? readWalletNetwork : undefined,
+    }),
+    [account, client, diagnosticsServer, probeDiagnosticsContract, readWalletNetwork]
+  );
 
   // Demo / Local state
   const [selectedDemoRole, setSelectedDemoRole] =
@@ -1048,27 +1099,6 @@ export default function Home() {
     txState.stage === "submitting";
 
   return (
-    <main className="mx-auto max-w-5xl p-6">
-      <div className="mb-1 flex items-center justify-between gap-4">
-        <h1 className="text-3xl font-bold">Soroban Forge — Escrow Testnet Demo</h1>
-        <a href="/ui/index.html" className="shrink-0 rounded border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
-          Dashboard screens
-        </a>
-      </div>
-      <p className="text-sm text-gray-500 mb-6">
-        Contract{" "}
-        <code className="break-all">{CONTRACT_ID}</code> ·{" "}
-        {NETWORK_PASSPHRASE}
-      </p>
-
-      {/* Wallet */}
-      <section className="rounded-xl border border-gray-300 p-4 mb-6">
-        <h2 className="text-lg font-semibold mb-2">1 · Wallet</h2>
-        {account ? (
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="font-mono text-sm break-all">{account}</span>
-            <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-800">
-              connected
     <main className="mx-auto max-w-5xl p-6 font-sans text-gray-900">
       {/* Testnet-Only & Unaudited Banner */}
       <div className="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-4 shadow-sm">
@@ -1492,6 +1522,15 @@ export default function Home() {
           </div>
         )}
       </section>
+
+      {mode === "testnet" && (
+        <DiagnosticsPanel
+          config={DIAGNOSTICS_CONFIG}
+          probes={diagnosticsProbes}
+          enabled
+          refreshKey={account ?? "no-wallet"}
+        />
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Section 2: Create Escrow */}
