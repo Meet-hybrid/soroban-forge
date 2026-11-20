@@ -418,6 +418,18 @@ export interface Client {
   authorize_provider: ({subscriber, provider}: {subscriber: string, provider: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
+   * Construct and simulate a cancel_by_provider transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Cancel a subscription on the provider's side, refunding any unspent
+   * prepaid balance to the subscriber.
+   *
+   * Requires the provider. Valid when `Active`, `Paused`, or `PastDue`;
+   * cancelling an already-cancelled subscription is rejected. Settles
+   * exactly like the subscriber's `cancel`: the refund transfer runs
+   * before the cancellation is stored.
+   */
+  cancel_by_provider: ({subscription_id}: {subscription_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
    * Construct and simulate a get_subscription_count transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Total number of subscriptions created so far (read-only view).
    *
@@ -504,6 +516,7 @@ export class Client extends ContractClient {
         "AAAAAQAAADNVc2FnZSBtZXRlcmVkIGZvciBvbmUgbWV0cmljIGluIG9uZSBiaWxsaW5nIHBlcmlvZC4AAAAAAAAAAAtVc2FnZVJlY29yZAAAAAAEAAAAFlRoZSBtZXRlcmVkIGRpbWVuc2lvbi4AAAAAAAZtZXRyaWMAAAAAABEAAACnVGhlIGBsYXN0X2NoYXJnZWRgIHRoaXMgbWV0ZXIgYmVsb25ncyB0by4gQSBtZXRlciB3aG9zZSBzdGFtcCBubwpsb25nZXIgbWF0Y2hlcyB0aGUgc3Vic2NyaXB0aW9uJ3Mgb3BlbiBwZXJpb2QgaXMgbm90IGNvdW50ZWQsIGFuZCB0aGUKbmV4dCBgcmVjb3JkX3VzYWdlYCByZXN0YXJ0cyBpdC4AAAAADHBlcmlvZF9zdGFydAAAAAYAAAAsU3Vic2NyaXB0aW9uIHRoZSB1c2FnZSB3YXMgcmVjb3JkZWQgYWdhaW5zdC4AAAAPc3Vic2NyaXB0aW9uX2lkAAAAAAYAAACLUmF3IHVuaXRzIGFjY3VtdWxhdGVkIGluIHRoZSBvcGVuIHBlcmlvZC4gQWx3YXlzIGEgdW5pdCBjb3VudCwgbmV2ZXIgYQpidWNrZXQgY291bnQsIHNvIG5vIHJvdW5kaW5nIHN0YXRlIGNhbiBzdXJ2aXZlIGludG8gdGhlIG5leHQgcGVyaW9kLgAAAAAFdW5pdHMAAAAAAAAG",
         "AAAAAAAAANxFeHBsaWNpdGx5IGF1dGhvcml6ZSBgcHJvdmlkZXJgIHRvIGNyZWF0ZSBzdWJzY3JpcHRpb25zIG9uCmBzdWJzY3JpYmVyYCdzIGJlaGFsZiAoc2VlIHRoZSBtb2R1bGUgZG9jcyBvbiBwcm92aWRlciBvcHQtaW4pLgoKUmVxdWlyZXMgdGhlIHN1YnNjcmliZXIuIElkZW1wb3RlbnQ6IGF1dGhvcml6aW5nIGEgcHJvdmlkZXIgdGhhdCBpcwphbHJlYWR5IGF1dGhvcml6ZWQgc3VjY2VlZHMuAAAAEmF1dGhvcml6ZV9wcm92aWRlcgAAAAAAAgAAAAAAAAAKc3Vic2NyaWJlcgAAAAAAEwAAAAAAAAAIcHJvdmlkZXIAAAATAAAAAQAAA+kAAAACAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAALNDYW5jZWwgYSBzdWJzY3JpcHRpb24sIHByZXZlbnRpbmcgZnVydGhlciBjaGFyZ2VzLgoKUmVxdWlyZXMgdGhlIHN1YnNjcmliZXIuIFZhbGlkIHdoZW4gYEFjdGl2ZWAsIGBQYXVzZWRgLCBvciBgUGFzdER1ZWAuIENhbmNlbGxpbmcKYW4gYWxyZWFkeS1jYW5jZWxsZWQgc3Vic2NyaXB0aW9uIGlzIHJlamVjdGVkLgAAAAAGY2FuY2VsAAAAAAABAAAAAAAAAA9zdWJzY3JpcHRpb25faWQAAAAABgAAAAEAAAPpAAAAAgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
+        "AAAAAAAAAVFDYW5jZWwgYSBzdWJzY3JpcHRpb24gb24gdGhlIHByb3ZpZGVyJ3Mgc2lkZSwgcmVmdW5kaW5nIGFueSB1bnNwZW50CnByZXBhaWQgYmFsYW5jZSB0byB0aGUgc3Vic2NyaWJlci4KClJlcXVpcmVzIHRoZSBwcm92aWRlci4gVmFsaWQgd2hlbiBgQWN0aXZlYCwgYFBhdXNlZGAsIG9yIGBQYXN0RHVlYDsKY2FuY2VsbGluZyBhbiBhbHJlYWR5LWNhbmNlbGxlZCBzdWJzY3JpcHRpb24gaXMgcmVqZWN0ZWQuIFNldHRsZXMKZXhhY3RseSBsaWtlIHRoZSBzdWJzY3JpYmVyJ3MgYGNhbmNlbGA6IHRoZSByZWZ1bmQgdHJhbnNmZXIgcnVucwpiZWZvcmUgdGhlIGNhbmNlbGxhdGlvbiBpcyBzdG9yZWQuAAAAAAAAEmNhbmNlbF9ieV9wcm92aWRlcgAAAAAAAQAAAAAAAAAPc3Vic2NyaXB0aW9uX2lkAAAAAAYAAAABAAAD6QAAAAIAAAfQAAAACkZvcmdlRXJyb3IAAA==",
         "AAAAAAAAA8pCaWxsIG9uZSBkdWUgcGVyaW9kLgoKUmVxdWlyZXMgdGhlIHByb3ZpZGVyLiBJZiBhIGZ1bGwgcGVyaW9kIGhhcyBub3QgZWxhcHNlZCBzaW5jZSB0aGUgbGFzdApjaGFyZ2UsIHJldHVybnMgYDBgIGFuZCBsZWF2ZXMgdGhlIHN1YnNjcmlwdGlvbiB1bnRvdWNoZWQuIE90aGVyd2lzZQphdHRlbXB0cyB0byB0cmFuc2ZlciB0aGUgcGVyaW9kJ3MgZGVyaXZlZCBhbW91bnQgb2YgYHRva2VuYCBmcm9tCmBzdWJzY3JpYmVyYCB0byBgcHJvdmlkZXJgLgoKVGhlIGRlcml2ZWQgYW1vdW50IGlzIGBhbW91bnRgIHBsdXMgdGhlIG92ZXJhZ2UgZm9yIGV2ZXJ5IGRlY2xhcmVkCm1ldHJpYyAoc2VlIHRoZSBtb2R1bGUgZG9jcyBvbiBtZXRlcmVkIHVzYWdlKSDigJQgZXhhY3RseSBgYW1vdW50YCB3aGVuIG5vCnF1b3RhcyBhcmUgZGVjbGFyZWQuIEl0IGlzIGNvbXB1dGVkIGJlZm9yZSB0aGUgdHJhbnNmZXIsIHNvIGFuCmFyaXRobWV0aWMgZmFpbHVyZSBuZXZlciBtb3ZlcyBmdW5kcy4KCi0gT24gc3VjY2Vzc2Z1bCBwYXltZW50OiBhZHZhbmNlcyBgbGFzdF9jaGFyZ2VkYCBieSBvbmUgcGVyaW9kLCBkcm9wcwp0aGUgcGVyaW9kJ3MgdXNhZ2UgbWV0ZXJzLCByZXNldHMgYGZhaWxlZF9hdHRlbXB0c2AgdG8gMCwgdHJhbnNpdGlvbnMKc3RhdHVzIHRvIGBBY3RpdmVgLCBhbmQgcmV0dXJucyB0aGUgZGVyaXZlZCBhbW91bnQuCi0gT24gZmFpbGVkIHBheW1lbnQ6IGBsYXN0X2NoYXJnZWRgIGlzIE5PVCBhZHZhbmNlZCBhbmQgdGhlIHVzYWdlCm1ldGVycyBhcmUgTk9UIGRyb3BwZWQsIHNvIHRoZSByZXRyeSByZS1kZXJpdmVzIHRoZSBzYW1lIGFtb3VudC4KSW5jcmVtZW50cyBgZmFpbGVkX2F0dGVtcHRzYC4gSWYgYGZhaWxlZF9hdHRlbXB0cyA+PSBNQVhfUkVUUklFU2AKKDMpLCBzdGF0dXMgYmVjb21lcyBgQ2FuY2VsbGVkYC4gT3RoZXJ3aXNlIHN0YXR1cyBiZWNvbWVzIGBQYXN0RHVlYC4KUmV0dXJucyBgMGAuAAAAAAAGY2hhcmdlAAAAAAABAAAAAAAAAA9zdWJzY3JpcHRpb25faWQAAAAABgAAAAEAAAPpAAAACwAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAAAAAAAClBdG9taWNhbGx5IGJpbGwgbXVsdGlwbGUgZWxhcHNlZCBwZXJpb2RzLgAAAAAAAA5jaGFyZ2VfY2F0Y2h1cAAAAAAAAgAAAAAAAAAPc3Vic2NyaXB0aW9uX2lkAAAAAAYAAAAAAAAAC21heF9wZXJpb2RzAAAAAAQAAAABAAAD6QAAAAsAAAfQAAAACkZvcmdlRXJyb3IAAA==",
         "AAAAAAAAAERQdWxsIHRva2VucyBpbnRvIGN1c3RvZHkgYW5kIGVuYWJsZSBwcmVwYWlkIG1vZGUgb25seSBhZnRlciBzdWNjZXNzLgAAAAdkZXBvc2l0AAAAAAIAAAAAAAAAD3N1YnNjcmlwdGlvbl9pZAAAAAAGAAAAAAAAAAZhbW91bnQAAAAAAAsAAAABAAAD6QAAAAsAAAfQAAAACkZvcmdlRXJyb3IAAA==",
@@ -551,6 +564,7 @@ export class Client extends ContractClient {
         get_subscription: this.txFromJSON<Result<Subscription>>,
         withdraw_balance: this.txFromJSON<Result<i128>>,
         authorize_provider: this.txFromJSON<Result<void>>,
+        cancel_by_provider: this.txFromJSON<Result<void>>,
         get_subscription_count: this.txFromJSON<u64>,
         is_provider_authorized: this.txFromJSON<boolean>,
         subscribe_on_behalf_of: this.txFromJSON<Result<u64>>,

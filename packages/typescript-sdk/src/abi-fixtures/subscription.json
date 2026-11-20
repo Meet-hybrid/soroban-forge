@@ -31,6 +31,18 @@
       ]
     },
     {
+      "name": "cancel_by_provider",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "charge",
       "inputs": [
         {
