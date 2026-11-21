@@ -31,6 +31,18 @@
       ]
     },
     {
+      "name": "get_max_royalty_cap",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "u32"
+      ]
+    },
+    {
       "name": "get_royalty",
       "inputs": [
         {
@@ -96,6 +108,22 @@
       ],
       "outputs": [
         "result<udt:SaleQuote,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_max_royalty_cap",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "max_bps",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
