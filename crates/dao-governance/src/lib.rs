@@ -320,6 +320,35 @@ pub trait SorobanForgeDaoGovernance {
 
     /// Read how many active proposals `proposer` currently has in flight (read-only view).
     fn get_active_proposal_count(env: Env, proposer: Address) -> u32;
+
+    /// Delegate `from`'s voting weight to `to`.
+    ///
+    /// Requires `from.require_auth()`. Self-delegation and cycles are rejected.
+    /// Chains longer than [`MAX_DELEGATION_DEPTH`] hops are also rejected.
+    /// An account that has delegated its weight cannot vote directly; its
+    /// effective weight is added to the delegate's tally instead.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — `from == to`, cycle detected, or chain too long.
+    fn delegate(
+        env: Env,
+        from: Address,
+        to: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Remove `from`'s active delegation, restoring direct voting.
+    ///
+    /// Requires `from.require_auth()`. A no-op if `from` has no delegation.
+    fn undelegate(env: Env, from: Address) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Return the address `account` has delegated to, or `None`.
+    fn get_delegate(env: Env, account: Address) -> Option<Address>;
+
+    /// Return the effective voting power of `account`: own balance plus all
+    /// weight transitively delegated to `account`, minus anything `account`
+    /// has itself delegated away.
+    fn get_voting_power(env: Env, account: Address) -> i128;
 }
 
 /// Immutable receipt for a single proposal vote.
@@ -337,6 +366,14 @@ pub struct VoteReceipt {
     /// Governance-token balance recorded when the vote was cast.
     pub weight: i128,
 }
+
+/// Maximum delegation chain depth. A chain `A → B → C → … → Z` of this many
+/// hops is accepted; a chain that would require one more hop is rejected with
+/// [`ForgeError::InvalidInput`].
+///
+/// Kept deliberately small (8) so that `get_voting_power` and `vote` both
+/// traverse chains in bounded time without deep recursion.
+pub const MAX_DELEGATION_DEPTH: u32 = 8;
 
 /// Lifecycle state of a governance proposal.
 #[contracttype]
@@ -494,6 +531,12 @@ enum DataKey {
     /// Appended last so existing `DataKey` discriminants stay unchanged for
     /// contracts upgraded from a version without receipts.
     VoteReceipt(u64, Address),
+    /// The delegate `from` has currently assigned their voting weight to.
+    /// Absent when `from` has no active delegation.
+    Delegate(Address),
+    /// Set of addresses that have delegated (directly) to `to`.
+    /// Stored as a `Vec<Address>` in persistent storage.
+    Delegators(Address),
 }
 
 /// Maximum number of concurrent active proposals a single proposer may have by default.
@@ -717,10 +760,18 @@ impl DaoGovernance {
             return Err(ForgeError::InvalidInput);
         }
 
-        // soroban-sdk 27.0.6's generated SEP-41 token client exposes
-        // `balance(Address) -> i128` (the same interface used by escrow and
-        // the other token-integrated contracts).
-        let weight = token::TokenClient::new(&env, &governance_token).balance(&voter);
+        // An account that has delegated its weight may not vote directly.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Delegate(voter.clone()))
+        {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        // Effective weight: voter's own balance plus all weight transitively
+        // delegated to them, snapshotted at vote time.
+        let weight = Self::voting_power_impl(&env, &governance_token, &voter);
         if weight == 0 {
             return Err(ForgeError::InvalidInput);
         }
@@ -1145,6 +1196,230 @@ impl DaoGovernance {
                 .set(&DataKey::ActiveProposalCount(proposer.clone()), &next);
         }
     }
+
+    /// Delegate `from`'s voting weight to `to`.
+    ///
+    /// Requires `from.require_auth()`. Self-delegation and cycles are rejected.
+    /// Chains longer than [`MAX_DELEGATION_DEPTH`] hops are also rejected.
+    pub fn delegate(env: Env, from: Address, to: Address) -> Result<(), ForgeError> {
+        if from == to {
+            return Err(ForgeError::InvalidInput);
+        }
+        from.require_auth();
+
+        // Verify the governance token exists (contract must be initialised).
+        let governance_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernanceToken)
+            .ok_or(ForgeError::NotInitialized)?;
+        let _ = governance_token;
+
+        // Walk the chain starting at `to` to detect cycles and enforce depth.
+        // The chain we are creating is: from → to → … so `to` is depth 1.
+        let mut depth: u32 = 1;
+        let mut cursor = to.clone();
+        loop {
+            if cursor == from {
+                // Cycle detected.
+                return Err(ForgeError::InvalidInput);
+            }
+            match env
+                .storage()
+                .persistent()
+                .get::<DataKey, Address>(&DataKey::Delegate(cursor.clone()))
+            {
+                None => break,
+                Some(next) => {
+                    depth = depth.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;
+                    if depth > MAX_DELEGATION_DEPTH {
+                        return Err(ForgeError::InvalidInput);
+                    }
+                    cursor = next;
+                }
+            }
+        }
+
+        // If `from` already had a delegate, remove `from` from that delegate's delegators list.
+        if let Some(old_to) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::Delegate(from.clone()))
+        {
+            Self::remove_delegator(&env, &old_to, &from);
+        }
+
+        // Record from → to.
+        env.storage()
+            .persistent()
+            .set(&DataKey::Delegate(from.clone()), &to);
+
+        // Add `from` to `to`'s delegators set.
+        Self::add_delegator(&env, &to, &from);
+
+        events::delegated(&env, &from, &to);
+        Ok(())
+    }
+
+    /// Remove `from`'s active delegation, restoring direct voting.
+    pub fn undelegate(env: Env, from: Address) -> Result<(), ForgeError> {
+        from.require_auth();
+
+        // Verify the governance token exists (contract must be initialised).
+        let governance_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernanceToken)
+            .ok_or(ForgeError::NotInitialized)?;
+        let _ = governance_token;
+
+        if let Some(to) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::Delegate(from.clone()))
+        {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Delegate(from.clone()));
+            Self::remove_delegator(&env, &to, &from);
+            events::undelegated(&env, &from);
+        }
+        Ok(())
+    }
+
+    /// Return the address `account` has delegated to, or `None` (read-only).
+    pub fn get_delegate(env: Env, account: Address) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Delegate(account))
+    }
+
+    /// Return the effective voting power of `account` (read-only).
+    ///
+    /// Effective power = own token balance + sum of delegated-in weight
+    /// (transitively, via BFS), minus own balance when the account has
+    /// delegated its weight away.
+    pub fn get_voting_power(env: Env, account: Address) -> i128 {
+        let governance_token: Address = match env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernanceToken)
+        {
+            Some(t) => t,
+            None => return 0,
+        };
+        Self::voting_power_impl(&env, &governance_token, &account)
+    }
+
+    /// Internal: compute effective voting power for `account`.
+    ///
+    /// An account that has delegated away its own weight returns 0.
+    /// Otherwise: own balance + BFS sum over the Delegators tree.
+    fn voting_power_impl(env: &Env, governance_token: &Address, account: &Address) -> i128 {
+        let token = token::TokenClient::new(env, governance_token);
+
+        // If `account` itself has delegated, it contributes zero (its balance
+        // went to the delegate). Still walk incoming delegations so a delegate
+        // of `account` can contribute to `account`'s effective weight.
+        //
+        // Actually: if `account` has delegated, the question of "account's
+        // effective voting weight" is 0 — it cannot vote. The power is added
+        // to whoever `account` delegates to.
+        //
+        // For the purpose of `get_voting_power`, we return the weight that
+        // `account` *would cast* if it voted, which is 0 when it has delegated.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Delegate(account.clone()))
+        {
+            return 0;
+        }
+
+        // BFS: collect all accounts that transitively delegated to `account`.
+        // The effective weight is the sum of their own balances (excluding
+        // those that have themselves further delegated — which cannot happen
+        // in a tree, but guard anyway).
+        let mut total: i128 = token.balance(account);
+
+        // Queue starts with `account`'s direct delegators.
+        let delegators: soroban_sdk::Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Delegators(account.clone()))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
+        let mut queue: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(env);
+        for d in delegators.iter() {
+            queue.push_back(d);
+        }
+
+        while let Some(delegator) = queue.pop_back() {
+            // A delegator that has re-delegated elsewhere is skipped (this
+            // should not occur in a consistent tree, but be defensive).
+            match env
+                .storage()
+                .persistent()
+                .get::<DataKey, Address>(&DataKey::Delegate(delegator.clone()))
+            {
+                Some(ref target) if target == account => {}
+                // The delegator chain leads somewhere else — skip.
+                Some(_) => continue,
+                // No delegation entry at all — skip (defensive).
+                None => continue,
+            }
+            total = total.saturating_add(token.balance(&delegator));
+            // Recurse into this delegator's own delegators (sub-tree).
+            let sub: soroban_sdk::Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Delegators(delegator.clone()))
+                .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+            for d in sub.iter() {
+                queue.push_back(d);
+            }
+        }
+
+        total
+    }
+
+    /// Add `delegator` to the set of addresses that delegate to `target`.
+    fn add_delegator(env: &Env, target: &Address, delegator: &Address) {
+        let key = DataKey::Delegators(target.clone());
+        let mut list: soroban_sdk::Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+        // Avoid duplicates (re-delegation to same target after an undelegate).
+        for existing in list.iter() {
+            if existing == *delegator {
+                return;
+            }
+        }
+        list.push_back(delegator.clone());
+        env.storage().persistent().set(&key, &list);
+    }
+
+    /// Remove `delegator` from the set of addresses that delegate to `target`.
+    fn remove_delegator(env: &Env, target: &Address, delegator: &Address) {
+        let key = DataKey::Delegators(target.clone());
+        let list: soroban_sdk::Vec<Address> = match env.storage().persistent().get(&key) {
+            Some(l) => l,
+            None => return,
+        };
+        let mut new_list: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(env);
+        for existing in list.iter() {
+            if existing != *delegator {
+                new_list.push_back(existing);
+            }
+        }
+        if new_list.is_empty() {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &new_list);
+        }
+    }
 }
 
 /// Move `amount` of `token` from `from` into this contract.
@@ -1307,10 +1582,40 @@ mod events {
         }
         .publish(env);
     }
+
+    /// Emitted when `from` delegates to `to`.
+    #[contractevent]
+    pub struct Delegated {
+        #[topic]
+        pub from: Address,
+        pub to: Address,
+    }
+
+    /// Emitted when `from` removes its active delegation.
+    #[contractevent]
+    pub struct Undelegated {
+        #[topic]
+        pub from: Address,
+    }
+
+    pub fn delegated(env: &Env, from: &Address, to: &Address) {
+        Delegated {
+            from: from.clone(),
+            to: to.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn undelegated(env: &Env, from: &Address) {
+        Undelegated { from: from.clone() }.publish(env);
+    }
 }
 
 #[cfg(test)]
 mod resource_report;
+
+#[cfg(test)]
+mod delegation_tests;
 
 #[cfg(test)]
 mod tests {
