@@ -194,3 +194,16 @@ an unknown `tx_id` returns `ForgeError::NotFound`. A separate
 `touch_ttl(token)` keeper extends the persistent balance entries' TTL.
 
 <div id="task-247"></div>
+
+### Confirm several transactions
+
+Call `confirm_batch(tx_ids, signer)` with 1–16 distinct transaction IDs. One
+current owner authorizes the entire list. The wallet validates every ID before
+recording approvals, then emits one ordinary `TxConfirmed` per transaction in
+input order. An empty list, duplicate ID or oversized list returns
+`InvalidInput`. For each entry the same eligibility rules apply as for
+`confirm`. An invalid entry leaves every approval and event untouched.
+
+Owners can confirm during a pause. Execution is a separate call and checks
+the current threshold, pause, withdrawal limit and available balance. Removing
+an owner clears their pending approvals, including those made in a batch.

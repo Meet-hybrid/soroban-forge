@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `refund_expired_returns_only_what_is_left_after_partial_releases`).
 
 ### Added
+- Multi-signature wallets can confirm up to 16 transactions with one owner authorization.
+- Subscriptions support mutually authorized price changes with prorated credit and a read-only catch-up quote.
 - **Next.js example local demo state tools** (`packages/nextjs-example`):
   versioned JSON export, validated import, state inspection, and a confirmed
   reset flow for browser-only form state. Exports exclude chain-derived escrow

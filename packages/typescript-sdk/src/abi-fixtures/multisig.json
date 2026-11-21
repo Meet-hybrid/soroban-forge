@@ -79,6 +79,22 @@
       ]
     },
     {
+      "name": "confirm_batch",
+      "inputs": [
+        {
+          "name": "tx_ids",
+          "type": "vec<u64>"
+        },
+        {
+          "name": "signer",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "deposit",
       "inputs": [
         {

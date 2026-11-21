@@ -462,3 +462,42 @@ struct Plan {
 - `Plan(plan_id: u64)` — the plan record.
 - `PlanCount` — monotonic plan id counter (separate from `Count` used for
   subscriptions).
+
+### Change the recurring price
+
+The subscriber and provider both authorize `change_plan(subscription_id,
+new_amount)` for an active subscription. The new base price must be positive
+and different. The billing timestamp and period length stay fixed. The call
+returns the newly granted credit and emits `PlanChanged` with the subscription
+ID, old price, new price and credit, all amounts in token base units.
+
+Credit is the old base price multiplied by the unused seconds in the current
+period, divided by the period length and rounded down. A change at the start
+credits the full old price. A change at or after the due time credits zero.
+Repricing again before billing can change the next price, but the same unused
+period earns credit only once. A separate persistent key tracks this credit,
+so existing subscription records need no migration.
+
+`quote_period` includes available credit. Each successful charge applies as
+much credit as the bill can absorb and carries any excess into later periods.
+For example, with 90 credit and a price of 30, three due periods can settle
+with zero transferred. The billing timestamp still advances. A failed charge
+preserves the credit. Pull and prepaid charges use the same deduction.
+
+### Preview catch-up
+
+Call `preview_catchup(subscription_id, max_periods)` to quote a successful
+`charge_catchup` at the current ledger time. The same maximum of 32 applies.
+The response reports the token amount payable for the selected periods,
+`prepaid_consumed`, the token amount still overdue after the selected periods,
+and the resulting status. A limit of zero shows all arrears under
+`arrears_remaining`. The preview reads the open period's usage and credits
+without transferring tokens, writing records or extending TTLs.
+
+Catch-up accepts active pull subscriptions. For accepted calls,
+`prepaid_consumed` is zero and the resulting status is active. A prepaid,
+paused, cancelled or past-due subscription returns `InvalidInput` from both
+preview and settlement. A quote assumes that the token transfers will succeed.
+If a later transfer fails, catch-up rolls back the entire call. Repeated
+single-period charges retain earlier successful periods and record a failed
+attempt for the first unpaid one.

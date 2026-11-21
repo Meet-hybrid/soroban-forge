@@ -300,6 +300,8 @@ use soroban_sdk::{
     Env, IntoVal, Symbol, Val, Vec,
 };
 
+const MAX_CONFIRM_BATCH: u32 = 16;
+
 /// Public interface for the Soroban Forge multi-signature wallet contract.
 #[contractclient(name = "SorobanForgeMultiSigWalletClient")]
 pub trait SorobanForgeMultiSigWallet {
@@ -356,6 +358,8 @@ pub trait SorobanForgeMultiSigWallet {
         tx_id: u64,
         signer: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    fn confirm_batch(env: Env, tx_ids: Vec<u64>, signer: Address) -> Result<(), ForgeError>;
 
     /// Record `signer`'s formal objection to `tx_id`.
     ///
@@ -1140,36 +1144,66 @@ impl MultiSigWallet {
     ///
     /// A rejected transaction returns [`ForgeError::InvalidInput`] unchanged.
     pub fn confirm(env: Env, tx_id: u64, signer: Address) -> Result<(), ForgeError> {
-        let mut wallet_tx = Self::get_tx_impl(&env, tx_id)?;
-        if wallet_tx.status == TxStatus::Expired {
-            return Err(ForgeError::DeadlineReached);
-        }
-        if wallet_tx.status != TxStatus::Pending {
+        let tx = Self::pending_for_owner(&env, tx_id, &signer)?;
+        signer.require_auth();
+        Self::write_confirmation(&env, Self::with_confirmation(tx, &signer)?);
+        Ok(())
+    }
+
+    /// Confirm up to 16 distinct pending transactions, in the supplied order.
+    pub fn confirm_batch(env: Env, tx_ids: Vec<u64>, signer: Address) -> Result<(), ForgeError> {
+        if tx_ids.is_empty() || tx_ids.len() > MAX_CONFIRM_BATCH {
             return Err(ForgeError::InvalidInput);
         }
-        if let Some(exp) = wallet_tx.expiry {
-            if env.ledger().timestamp() >= exp {
-                return Err(ForgeError::DeadlineReached);
+        let mut seen = Vec::new(&env);
+        for id in tx_ids.iter() {
+            if seen.contains(id) {
+                return Err(ForgeError::InvalidInput);
             }
-        }
-        if !Self::is_owner_impl(&env, &signer) {
-            return Err(ForgeError::Unauthorized);
+            seen.push_back(id);
         }
         signer.require_auth();
-
-        if wallet_tx.confirmations.contains(&signer) {
-            return Err(ForgeError::InvalidInput);
+        let mut pending = Vec::new(&env);
+        for id in tx_ids.iter() {
+            let tx = Self::pending_for_owner(&env, id, &signer)?;
+            pending.push_back(Self::with_confirmation(tx, &signer)?);
         }
-        if wallet_tx.rejections.contains(&signer) {
-            return Err(ForgeError::InvalidInput);
+        for tx in pending.iter() {
+            Self::write_confirmation(&env, tx);
         }
-        wallet_tx.confirmations.push_back(signer);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Tx(tx_id), &wallet_tx);
-        bump_entry(&env, &DataKey::Tx(tx_id));
-        events::confirmed(&env, &wallet_tx);
         Ok(())
+    }
+
+    fn pending_for_owner(env: &Env, tx_id: u64, signer: &Address) -> Result<WalletTx, ForgeError> {
+        let tx = Self::get_tx_impl(env, tx_id)?;
+        if tx.status == TxStatus::Expired {
+            return Err(ForgeError::DeadlineReached);
+        }
+        if tx.status != TxStatus::Pending {
+            return Err(ForgeError::InvalidInput);
+        }
+        if tx.expiry.is_some_and(|end| env.ledger().timestamp() >= end) {
+            return Err(ForgeError::DeadlineReached);
+        }
+        if !Self::is_owner_impl(env, signer) {
+            return Err(ForgeError::Unauthorized);
+        }
+        Ok(tx)
+    }
+
+    fn with_confirmation(mut tx: WalletTx, signer: &Address) -> Result<WalletTx, ForgeError> {
+        if tx.confirmations.contains(signer) || tx.rejections.contains(signer) {
+            return Err(ForgeError::InvalidInput);
+        }
+        tx.confirmations.push_back(signer.clone());
+        Ok(tx)
+    }
+
+    fn write_confirmation(env: &Env, tx: WalletTx) {
+        let key = DataKey::Tx(tx.tx_id);
+        env.storage().persistent().set(&key, &tx);
+        bump_entry(env, &key);
+        events::confirmed(env, &tx);
     }
 
     /// Record an owner's formal objection to a pending transaction.
@@ -2541,6 +2575,9 @@ mod events {
 // dao-governance suites' two-layer pattern (issue #61).
 #[cfg(test)]
 mod authz;
+
+#[cfg(test)]
+mod batch;
 
 // Randomized property suite covering the threshold-enforcement,
 // execute-once, and distinct-owner confirmation-counting invariants
