@@ -2054,7 +2054,7 @@ mod tests {
         assert_eq!(tc.balance(seller_b), 19, "zero-share sale pays seller only");
         assert_eq!(tc.balance(seller_c), 285);
         assert_eq!(tc.balance(recipient), 35, "20 + 0 + 15");
-                                                                          }
+    }
 
     #[test]
     fn settle_sales_matches_single_sale_splits_and_totals() {
@@ -2934,7 +2934,7 @@ mod tests {
     /// at all, moves no balances, and emits no events.
     #[test]
     fn quote_requires_no_auth_and_writes_nothing() {
-        let (env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let (env, _token, tc, _contract_id, client, accounts) = setup_settlement!();
         let collection = &accounts.arbiter;
         let payer = &accounts.user1;
         let seller = &accounts.user3;
