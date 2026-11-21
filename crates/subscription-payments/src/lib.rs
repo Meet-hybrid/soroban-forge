@@ -1922,6 +1922,8 @@ mod metering;
 #[cfg(test)]
 mod prepaid;
 #[cfg(test)]
+mod lifecycle_props;
+#[cfg(test)]
 mod props;
 
 #[cfg(test)]
