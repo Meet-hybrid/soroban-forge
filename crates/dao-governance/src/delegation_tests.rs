@@ -32,7 +32,7 @@ fn setup() -> (
     Address,
     TokenClient<'static>,
     Address,
-    DaoGovernanceClient<'static>,
+    SorobanForgeDaoGovernanceClient<'static>,
     [Address; 5],
 ) {
     let env = Env::default();
@@ -51,9 +51,9 @@ fn setup() -> (
     }
 
     let contract_id = env.register(DaoGovernance, ());
-    let dao = DaoGovernanceClient::new(&env, &contract_id);
+    let dao = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
 
-    dao.initialise(&token, &86_400_u64, &3_u32);
+    dao.initialize(&token);
     dao.configure_bond(&token, &BOND, &accounts[0]);
 
     // Safety: the references are tied to `env` which outlives this fn; the
@@ -62,17 +62,17 @@ fn setup() -> (
     // at call sites that need them, so this is fine.
     let token_client: TokenClient<'static> =
         unsafe { core::mem::transmute(token_client) };
-    let dao: DaoGovernanceClient<'static> = unsafe { core::mem::transmute(dao) };
+    let dao: SorobanForgeDaoGovernanceClient<'static> = unsafe { core::mem::transmute(dao) };
 
     (env, token, token_client, contract_id, dao, accounts)
 }
 
 /// Create a minimal proposal and return its id.
-fn make_proposal(env: &Env, dao: &DaoGovernanceClient, proposer: &Address) -> u64 {
+fn make_proposal(env: &Env, dao: &SorobanForgeDaoGovernanceClient, proposer: &Address) -> u64 {
     dao.propose(
         proposer,
+        proposer, // target = proposer (unused in tests)
         &soroban_sdk::Bytes::from_slice(env, b"action"),
-        &proposer.clone(), // target = proposer (unused in tests)
         &DURATION,
         &SorobanVec::new(env),
         &None,
@@ -173,8 +173,8 @@ fn test_chain_at_depth_limit_accepted() {
     };
 
     let contract_id = env.register(DaoGovernance, ());
-    let dao = DaoGovernanceClient::new(&env, &contract_id);
-    dao.initialise(&token, &86_400_u64, &3_u32);
+    let dao = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
+    dao.initialize(&token);
     dao.configure_bond(&token, &BOND, &accs.get(0).unwrap());
 
     // Chain: accs[0] → accs[1] → … → accs[MAX_DELEGATION_DEPTH]
@@ -213,8 +213,8 @@ fn test_chain_beyond_depth_limit_rejected() {
     };
 
     let contract_id = env.register(DaoGovernance, ());
-    let dao = DaoGovernanceClient::new(&env, &contract_id);
-    dao.initialise(&token, &86_400_u64, &3_u32);
+    let dao = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
+    dao.initialize(&token);
     dao.configure_bond(&token, &BOND, &accs.get(0).unwrap());
 
     // Build a chain of MAX_DELEGATION_DEPTH hops first (accepted).
@@ -423,7 +423,6 @@ fn proptest_weight_conservation_and_no_double_count() {
     let sac = env.register_stellar_asset_contract_v2(admin);
     let token = sac.address();
     let token_admin = StellarAssetClient::new(&env, &token);
-    let token_client = TokenClient::new(&env, &token);
 
     // 6 participants each with 500 tokens.
     const N: usize = 6;
@@ -434,8 +433,8 @@ fn proptest_weight_conservation_and_no_double_count() {
     }
 
     let contract_id = env.register(DaoGovernance, ());
-    let dao = DaoGovernanceClient::new(&env, &contract_id);
-    dao.initialise(&token, &86_400_u64, &3_u32);
+    let dao = SorobanForgeDaoGovernanceClient::new(&env, &contract_id);
+    dao.initialize(&token);
     dao.configure_bond(&token, &BOND, &accs[0]);
 
     // Run 200 random operations.
@@ -451,7 +450,7 @@ fn proptest_weight_conservation_and_no_double_count() {
                     // Check if it would form a cycle or exceed depth before calling.
                     // We catch panics by just trying; on panic we skip.
                     // Because we cannot catch panics in no_std, we pre-check.
-                    let would_cycle = detect_cycle_or_depth(&env, &accs, i, j);
+                    let would_cycle = detect_cycle_or_depth(&env, &dao, &accs, i, j);
                     if !would_cycle {
                         // Also check if i already delegates to j (noop).
                         dao.delegate(&accs[i], &accs[j]);
@@ -468,11 +467,7 @@ fn proptest_weight_conservation_and_no_double_count() {
             }
         }
 
-        // Invariant 1: no cycle in the delegation graph.
-        assert!(
-            !has_cycle(&env, &accs),
-            "cycle detected after operation {op} {i}→{j}"
-        );
+        // Invariant 1: no cycle in the delegation graph (contract prevents them).
 
         // Invariant 2: weight conservation.
         // Each token unit contributes to exactly one account's effective power.
@@ -491,29 +486,34 @@ fn proptest_weight_conservation_and_no_double_count() {
 
 /// Pre-check: would delegating `accs[from_idx]` → `accs[to_idx]` form a cycle
 /// or exceed MAX_DELEGATION_DEPTH? Returns true if it would.
-fn detect_cycle_or_depth(env: &Env, accs: &[Address], from_idx: usize, to_idx: usize) -> bool {
-    let dao = {
-        // We don't have the client here; use storage directly is not possible.
-        // Instead, we walk the in-memory chain via get_delegate calls.
-        // But we don't have the dao client here either.
-        // So we do a lightweight simulation using a stack.
-        let _ = env;
-        let _ = accs;
-        let _ = from_idx;
-        let _ = to_idx;
-        // Conservative: return false and let the contract reject it.
-        false
-    };
-    dao
-}
+fn detect_cycle_or_depth(
+    _env: &Env,
+    dao: &SorobanForgeDaoGovernanceClient,
+    accs: &[Address],
+    from_idx: usize,
+    to_idx: usize,
+) -> bool {
+    let from = &accs[from_idx];
+    let to = &accs[to_idx];
 
-/// Check whether any delegation cycle exists among `accs`.
-fn has_cycle(env: &Env, accs: &[Address]) -> bool {
-    // For each node, walk forward until we hit None or visit MAX_DELEGATION_DEPTH+2 nodes.
-    let _ = env;
-    let _ = accs;
-    // The contract's cycle-detection already prevents cycles from forming.
-    // Here we do a lightweight check using the contract's storage is not
-    // accessible from tests; trust the contract's invariant and return false.
-    false
+    // Walk the chain starting at `to`, counting depth.
+    let mut depth: u32 = 1;
+    let mut cursor = to.clone();
+    loop {
+        // If we reach `from`, that's a cycle.
+        if cursor == *from {
+            return true;
+        }
+        // If depth exceeds the limit, reject.
+        if depth >= MAX_DELEGATION_DEPTH {
+            return true;
+        }
+        match dao.get_delegate(&cursor) {
+            None => return false,
+            Some(next) => {
+                depth += 1;
+                cursor = next;
+            }
+        }
+    }
 }
