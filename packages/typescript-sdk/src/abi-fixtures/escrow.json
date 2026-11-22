@@ -3,6 +3,22 @@
   "contract": "soroban-forge-escrow",
   "functions": [
     {
+      "name": "approve_milestone",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "index",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "approve_release",
       "inputs": [
         {
@@ -163,6 +179,38 @@
         },
         {
           "name": "review_period",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "create_milestone_escrow",
+      "inputs": [
+        {
+          "name": "buyer",
+          "type": "address"
+        },
+        {
+          "name": "seller",
+          "type": "address"
+        },
+        {
+          "name": "arbiter",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amounts",
+          "type": "vec<i128>"
+        },
+        {
+          "name": "timeout",
           "type": "u64"
         }
       ],
@@ -356,6 +404,18 @@
       ],
       "outputs": [
         "result<udt:EscrowData,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_milestones",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<vec<udt:Milestone>,udt:ForgeError>"
       ]
     },
     {
@@ -825,6 +885,24 @@
       ]
     },
     {
+      "name": "MilestoneReleased",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "index",
+          "type": "u32"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        }
+      ]
+    },
+    {
       "name": "PartiallyReleased",
       "dataFormat": "scSpecEventDataFormatMap",
       "params": [
@@ -986,6 +1064,10 @@
         },
         {
           "name": "NoPendingRequest",
+          "types": []
+        },
+        {
+          "name": "MilestoneSchedule",
           "types": []
         }
       ]
@@ -1391,6 +1473,50 @@
         {
           "name": "ReleasePending",
           "value": 16
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Milestone",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "index",
+          "type": "u32"
+        },
+        {
+          "name": "status",
+          "type": "udt:MilestoneStatus"
+        }
+      ]
+    },
+    {
+      "kind": "union",
+      "name": "MilestoneStatus",
+      "variants": [
+        {
+          "name": "Unpaid",
+          "types": []
+        },
+        {
+          "name": "Paid",
+          "types": []
+        },
+        {
+          "name": "Frozen",
+          "types": []
+        },
+        {
+          "name": "Settled",
+          "types": []
+        },
+        {
+          "name": "Cancelled",
+          "types": []
         }
       ]
     },
