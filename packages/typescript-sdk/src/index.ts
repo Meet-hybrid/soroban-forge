@@ -27,6 +27,7 @@ export * as contract from "@stellar/stellar-sdk/contract";
 export * as rpc from "@stellar/stellar-sdk/rpc";
 export * from "./clients/index.js";
 export * from "./indexer.js";
+export * from "./event-decoders.js";
 export * from "./helpers.js";
 
 if (typeof window !== "undefined") {

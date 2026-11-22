@@ -278,6 +278,13 @@ pub trait SorobanForgeSubscriptionPayments {
         period: u64,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
+    fn change_plan(env: Env, subscription_id: u64, new_amount: i128) -> Result<i128, ForgeError>;
+    fn preview_catchup(
+        env: Env,
+        subscription_id: u64,
+        max_periods: u32,
+    ) -> Result<CatchupPreview, ForgeError>;
+
     /// Charge the next due payment for `subscription_id`.
     ///
     /// Returns the billed amount, or `0` when no full period has elapsed since
@@ -518,6 +525,16 @@ pub enum SubscriptionStatus {
     Paused,
 }
 
+/// Expected token amounts if the provider successfully settles the selected periods.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatchupPreview {
+    pub chargeable_amount: i128,
+    pub prepaid_consumed: i128,
+    pub arrears_remaining: i128,
+    pub resulting_status: SubscriptionStatus,
+}
+
 /// A recurring payment agreement.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -679,6 +696,7 @@ enum DataKey {
     /// Persistent; written by `configure_auto_topup`, removed by
     /// `disable_auto_topup`, read by `charge`.
     AutoTopup(u64),
+    PlanCredit(u64),
 }
 
 /// The deployable subscription payments contract.
@@ -835,11 +853,14 @@ impl SubscriptionPayments {
 
         // Derived before the transfer: a usage or arithmetic failure leaves
         // the subscription untouched and no funds in flight.
-        let amount = Self::derive_period_amount(&env, &subscription)?;
+        let (amount, credit_left) = apply_credit(
+            Self::derive_period_amount(&env, &subscription)?,
+            Self::available_credit(&env, subscription_id),
+        );
 
-        if let Some(mut balance) = subscription.prepaid_balance {
+        let (payer, prepaid_after) = if let Some(mut balance) = subscription.prepaid_balance {
             if let Some(topup) = Self::auto_topup_impl(&env, subscription_id) {
-                if balance < amount || balance < topup.trigger_threshold {
+                if amount > 0 && (balance < amount || balance < topup.trigger_threshold) {
                     balance = Self::run_auto_topup(&env, &mut subscription, &topup, balance);
                 }
             }
@@ -847,56 +868,40 @@ impl SubscriptionPayments {
                 Self::record_failed_charge(&env, &mut subscription)?;
                 return Ok(0);
             }
-            let remaining = balance
-                .checked_sub(amount)
-                .ok_or(ForgeError::ArithmeticOverflow)?;
-            let transfer_result = token::TokenClient::new(&env, &subscription.token).try_transfer(
-                &env.current_contract_address(),
-                &subscription.provider,
-                &amount,
-            );
-            if !matches!(transfer_result, Ok(Ok(()))) {
-                Self::record_failed_charge(&env, &mut subscription)?;
-                return Ok(0);
-            }
+            (env.current_contract_address(), Some(balance - amount))
+        } else {
+            (subscription.subscriber.clone(), None)
+        };
+        if !Self::transfer_charge(&env, &subscription, &payer, amount) {
+            Self::record_failed_charge(&env, &mut subscription)?;
+            return Ok(0);
+        }
 
-            subscription.prepaid_balance = Some(remaining);
-            subscription.last_charged = next_due;
-            subscription.failed_attempts = 0;
-            subscription.status = SubscriptionStatus::Active;
-            subscription.paused_at = None;
-            Self::rollover_usage(&env, &subscription);
-            Self::store_subscription(&env, subscription_id, &subscription);
-            events::charged(&env, &subscription, amount);
+        Self::close_credit_period(&env, subscription_id, credit_left);
+        subscription.prepaid_balance = prepaid_after;
+        subscription.last_charged = next_due;
+        subscription.failed_attempts = 0;
+        subscription.status = SubscriptionStatus::Active;
+        subscription.paused_at = None;
+        Self::rollover_usage(&env, &subscription);
+        Self::store_subscription(&env, subscription_id, &subscription);
+        events::charged(&env, &subscription, amount);
+        if let Some(remaining) = prepaid_after {
             events::balance_debited(&env, subscription_id, amount, remaining);
-            return Ok(amount);
         }
+        Ok(amount)
+    }
 
-        // Execute SEP-41 token transfer from subscriber to provider
-        let transfer_result = token::TokenClient::new(&env, &subscription.token).try_transfer(
-            &subscription.subscriber,
-            &subscription.provider,
-            &amount,
-        );
-
-        match transfer_result {
-            Ok(Ok(())) => {
-                subscription.last_charged = next_due;
-                subscription.failed_attempts = 0;
-                subscription.status = SubscriptionStatus::Active;
-                subscription.paused_at = None;
-                // Period rollover: the meters go in the same frame that closes
-                // the period, so the next period starts from zero units.
-                Self::rollover_usage(&env, &subscription);
-                Self::store_subscription(&env, subscription_id, &subscription);
-                events::charged(&env, &subscription, amount);
-                Ok(amount)
-            }
-            _ => {
-                Self::record_failed_charge(&env, &mut subscription)?;
-                Ok(0)
-            }
-        }
+    fn transfer_charge(env: &Env, sub: &Subscription, payer: &Address, amount: i128) -> bool {
+        amount == 0
+            || matches!(
+                token::TokenClient::new(env, &sub.token).try_transfer(
+                    payer,
+                    &sub.provider,
+                    &amount
+                ),
+                Ok(Ok(()))
+            )
     }
 
     fn record_failed_charge(env: &Env, subscription: &mut Subscription) -> Result<(), ForgeError> {
@@ -978,6 +983,74 @@ impl SubscriptionPayments {
             updated,
         );
         updated
+    }
+
+    /// Change the base price by mutual consent and return newly granted credit.
+    pub fn change_plan(
+        env: Env,
+        subscription_id: u64,
+        new_amount: i128,
+    ) -> Result<i128, ForgeError> {
+        let mut sub = Self::get_subscription_impl(&env, subscription_id)?;
+        if sub.status != SubscriptionStatus::Active || new_amount <= 0 || new_amount == sub.amount {
+            return Err(ForgeError::InvalidInput);
+        }
+        sub.subscriber.require_auth();
+        sub.provider.require_auth();
+        let key = DataKey::PlanCredit(subscription_id);
+        let (balance, credited): (i128, bool) =
+            env.storage().persistent().get(&key).unwrap_or_default();
+        let elapsed = env
+            .ledger()
+            .timestamp()
+            .checked_sub(sub.last_charged)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let remaining = sub.period.saturating_sub(elapsed);
+        // Splitting off the quotient avoids overflowing old_price * remaining.
+        // Both factors of the remainder product fit in u64.
+        let period = i128::from(sub.period);
+        let credit = if credited {
+            0
+        } else {
+            let fraction =
+                ((sub.amount % period) as u128 * u128::from(remaining)) / u128::from(sub.period);
+            (sub.amount / period)
+                .checked_mul(i128::from(remaining))
+                .and_then(|whole| whole.checked_add(fraction as i128))
+                .ok_or(ForgeError::ArithmeticOverflow)?
+        };
+        let available = balance
+            .checked_add(credit)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        env.storage().persistent().set(&key, &(available, true));
+        let old_amount = sub.amount;
+        sub.amount = new_amount;
+        Self::store_subscription(&env, subscription_id, &sub);
+        events::PlanChanged {
+            subscription_id,
+            old_amount,
+            new_amount,
+            credit,
+        }
+        .publish(&env);
+        Ok(credit)
+    }
+
+    fn available_credit(env: &Env, id: u64) -> i128 {
+        env.storage()
+            .persistent()
+            .get::<_, (i128, bool)>(&DataKey::PlanCredit(id))
+            .unwrap_or_default()
+            .0
+    }
+
+    fn close_credit_period(env: &Env, id: u64, remaining: i128) {
+        let key = DataKey::PlanCredit(id);
+        if remaining > 0 {
+            env.storage().persistent().set(&key, &(remaining, false));
+        } else if env.storage().persistent().has(&key) {
+            env.storage().persistent().remove(&key);
+        }
     }
 
     /// Pull tokens into custody and enable prepaid mode only after success.
@@ -1094,34 +1167,12 @@ impl SubscriptionPayments {
         subscription_id: u64,
         max_periods: u32,
     ) -> Result<i128, ForgeError> {
-        if max_periods > MAX_CATCHUP_PERIODS {
-            return Err(ForgeError::InvalidInput);
-        }
-
-        let mut subscription = Self::get_subscription_impl(&env, subscription_id)?;
-        if subscription.status != SubscriptionStatus::Active {
-            return Err(ForgeError::InvalidInput);
-        }
-        if subscription.prepaid_balance.is_some() {
-            // Prepaid balances use one-period lapse/retry semantics through
-            // `charge`; catch-up must not bypass them by pulling from payer.
-            return Err(ForgeError::InvalidInput);
-        }
+        let (mut subscription, elapsed) = Self::catchup_terms(&env, subscription_id, max_periods)?;
         subscription.provider.require_auth();
-
-        if max_periods == 0 {
-            return Ok(0);
-        }
-
-        let now = env.ledger().timestamp();
-        let elapsed = now
-            .checked_sub(subscription.last_charged)
-            .ok_or(ForgeError::ArithmeticOverflow)?;
-        let elapsed_periods = elapsed / subscription.period;
-        let periods = core::cmp::min(max_periods as u64, elapsed_periods);
-
+        let periods = elapsed.min(u64::from(max_periods));
+        let mut credit = Self::available_credit(&env, subscription_id);
         let mut total = 0_i128;
-        for _ in 0..periods {
+        for index in 0..periods {
             let next_due = subscription
                 .last_charged
                 .checked_add(subscription.period)
@@ -1130,13 +1181,9 @@ impl SubscriptionPayments {
             // meters are dropped as each period closes, so the first iteration
             // is the only one that can carry overage: every period that follows
             // derives the base amount. Same helper, same arithmetic, per period.
-            let amount = Self::derive_period_amount(&env, &subscription)?;
-            let transfer_result = token::TokenClient::new(&env, &subscription.token).try_transfer(
-                &subscription.subscriber,
-                &subscription.provider,
-                &amount,
-            );
-            if !matches!(transfer_result, Ok(Ok(()))) {
+            let (amount, left) = Self::catchup_period(&env, &subscription, index, credit)?;
+            credit = left;
+            if !Self::transfer_charge(&env, &subscription, &subscription.subscriber, amount) {
                 return Err(ForgeError::TokenTransferFailed);
             }
             total = total
@@ -1148,12 +1195,77 @@ impl SubscriptionPayments {
         }
 
         if periods > 0 {
+            Self::close_credit_period(&env, subscription_id, credit);
             subscription.failed_attempts = 0;
             subscription.status = SubscriptionStatus::Active;
             subscription.paused_at = None;
             Self::store_subscription(&env, subscription_id, &subscription);
         }
         Ok(total)
+    }
+
+    fn catchup_period(
+        env: &Env,
+        sub: &Subscription,
+        index: u64,
+        credit: i128,
+    ) -> Result<(i128, i128), ForgeError> {
+        let gross = if index == 0 {
+            Self::derive_period_amount(env, sub)?
+        } else {
+            sub.amount
+        };
+        Ok(apply_credit(gross, credit))
+    }
+
+    fn catchup_terms(env: &Env, id: u64, limit: u32) -> Result<(Subscription, u64), ForgeError> {
+        if limit > MAX_CATCHUP_PERIODS {
+            return Err(ForgeError::InvalidInput);
+        }
+        let sub = Self::get_subscription_impl(env, id)?;
+        if sub.status != SubscriptionStatus::Active || sub.prepaid_balance.is_some() {
+            return Err(ForgeError::InvalidInput);
+        }
+        let elapsed = match env.ledger().timestamp().checked_sub(sub.last_charged) {
+            Some(seconds) => seconds,
+            None if limit == 0 => 0,
+            None => return Err(ForgeError::ArithmeticOverflow),
+        };
+        let periods = elapsed / sub.period;
+        Ok((sub, periods))
+    }
+
+    /// Quote a successful catch-up, assuming the token transfers are authorized.
+    pub fn preview_catchup(
+        env: Env,
+        subscription_id: u64,
+        max_periods: u32,
+    ) -> Result<CatchupPreview, ForgeError> {
+        let (sub, elapsed) = Self::catchup_terms(&env, subscription_id, max_periods)?;
+        let periods = elapsed.min(u64::from(max_periods));
+        let mut credit = Self::available_credit(&env, subscription_id);
+        let mut chargeable_amount = 0_i128;
+        let mut arrears_remaining = 0_i128;
+        for index in 0..periods {
+            let (amount, left) = Self::catchup_period(&env, &sub, index, credit)?;
+            chargeable_amount = chargeable_amount
+                .checked_add(amount)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            credit = left;
+        }
+        if elapsed > periods {
+            let (first, left) = Self::catchup_period(&env, &sub, periods, credit)?;
+            let (rest, _) = flat_periods_due(sub.amount, elapsed - periods - 1, left)?;
+            arrears_remaining = first
+                .checked_add(rest)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+        }
+        Ok(CatchupPreview {
+            chargeable_amount,
+            prepaid_consumed: 0,
+            arrears_remaining,
+            resulting_status: sub.status,
+        })
     }
 
     /// Declare (or replace) the metered-usage quotas of `subscription_id`.
@@ -1248,7 +1360,11 @@ impl SubscriptionPayments {
     /// The amount the open period would bill right now (read-only view).
     pub fn quote_period(env: Env, subscription_id: u64) -> Result<i128, ForgeError> {
         let subscription = Self::get_subscription_impl(&env, subscription_id)?;
-        Self::derive_period_amount(&env, &subscription)
+        Ok(apply_credit(
+            Self::derive_period_amount(&env, &subscription)?,
+            Self::available_credit(&env, subscription_id),
+        )
+        .0)
     }
 
     /// Pause an active subscription, preventing charges while paused.
@@ -1342,6 +1458,7 @@ impl SubscriptionPayments {
                 soroban_forge_shared_utils::ttl::BUMP_AMOUNT,
             );
         }
+        Self::renew_credit(&env, subscription_id);
         Ok(())
     }
 
@@ -1522,6 +1639,14 @@ impl SubscriptionPayments {
         let key = DataKey::Subscription(subscription_id);
         env.storage().persistent().set(&key, subscription);
         bump_entry(env, &key);
+        Self::renew_credit(env, subscription_id);
+    }
+
+    fn renew_credit(env: &Env, id: u64) {
+        let key = DataKey::PlanCredit(id);
+        if env.storage().persistent().has(&key) {
+            bump_entry(env, &key);
+        }
     }
 
     /// Append `subscription_id` to an index, carrying the address the index
@@ -1636,6 +1761,30 @@ impl SubscriptionPayments {
             env.storage().instance().remove(&key);
         }
     }
+}
+
+fn apply_credit(amount: i128, credit: i128) -> (i128, i128) {
+    let used = amount.min(credit);
+    (amount - used, credit - used)
+}
+
+// Consume fully credited periods before multiplying so an intermediate gross
+// total cannot overflow when the net total is representable.
+fn flat_periods_due(amount: i128, periods: u64, credit: i128) -> Result<(i128, i128), ForgeError> {
+    let periods = i128::from(periods);
+    let covered = (credit / amount).min(periods);
+    let credit = credit - covered * amount;
+    if covered == periods {
+        return Ok((0, credit));
+    }
+    let tail = (periods - covered - 1)
+        .checked_mul(amount)
+        .ok_or(ForgeError::ArithmeticOverflow)?;
+    Ok((
+        tail.checked_add(amount - credit)
+            .ok_or(ForgeError::ArithmeticOverflow)?,
+        0,
+    ))
 }
 
 /// Derive the amount billable for one period: the base `amount` plus the
@@ -1755,6 +1904,15 @@ fn declares_metric(subscription: &Subscription, metric: &Symbol) -> bool {
 /// Lifecycle events emitted by the subscription payments contract.
 mod events {
     use super::*;
+
+    #[contractevent]
+    pub struct PlanChanged {
+        #[topic]
+        pub subscription_id: u64,
+        pub old_amount: i128,
+        pub new_amount: i128,
+        pub credit: i128,
+    }
 
     #[contractevent]
     pub struct Charged {
@@ -1929,6 +2087,8 @@ mod metering;
 mod prepaid;
 #[cfg(test)]
 mod props;
+#[cfg(test)]
+mod settlement;
 
 #[cfg(test)]
 mod indexer_fixtures;

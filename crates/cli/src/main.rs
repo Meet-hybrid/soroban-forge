@@ -23,8 +23,8 @@ mod decode_failure;
 use clap::{Parser, Subcommand};
 use cli::{
     BuildArgs, CompareArgs, DeployArgs, DeployCheckArgs, DoctorArgs, EventsArgs, InspectArgs,
-    InvokeArgs, LintArgs, NewArgs, ScaffoldValidateArgs, StorageDiffArgs, TestArgs,
-    ValidatePlanArgs, VerifyArgs,
+    InvokeArgs, KeysArgs, LintArgs, NewArgs, ProfileArgs, ScaffoldValidateArgs, StorageDiffArgs,
+    TestArgs, ValidatePlanArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 
@@ -56,6 +56,8 @@ pub enum Commands {
     ScaffoldValidate(ScaffoldValidateArgs),
     Verify(VerifyArgs),
     Invoke(InvokeArgs),
+    Keys(KeysArgs),
+    Profile(ProfileArgs),
     DecodeFailure(DecodeFailureArgs),
     Events(EventsArgs),
     Inspect(InspectArgs),
@@ -83,6 +85,8 @@ fn main() -> anyhow::Result<()> {
         Commands::ScaffoldValidate(args) => commands::scaffold_validate::run(args)?,
         Commands::Verify(args) => commands::verify::run(args)?,
         Commands::Invoke(args) => commands::invoke::run(args)?,
+        Commands::Keys(args) => commands::keys::run(args)?,
+        Commands::Profile(args) => commands::profile::run(args)?,
         Commands::DecodeFailure(args) => decode_failure::run(args)?,
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,

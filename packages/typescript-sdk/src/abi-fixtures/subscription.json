@@ -43,6 +43,22 @@
       ]
     },
     {
+      "name": "change_plan",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "new_amount",
+          "type": "i128"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "charge",
       "inputs": [
         {
@@ -191,6 +207,22 @@
       ],
       "outputs": [
         "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "preview_catchup",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "max_periods",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<udt:CatchupPreview,udt:ForgeError>"
       ]
     },
     {
@@ -504,6 +536,28 @@
       ]
     },
     {
+      "name": "PlanChanged",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "old_amount",
+          "type": "i128"
+        },
+        {
+          "name": "new_amount",
+          "type": "i128"
+        },
+        {
+          "name": "credit",
+          "type": "i128"
+        }
+      ]
+    },
+    {
       "name": "QuotasSet",
       "dataFormat": "scSpecEventDataFormatMap",
       "params": [
@@ -556,6 +610,28 @@
         {
           "name": "trigger_threshold",
           "type": "i128"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "CatchupPreview",
+      "fields": [
+        {
+          "name": "arrears_remaining",
+          "type": "i128"
+        },
+        {
+          "name": "chargeable_amount",
+          "type": "i128"
+        },
+        {
+          "name": "prepaid_consumed",
+          "type": "i128"
+        },
+        {
+          "name": "resulting_status",
+          "type": "udt:SubscriptionStatus"
         }
       ]
     },

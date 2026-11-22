@@ -10,6 +10,7 @@ import {
   type EscrowData,
   ForgeError,
 } from "@soroban-forge/escrow-client";
+import MultisigDashboard from "./multisig-dashboard";
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE = networks.testnet.networkPassphrase;
@@ -670,6 +671,8 @@ export default function Home() {
           </div>
         )}
       </section>
+
+      <MultisigDashboard account={account} mounted={mounted} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Create */}

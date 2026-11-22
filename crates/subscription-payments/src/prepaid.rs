@@ -168,7 +168,7 @@ fn prepaid_events_report_exact_amounts_and_resulting_balances() {
     assert_eq!(client.get_subscription(&id).prepaid_balance, Some(0));
 }
 
-fn events_named(
+pub(super) fn events_named(
     env: &Env,
     contract: &Address,
     name: &str,
@@ -189,7 +189,7 @@ fn events_named(
         .collect()
 }
 
-fn data_field(data: &ScVal, field: &str) -> ScVal {
+pub(super) fn data_field(data: &ScVal, field: &str) -> ScVal {
     let ScVal::Map(Some(entries)) = data else {
         panic!("event data is not a map: {data:?}");
     };
@@ -201,7 +201,7 @@ fn data_field(data: &ScVal, field: &str) -> ScVal {
         .unwrap_or_else(|| panic!("event data has no `{field}` field: {data:?}"))
 }
 
-fn sc_i128(value: i128) -> ScVal {
+pub(super) fn sc_i128(value: i128) -> ScVal {
     ScVal::I128(Int128Parts {
         hi: (value >> 64) as i64,
         lo: value as u64,

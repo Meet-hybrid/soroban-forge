@@ -123,6 +123,62 @@ returns either `{ ok: true, value }` for successful outcomes or a normalized
 failure object with `code`, `message`, and the original raw payload. Malformed
 input falls back to a safe error object instead of throwing.
 
+## Typed event decoders
+
+`indexer.ts` decodes event topics and values generically. The typed decoders
+turn a raw event (the base64 XDR `topic` array and `value` from `getEvents`)
+into a discriminated union keyed by event name, for all six contracts:
+
+```ts
+import { decodeEscrowEvent } from "@soroban-forge/escrow-client";
+
+const result = decodeEscrowEvent({ topic: record.topic, value: record.value });
+if (result.ok) {
+  switch (result.event.event) {
+    case "EscrowCreated":
+      console.log(result.event.fields.escrow_id, result.event.fields.data);
+      break;
+    case "DeadlineExtended":
+      console.log(result.event.fields.new_deadline);
+      break;
+  }
+} else {
+  console.warn(result.error.code, result.error.message);
+}
+```
+
+| Export | Purpose |
+| ------ | ------- |
+| `decodeEscrowEvent`, `decodeVestingEvent`, `decodeMultisigEvent`, `decodeSubscriptionEvent`, `decodeMarketplaceEvent`, `decodeDaoEvent` | Decode one raw event for that contract. |
+| `decodeContractEvent(contract, raw)` | Same, selecting the contract by name (`"escrow"`, `"vesting"`, `"multisig"`, `"subscription"`, `"marketplace"`, `"dao"`). |
+| `EscrowContractEvent`, `VestingContractEvent`, `MultisigContractEvent`, `SubscriptionContractEvent`, `MarketplaceContractEvent`, `DaoContractEvent`, `ForgeContractEvent` | Discriminated unions. Narrow on `contract` and `event`; `fields` is typed per event. |
+| `EventDecodeResult`, `EventDecodeError` | `{ ok: true, event }` or `{ ok: false, error }`. |
+| `FORGE_EVENT_SPECS`, `eventTopicSymbol` | The event layouts and the `topic[0]` symbol for an event name. |
+| `decodeIndexedEvents` | Decode indexer records using a contract ID to contract map. |
+
+Decoded values use the same representations as the generated clients: `u64`
+and `i128` are `bigint`, `u32` is `number`, addresses and symbols are strings.
+User-defined structs, enums and vectors are returned as plain decoded values.
+
+Decoding never throws. Failures carry a `code`: `invalid_input`,
+`malformed_topic`, `unknown_event` (for example a token `transfer` published
+next to a contract event), `malformed_value`, `missing_field` or
+`invalid_field`. Extra fields added to an event later are ignored.
+
+To use the decoders from the indexer, map contract IDs to contract names:
+
+```ts
+const indexer = createIndexer({
+  events,
+  decoders: { [escrowContractId]: "escrow" },
+});
+indexer.decoded(); // [{ record, result }]; result is null without a decoder
+```
+
+The event layouts are checked against `src/abi-fixtures/*.json` by
+`src/tests/event-decoders.test.ts`, so they cannot drift from the generated
+clients without a failing test.
+
 ## Generate all clients
 
 From this directory, run:

@@ -1,4 +1,5 @@
 use clap::Args;
+use clap::Subcommand;
 use clap::ValueEnum;
 use std::path::PathBuf;
 
@@ -130,6 +131,67 @@ pub struct InvokeArgs {
     /// Source account
     #[arg(long)]
     pub source: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct KeysArgs {
+    #[command(subcommand)]
+    pub command: KeysCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum KeysCommand {
+    /// Generate a random Ed25519 keypair.
+    Generate {
+        /// Emit credentials as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Decode and inspect a Stellar public key, contract id, or secret seed.
+    Inspect {
+        /// A G..., C..., or S... StrKey.
+        address_or_key: String,
+    },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProfileArgs {
+    /// Contract address or alias.
+    #[arg(long)]
+    pub contract: String,
+    /// Function name to simulate.
+    #[arg(long)]
+    pub function: String,
+    /// Function arguments (key=value format).
+    #[arg(long = "arg", action = clap::ArgAction::Append)]
+    pub args: Vec<String>,
+    /// Network name to use.
+    #[arg(long)]
+    pub network: Option<String>,
+    #[arg(long)]
+    pub network_profile: Option<String>,
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+    #[arg(long)]
+    pub network_passphrase: Option<String>,
+    /// Source account used for simulation when the network requires one.
+    #[arg(long)]
+    pub source: Option<String>,
+    /// Emit a machine-readable JSON report.
+    #[arg(long)]
+    pub json: bool,
+    /// Maximum allowed CPU instructions.
+    #[arg(long, default_value_t = 100_000_000)]
+    pub max_instructions: u64,
+    /// Maximum allowed metered memory bytes.
+    #[arg(long, default_value_t = 40_000_000)]
+    pub max_memory_bytes: u64,
+    /// Maximum allowed ledger read entries.
+    #[arg(long, default_value_t = 200)]
+    pub max_read_entries: u64,
+    /// Maximum allowed ledger write entries.
+    #[arg(long, default_value_t = 100)]
+    pub max_write_entries: u64,
 }
 
 #[derive(Args, Debug, Clone)]

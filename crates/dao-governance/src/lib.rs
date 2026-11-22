@@ -1764,6 +1764,183 @@ mod tests {
     }
 
     #[test]
+    fn propose_rejects_deep_cycle_and_self_reference_deterministically() {
+        let (env, _token, _tc, contract_id, client, accounts) = bonded_env!();
+        let target = env.register(MockTarget, ());
+        let a = client.propose(
+            &accounts.user1,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let b = client.propose(
+            &accounts.user2,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let c = client.propose(
+            &accounts.user3,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let d = client.propose(
+            &accounts.validator,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let candidate = d + 1;
+
+        env.as_contract(&contract_id, || {
+            for (id, requires) in [
+                (a, soroban_sdk::vec![&env, b]),
+                (b, soroban_sdk::vec![&env, c]),
+                (c, soroban_sdk::vec![&env, d]),
+                (d, soroban_sdk::vec![&env, candidate]),
+            ] {
+                let mut record: Proposal = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::Proposal(id))
+                    .unwrap();
+                record.requires = requires;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::Proposal(id), &record);
+            }
+        });
+
+        let edge = soroban_sdk::vec![&env, a];
+        assert_eq!(
+            client
+                .try_propose(
+                    &accounts.user1,
+                    &target,
+                    &payload(&env),
+                    &DURATION,
+                    &edge,
+                    &None
+                )
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        let self_reference = soroban_sdk::vec![&env, candidate];
+        assert_eq!(
+            client
+                .try_propose(
+                    &accounts.user1,
+                    &target,
+                    &payload(&env),
+                    &DURATION,
+                    &self_reference,
+                    &None
+                )
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+    }
+
+    #[test]
+    fn diamond_dependencies_execute_in_topological_order() {
+        let (env, client, accounts, a, target) = setup!();
+        let b = client.propose(
+            &accounts.user2,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::vec![&env, a],
+            &None,
+        );
+        let c = client.propose(
+            &accounts.user3,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::vec![&env, a],
+            &None,
+        );
+        let d = client.propose(
+            &accounts.validator,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::vec![&env, b, c],
+            &None,
+        );
+        for id in [a, b, c, d] {
+            client.vote(&id, &accounts.user2, &true);
+        }
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&d);
+        assert_eq!(
+            client.try_execute(&d).unwrap_err().unwrap(),
+            ForgeError::DeadlineReached
+        );
+        client.execute(&a);
+        client.execute(&a);
+        client.execute(&b);
+        client.execute(&b);
+        client.execute(&c);
+        client.execute(&c);
+        client.execute(&d);
+        assert_eq!(client.get_proposal(&d).state, ProposalState::Executed);
+    }
+
+    #[test]
+    fn defeated_dependency_blocks_only_its_dependents() {
+        let (env, client, accounts, dependency, target) = setup!();
+        let blocked = client.propose(
+            &accounts.user2,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::vec![&env, dependency],
+            &None,
+        );
+        let independent = client.propose(
+            &accounts.user3,
+            &target,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        client.vote(&dependency, &accounts.user2, &false);
+        client.vote(&blocked, &accounts.user3, &true);
+        client.vote(&independent, &accounts.user1, &true);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&dependency);
+        client.execute(&blocked);
+        client.execute(&independent);
+        client.execute(&independent);
+        assert_eq!(
+            client.try_execute(&blocked).unwrap_err().unwrap(),
+            ForgeError::ContractInvocationFailed
+        );
+        assert_eq!(
+            client.get_proposal(&blocked).state,
+            ProposalState::Succeeded
+        );
+        assert_eq!(
+            client.get_proposal(&independent).state,
+            ProposalState::Executed
+        );
+    }
+
+    #[test]
     fn dependency_guard_orders_execution_and_keeps_failed_state_untouched() {
         let (env, client, accounts, dependency, target) = setup!();
         let requires = soroban_sdk::vec![&env, dependency];

@@ -1,4 +1,9 @@
 import { xdr } from "@stellar/stellar-sdk";
+import {
+  decodeIndexedEvents,
+  type ContractDecoderMap,
+  type DecodedIndexedEvent,
+} from "./event-decoders.js";
 
 export interface IndexerCursor {
   ledger: number;
@@ -593,6 +598,8 @@ export function createIndexer(
     network?: string;
     contractIds?: ReadonlyArray<string>;
     checkpoint?: IndexerCheckpoint | string;
+    /** Optional contract ID -> Soroban Forge contract map; enables `decoded()`. */
+    decoders?: ContractDecoderMap;
   } = {},
 ) {
   const items = normalizeEvents(options.events ?? []);
@@ -623,6 +630,13 @@ export function createIndexer(
     filter(filter: EventFilter = {}) {
       return filterEvents(items, filter);
     },
+    /** Typed decode of matching events; `result` is null for contracts without a decoder. */
+    decoded(filter: EventFilter = {}): DecodedIndexedEvent[] {
+      return decodeIndexedEvents(
+        filterEvents(items, filter),
+        options.decoders ?? {},
+      );
+    },
     append(newEvents: ReadonlyArray<unknown>) {
       const currentCursor =
         items.length === 0 ? resumeCursor : this.cursor();
@@ -632,6 +646,7 @@ export function createIndexer(
       const merged = normalizeEvents([...items, ...newItems]);
       return createIndexer({
         events: merged,
+        ...(options.decoders ? { decoders: options.decoders } : {}),
         ...(identity
           ? {
               network: identity.network,
