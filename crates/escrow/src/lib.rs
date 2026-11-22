@@ -55,6 +55,29 @@
 //! * The existing `release` entrypoint pays the full remaining balance in
 //!   one shot and is unchanged; it still transitions directly to `Completed`.
 //!
+//! ## Milestone schedules
+//!
+//! `create_milestone_escrow(buyer, seller, arbiter, token, amounts, timeout)`
+//! fixes an ordered payment plan up front. It is an ordinary single-token
+//! escrow funded with `sum(amounts)` plus a [`MilestoneSchedule`] stored at
+//! `DataKey::Milestones(id)`, so deposit, dispute, resolution, refunds, TTL and
+//! every existing event keep working unchanged.
+//!
+//! * Each amount must be `> 0`, the count must be between 1 and
+//!   [`MAX_MILESTONES`] (20), and the total must not overflow `i128`.
+//! * `approve_milestone(escrow_id, index)` is **buyer**-authorized and pays
+//!   exactly `amounts[index]` to the seller, but only for the next unpaid
+//!   milestone: approving out of order, twice, or past the end is
+//!   `InvalidInput`. The final approval completes the escrow.
+//! * The seller is paid only by schedule: `release`, `release_partial` and
+//!   `request_release` return `InvalidInput` for a milestone escrow, so no
+//!   ad-hoc amount can skip or split a milestone.
+//! * A dispute freezes the unpaid milestones. `resolve`, `resolve_split`,
+//!   `refund` and `refund_expired` already settle only the remaining balance,
+//!   which for a milestone escrow is exactly the unpaid remainder; milestones
+//!   already paid are never clawed back.
+//! * Conservation: `paid + refunded + held == sum(amounts)` at every step.
+//!
 //! ## Multi-asset baskets
 //!
 //! A single token per escrow cannot express the trades that actually happen:
@@ -261,6 +284,13 @@ mod ttl {
 /// case inside Soroban's instruction budget, and it bounds the pairwise
 /// duplicate-token scan performed at creation.
 const MAX_BASKET_ASSETS: u32 = 8;
+
+/// Maximum number of milestones one milestone escrow may schedule.
+///
+/// Each approval is one transfer and one rewrite of the schedule entry, and
+/// [`SorobanForgeEscrow::get_milestones`] returns the whole list, so the cap
+/// keeps both the stored entry and the view far inside Soroban's limits.
+pub const MAX_MILESTONES: u32 = 20;
 
 /// Review window used when an escrow is created without one: 3 days.
 pub const DEFAULT_REVIEW_PERIOD: u64 = 3 * 24 * 60 * 60;
@@ -540,6 +570,53 @@ pub trait SorobanForgeEscrow {
     /// * [`ForgeError::NotFound`] — no escrow with this id.
     /// * [`ForgeError::InvalidInput`] — escrow is not `Pending`.
     fn cancel(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    // -------------------------------------------------------------------
+    // Milestone schedules
+    // -------------------------------------------------------------------
+
+    /// Create a single-token escrow whose seller is paid by a fixed, ordered
+    /// milestone schedule, and return its stable id.
+    ///
+    /// The escrow amount is the sum of `amounts`. Buyer-authorized only, like
+    /// [`Self::create_escrow`]; validation runs before authorization.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — zero timeout, no milestones, more than
+    ///   [`MAX_MILESTONES`], or a non-positive milestone amount.
+    /// * [`ForgeError::ArithmeticOverflow`] — the milestone total overflows
+    ///   `i128`, or the id counter overflowed.
+    fn create_milestone_escrow(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        token: Address,
+        amounts: Vec<i128>,
+        timeout: u64,
+    ) -> Result<u64, ForgeError>;
+
+    /// Buyer approves milestone `index` and the seller is paid exactly that
+    /// milestone's amount. Only the next unpaid milestone may be approved, and
+    /// only while the escrow is `Funded`; the last approval completes it.
+    /// Emits `MilestoneReleased`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no milestone escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — not `Funded` (pending, disputed or
+    ///   settled), or `index` is not the next unpaid milestone.
+    /// * [`ForgeError::TokenTransferFailed`] — the token rejected the payout.
+    fn approve_milestone(env: Env, escrow_id: u64, index: u32) -> Result<(), ForgeError>;
+
+    /// Every milestone of a milestone escrow, in order, with its amount and
+    /// status.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no milestone escrow with this id.
+    fn get_milestones(env: Env, escrow_id: u64) -> Result<Vec<Milestone>, ForgeError>;
 
     // -------------------------------------------------------------------
     // Multi-asset baskets
@@ -1001,6 +1078,49 @@ pub struct ReleaseRequest {
     pub release_at: u64,
 }
 
+/// Status of one milestone, as reported by
+/// [`SorobanForgeEscrow::get_milestones`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MilestoneStatus {
+    /// Not paid yet; the buyer can approve it once every earlier milestone is
+    /// paid and the escrow is funded.
+    Unpaid,
+    /// Approved by the buyer and paid to the seller.
+    Paid,
+    /// Not paid, and frozen by an open dispute until the arbiter resolves.
+    Frozen,
+    /// Not paid by schedule: the unpaid remainder was settled by a refund,
+    /// an expiry refund or the arbiter.
+    Settled,
+    /// The escrow was cancelled before funding.
+    Cancelled,
+}
+
+/// One scheduled milestone and its status.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Milestone {
+    /// Position in the schedule, starting at `0`.
+    pub index: u32,
+    /// Amount paid to the seller when this milestone is approved.
+    pub amount: i128,
+    /// Current status.
+    pub status: MilestoneStatus,
+}
+
+/// The stored milestone plan of a milestone escrow, under
+/// [`DataKey::Milestones`]. Kept outside [`EscrowData`] so the escrow record
+/// and every event carrying it keep their existing shape.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MilestoneSchedule {
+    /// Milestone amounts in payment order. Their sum is the escrow `amount`.
+    pub amounts: Vec<i128>,
+    /// How many milestones have been paid; the next approvable index.
+    pub paid: u32,
+}
+
 /// Stable machine-readable eligibility marker or ineligibility reason.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1013,6 +1133,9 @@ pub enum ActionIneligibilityReason {
     ReviewWindowNotEnded,
     ReleasePending,
     NoPendingRequest,
+    /// The escrow pays the seller only through its milestone schedule
+    /// (`approve_milestone`), so ad-hoc release paths are closed.
+    MilestoneSchedule,
 }
 
 /// The caller-facing escrow actions represented in an action summary.
@@ -1140,6 +1263,9 @@ pub enum DataKey {
     /// fee (including every record written before fees existed) simply read
     /// as `0`.
     ArbiterFee(u64),
+    /// The [`MilestoneSchedule`] of milestone escrow `u64`. Absent for every
+    /// other escrow, which is how ad-hoc release paths tell them apart.
+    Milestones(u64),
 }
 
 /// The deployable escrow contract.
@@ -1403,7 +1529,7 @@ impl Escrow {
         let escrow = Self::load_escrow(&env, escrow_id)?;
         escrow.buyer.require_auth();
 
-        if escrow.status != EscrowStatus::Funded {
+        if escrow.status != EscrowStatus::Funded || is_milestone_escrow(&env, escrow_id) {
             return Err(ForgeError::InvalidInput);
         }
 
@@ -1439,8 +1565,9 @@ impl Escrow {
         let escrow = Self::load_escrow(&env, escrow_id)?;
         escrow.buyer.require_auth();
 
-        // All validation before any state change or transfer.
-        if escrow.status != EscrowStatus::Funded {
+        // All validation before any state change or transfer. A milestone
+        // escrow pays only by schedule, never an ad-hoc amount.
+        if escrow.status != EscrowStatus::Funded || is_milestone_escrow(&env, escrow_id) {
             return Err(ForgeError::InvalidInput);
         }
         if amount <= 0 {
@@ -1733,6 +1860,121 @@ impl Escrow {
         Self::remove_participant_indexes(&env, escrow_id, &cancelled);
         events::cancelled(&env, &cancelled);
         Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // Milestone schedules
+    // -------------------------------------------------------------------
+
+    /// Create a milestone escrow: a single-token escrow for `sum(amounts)`
+    /// whose seller is paid one milestone at a time, in order, on the buyer's
+    /// approval. Buyer-authorized only; validation runs before authorization.
+    pub fn create_milestone_escrow(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        token: Address,
+        amounts: Vec<i128>,
+        timeout: u64,
+    ) -> Result<u64, ForgeError> {
+        if timeout == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        let total = milestone_total(&amounts)?;
+        let id = Self::create_single(
+            &env,
+            buyer,
+            seller,
+            arbiter,
+            token,
+            total,
+            timeout,
+            DEFAULT_REVIEW_PERIOD,
+            0,
+        )?;
+        let key = DataKey::Milestones(id);
+        env.storage()
+            .persistent()
+            .set(&key, &MilestoneSchedule { amounts, paid: 0 });
+        bump_entry(&env, &key);
+        Ok(id)
+    }
+
+    /// Buyer approves milestone `index`; the seller is paid exactly that
+    /// milestone. Only the next unpaid milestone of a `Funded` escrow can be
+    /// approved, so a dispute (status `Disputed`) freezes the rest of the
+    /// schedule. Transfer before state, as on every other payout path.
+    pub fn approve_milestone(env: Env, escrow_id: u64, index: u32) -> Result<(), ForgeError> {
+        let escrow = Self::load_escrow(&env, escrow_id)?;
+        let mut schedule = load_schedule(&env, escrow_id)?;
+        if escrow.status != EscrowStatus::Funded || index != schedule.paid {
+            return Err(ForgeError::InvalidInput);
+        }
+        let amount = schedule
+            .amounts
+            .get(index)
+            .ok_or(ForgeError::InvalidInput)?;
+        let remaining = escrow.remaining();
+        if amount <= 0 || amount > remaining {
+            return Err(ForgeError::InvalidInput);
+        }
+        escrow.buyer.require_auth();
+
+        payout_part(&env, &single_leg(&env, &escrow), 0, &escrow.seller, amount)?;
+
+        let mut updated = escrow;
+        updated.released = updated
+            .released
+            .checked_add(amount)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        schedule.paid = index.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;
+        let last = schedule.paid == schedule.amounts.len();
+        if last {
+            updated.status = EscrowStatus::Completed;
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &updated);
+        bump_entry(&env, &DataKey::Escrow(escrow_id));
+        let key = DataKey::Milestones(escrow_id);
+        env.storage().persistent().set(&key, &schedule);
+        bump_entry(&env, &key);
+        clear_request(&env, escrow_id);
+        events::milestone_released(&env, escrow_id, index, amount);
+        if last {
+            // The final milestone is a terminal payout, so it also publishes
+            // the same terminal signal as every other completing path.
+            events::released(&env, &updated);
+        }
+        Ok(())
+    }
+
+    /// Every milestone of a milestone escrow with its amount and status.
+    pub fn get_milestones(env: Env, escrow_id: u64) -> Result<Vec<Milestone>, ForgeError> {
+        let escrow = Self::load_escrow(&env, escrow_id)?;
+        let schedule = load_schedule(&env, escrow_id)?;
+        let unpaid = match escrow.status {
+            EscrowStatus::Pending | EscrowStatus::Funded => MilestoneStatus::Unpaid,
+            EscrowStatus::Disputed => MilestoneStatus::Frozen,
+            EscrowStatus::Cancelled => MilestoneStatus::Cancelled,
+            EscrowStatus::Completed | EscrowStatus::Refunded => MilestoneStatus::Settled,
+        };
+        let mut milestones = Vec::new(&env);
+        for (index, amount) in (0u32..).zip(schedule.amounts.iter()) {
+            let status = if index < schedule.paid {
+                MilestoneStatus::Paid
+            } else {
+                unpaid.clone()
+            };
+            milestones.push_back(Milestone {
+                index,
+                amount,
+                status,
+            });
+        }
+        Ok(milestones)
     }
 
     // -------------------------------------------------------------------
@@ -2067,7 +2309,7 @@ impl Escrow {
     /// deadline, and one request at a time.
     pub fn request_release(env: Env, escrow_id: u64, amount: i128) -> Result<u64, ForgeError> {
         let escrow = Self::load_escrow(&env, escrow_id)?;
-        if escrow.status != EscrowStatus::Funded {
+        if escrow.status != EscrowStatus::Funded || is_milestone_escrow(&env, escrow_id) {
             return Err(ForgeError::InvalidInput);
         }
         if amount <= 0 || amount > escrow.remaining() {
@@ -2267,6 +2509,11 @@ impl Escrow {
             bump_entry(&env, &DataKey::Basket(escrow_id));
         } else if let Ok(_single) = Self::load_escrow(&env, escrow_id) {
             bump_entry(&env, &DataKey::Escrow(escrow_id));
+            // A milestone escrow's schedule must live exactly as long as the
+            // record it belongs to.
+            if is_milestone_escrow(&env, escrow_id) {
+                bump_entry(&env, &DataKey::Milestones(escrow_id));
+            }
         } else {
             return Err(ForgeError::NotFound);
         }
@@ -2481,6 +2728,8 @@ fn build_action_summary(
         .storage()
         .persistent()
         .get::<_, ReleaseRequest>(&DataKey::ReleaseRequest(escrow_id));
+    // A milestone escrow pays the seller only through `approve_milestone`.
+    let milestone = single_token && is_milestone_escrow(env, escrow_id);
     let mut actions = Vec::new(env);
 
     fn add(
@@ -2518,6 +2767,8 @@ fn build_action_summary(
 
     let (allowed, reason) = if status != EscrowStatus::Funded {
         (false, Some(ActionIneligibilityReason::WrongStatus))
+    } else if milestone {
+        (false, Some(ActionIneligibilityReason::MilestoneSchedule))
     } else if caller != seller {
         (false, Some(ActionIneligibilityReason::WrongRole))
     } else {
@@ -2584,6 +2835,8 @@ fn build_action_summary(
     } {
         let (allowed, reason) = if status != EscrowStatus::Funded {
             (false, Some(ActionIneligibilityReason::WrongStatus))
+        } else if milestone {
+            (false, Some(ActionIneligibilityReason::MilestoneSchedule))
         } else if caller != buyer {
             (false, Some(ActionIneligibilityReason::WrongRole))
         } else {
@@ -2764,6 +3017,39 @@ fn clear_request(env: &Env, escrow_id: u64) {
     env.storage()
         .persistent()
         .remove(&DataKey::ReleaseRequest(escrow_id));
+}
+
+/// Whether escrow `escrow_id` carries a milestone schedule.
+fn is_milestone_escrow(env: &Env, escrow_id: u64) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::Milestones(escrow_id))
+}
+
+/// The milestone schedule of `escrow_id`, or `NotFound` for any other escrow.
+fn load_schedule(env: &Env, escrow_id: u64) -> Result<MilestoneSchedule, ForgeError> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Milestones(escrow_id))
+        .ok_or(ForgeError::NotFound)
+}
+
+/// Validate a milestone plan and return its total: between 1 and
+/// [`MAX_MILESTONES`] entries, each positive, with a sum that fits in `i128`.
+fn milestone_total(amounts: &Vec<i128>) -> Result<i128, ForgeError> {
+    if amounts.is_empty() || amounts.len() > MAX_MILESTONES {
+        return Err(ForgeError::InvalidInput);
+    }
+    let mut total: i128 = 0;
+    for amount in amounts.iter() {
+        if amount <= 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        total = total
+            .checked_add(amount)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+    }
+    Ok(total)
 }
 
 fn set_review_period(env: &Env, escrow_id: u64, seconds: u64) {
@@ -3270,6 +3556,17 @@ mod events {
         pub buyer_award: i128,
     }
 
+    /// The buyer approved milestone `index` of a milestone escrow and the
+    /// seller received exactly `amount`. The final milestone is also followed
+    /// by a terminal `Released` event.
+    #[contractevent]
+    pub struct MilestoneReleased {
+        #[topic]
+        pub escrow_id: u64,
+        pub index: u32,
+        pub amount: i128,
+    }
+
     // Basket events are additive variants that mirror the single-token ones:
     // the id is a topic, and `data` carries the full `BasketEscrowData` so an
     // indexer reconstructs per-asset state without a read call. No existing
@@ -3460,6 +3757,15 @@ mod events {
         .publish(env);
     }
 
+    pub fn milestone_released(env: &Env, escrow_id: u64, index: u32, amount: i128) {
+        MilestoneReleased {
+            escrow_id,
+            index,
+            amount,
+        }
+        .publish(env);
+    }
+
     pub fn cancelled(env: &Env, escrow: &EscrowData) {
         Cancelled {
             escrow_id: escrow.escrow_id,
@@ -3583,3 +3889,9 @@ mod indexer_fixtures;
 
 #[cfg(test)]
 mod model_check;
+
+#[cfg(test)]
+mod milestone_tests;
+
+#[cfg(test)]
+mod milestone_props;
