@@ -3,6 +3,22 @@
   "contract": "soroban-forge-subscription-payments",
   "functions": [
     {
+      "name": "accept_provider",
+      "inputs": [
+        {
+          "name": "id",
+          "type": "u64"
+        },
+        {
+          "name": "provider",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "authorize_provider",
       "inputs": [
         {
@@ -35,6 +51,18 @@
       "inputs": [
         {
           "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "cancel_provider_change",
+      "inputs": [
+        {
+          "name": "id",
           "type": "u64"
         }
       ],
@@ -182,6 +210,18 @@
       ]
     },
     {
+      "name": "grace_deadline",
+      "inputs": [
+        {
+          "name": "id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<option<u64>,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "is_provider_authorized",
       "inputs": [
         {
@@ -210,6 +250,18 @@
       ]
     },
     {
+      "name": "pending_provider",
+      "inputs": [
+        {
+          "name": "id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<option<address>,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "preview_catchup",
       "inputs": [
         {
@@ -223,6 +275,22 @@
       ],
       "outputs": [
         "result<udt:CatchupPreview,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "propose_provider",
+      "inputs": [
+        {
+          "name": "id",
+          "type": "u64"
+        },
+        {
+          "name": "provider",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -286,6 +354,38 @@
       ]
     },
     {
+      "name": "rollover_remaining",
+      "inputs": [
+        {
+          "name": "id",
+          "type": "u64"
+        },
+        {
+          "name": "metric",
+          "type": "symbol"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_grace_period",
+      "inputs": [
+        {
+          "name": "id",
+          "type": "u64"
+        },
+        {
+          "name": "seconds",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "set_quotas",
       "inputs": [
         {
@@ -295,6 +395,26 @@
         {
           "name": "quotas",
           "type": "vec<udt:MetricQuota>"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_rollover_cap",
+      "inputs": [
+        {
+          "name": "id",
+          "type": "u64"
+        },
+        {
+          "name": "metric",
+          "type": "symbol"
+        },
+        {
+          "name": "cap",
+          "type": "u64"
         }
       ],
       "outputs": [
