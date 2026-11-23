@@ -64,6 +64,8 @@ pub enum ForgeError {
     /// [`ForgeError::InvalidInput`] so a wallet can explain why the refund
     /// was refused and offer the dispute path.
     ReleasePending = 16,
+    /// The current lifecycle state does not allow the operation.
+    InvalidState = 17,
 }
 
 #[cfg(test)]

@@ -999,11 +999,8 @@ fn split_recipients(
 /// intermediate product even for `i128::MAX`; `bps <= 10_000` ensures the
 /// share never exceeds amount.
 fn split(amount: i128, bps: u32) -> Result<(i128, i128), ForgeError> {
-    let bps = bps as i128;
-    let royalty_share = (amount / 10_000)
-        .checked_mul(bps)
-        .and_then(|whole| whole.checked_add((amount % 10_000) * bps / 10_000))
-        .ok_or(ForgeError::ArithmeticOverflow)?;
+    let royalty_share =
+        soroban_forge_shared_utils::math::mul_div_floor(amount, i128::from(bps), 10_000)?;
     let seller_net = amount
         .checked_sub(royalty_share)
         .ok_or(ForgeError::ArithmeticOverflow)?;

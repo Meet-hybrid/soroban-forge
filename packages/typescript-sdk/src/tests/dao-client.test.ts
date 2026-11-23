@@ -15,7 +15,7 @@ test("dao: every ABI method encodes zero and edge arguments", () => {
   assertEveryMethodEncodes("dao", client);
 });
 
-test("dao: ForgeError 1 through 16 map to names and messages", () => assertForgeErrors(dao.ForgeError));
+test("dao: ForgeError 1 through 17 map to names and messages", () => assertForgeErrors(dao.ForgeError));
 
 test("dao: main read methods decode fixture ScVals", async () => {
   const server = new FixtureRpcServer(successfulSimulation(nativeToScVal(9n, { type: "u64" })));

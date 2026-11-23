@@ -57,6 +57,10 @@ const SUBSCRIPTION_BALANCE = {
 } as const;
 
 export const ESCROW_EVENT_SPECS = {
+  ArbiterReplaced: {
+    topics: 1,
+    fields: { escrow_id: "u64", old_arbiter: "address", new_arbiter: "address" },
+  },
   BasketCancelled: { topics: 1, fields: BASKET_DATA },
   BasketCreated: { topics: 1, fields: BASKET_DATA },
   BasketDeposited: { topics: 1, fields: BASKET_DATA },
