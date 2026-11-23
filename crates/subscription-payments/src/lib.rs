@@ -1353,9 +1353,13 @@ impl SubscriptionPayments {
         let balance = subscription
             .prepaid_balance
             .ok_or(ForgeError::InsufficientFunds)?;
-        let remaining = balance
-            .checked_sub(amount)
-            .ok_or(ForgeError::InsufficientFunds)?;
+        // `checked_sub` on i128 only catches overflow, not a negative result,
+        // so compare explicitly: otherwise an over-withdrawal would be paid out
+        // of other subscriptions' escrowed funds.
+        if amount > balance {
+            return Err(ForgeError::InsufficientFunds);
+        }
+        let remaining = balance - amount;
         let transfer_result = token::TokenClient::new(&env, &subscription.token).try_transfer(
             &env.current_contract_address(),
             &subscription.subscriber,
@@ -2386,6 +2390,8 @@ mod authz;
 mod auto_topup;
 #[cfg(test)]
 mod conservation;
+#[cfg(test)]
+mod lifecycle_props;
 #[cfg(test)]
 mod metering;
 #[cfg(test)]
