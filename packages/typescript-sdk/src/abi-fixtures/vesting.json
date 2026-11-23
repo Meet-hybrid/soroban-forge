@@ -201,6 +201,46 @@
       "outputs": [
         "result<void,udt:ForgeError>"
       ]
+    },
+    {
+      "name": "schedules_for_beneficiary",
+      "inputs": [
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<vec<u64>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "schedules_for_funder",
+      "inputs": [
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<vec<u64>,udt:ForgeError>"
+      ]
     }
   ],
   "events": [

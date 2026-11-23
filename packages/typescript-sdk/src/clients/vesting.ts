@@ -435,6 +435,12 @@ export interface Client {
   reassign_beneficiary: ({schedule_id, new_beneficiary}: {schedule_id: u64, new_beneficiary: string}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
+   * Construct and simulate a schedules_for_funder transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * List schedule IDs in creation order for the recorded funder.
+   */
+  schedules_for_funder: ({funder, offset, limit}: {funder: string, offset: u32, limit: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Array<u64>>>>
+
+  /**
    * Construct and simulate a create_schedules_batch transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Create multiple linear vesting schedules in one atomic call.
    *
@@ -458,6 +464,12 @@ export interface Client {
    * creation timestamp, the "TGE tranche" of a typical grant agreement.
    */
   create_tranche_schedule: ({beneficiary, token, tranches}: {beneficiary: string, token: string, tranches: Array<Tranche>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
+
+  /**
+   * Construct and simulate a schedules_for_beneficiary transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * List schedule IDs in creation order for the current beneficiary.
+   */
+  schedules_for_beneficiary: ({beneficiary, offset, limit}: {beneficiary: string, offset: u32, limit: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<Array<u64>>>>
 
 }
 export class Client extends ContractClient {
@@ -495,6 +507,8 @@ export class Client extends ContractClient {
         "AAAAAAAAAeZSZWFzc2lnbiBvbmx5IGEgbGluZWFyIHNjaGVkdWxlJ3MgdW52ZXN0ZWQgYmFsYW5jZS4KClRoZSBvbGQgYmVuZWZpY2lhcnkncyB2ZXN0ZWQtYnV0LXVuY2xhaW1lZCBhbW91bnQgaXMgZnJvemVuIHVuZGVyIGEKc2NoZWR1bGUtc2NvcGVkIGNsYWltIGtleTsgY2xpZmYgYW5kIGR1cmF0aW9uIHJlbWFpbiB1bmNoYW5nZWQuCgojIEVycm9ycwoKKiBbYEZvcmdlRXJyb3I6Ok5vdEZvdW5kYF0g4oCUIG5vIGxpbmVhciBzY2hlZHVsZSB3aXRoIHRoaXMgaWQuCiogW2BGb3JnZUVycm9yOjpJbnZhbGlkSW5wdXRgXSDigJQgdGhlIHNjaGVkdWxlIGlzIGNvbXBsZXRlZCBvciByZXZva2VkLApvciB0aGUgbmV3IGJlbmVmaWNpYXJ5IGlzIGFscmVhZHkgdGhlIGN1cnJlbnQgYmVuZWZpY2lhcnkgb3IgZnVuZGVyLgoqIFtgRm9yZ2VFcnJvcjo6VW5hdXRob3JpemVkYF0g4oCUIHRoZSBmdW5kZXIncyBhdXRob3JpemF0aW9uIGlzIG1pc3NpbmcKb3IgaW52YWxpZC4AAAAAABRyZWFzc2lnbl9iZW5lZmljaWFyeQAAAAIAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAAAAAAAD25ld19iZW5lZmljaWFyeQAAAAATAAAAAQAAA+kAAAACAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAAvZSZWZ1bmQgdGhlIHVudmVzdGVkIHJlbWFpbmRlciBvZiBhIHJldm9rZWQgbGluZWFyIHNjaGVkdWxlIHRvIGl0cwpmdW5kZXIgYW5kIHJldHVybiB0aGUgYW1vdW50IHRyYW5zZmVycmVkLgoKVGhlIHJlZnVuZGFibGUgYW1vdW50IGlzIGB0b3RhbF9hbW91bnQgLSByZXZva2VkX3Zlc3RlZCAtCmFscmVhZHlfcmVmdW5kZWRgLCBjb21wdXRlZCB3aXRoIGNoZWNrZWQgYXJpdGhtZXRpYy4gVGhlIFNFUC00MQp0cmFuc2ZlciBydW5zIGJlZm9yZSB0aGUgcmVmdW5kZWQgdG90YWwgaXMgd3JpdHRlbiwgc28gYSBmYWlsZWQKdHJhbnNmZXIgcmVjb3JkcyBub3RoaW5nLiBXaGVuIG5vdGhpbmcgaXMgcmVmdW5kYWJsZSB0aGUgY2FsbCByZXR1cm5zCmAwYCB3aXRob3V0IGEgdHJhbnNmZXIsIGEgd3JpdGUsIG9yIGFuIGV2ZW50LCBzbyByZXBlYXRpbmcgaXQgY2FuIG5ldmVyCnBheSB0d2ljZS4KCiMgRXJyb3JzCgoqIFtgRm9yZ2VFcnJvcjo6Tm90Rm91bmRgXSDigJQgbm8gbGluZWFyIHNjaGVkdWxlIHdpdGggdGhpcyBpZC4KKiBbYEZvcmdlRXJyb3I6OkludmFsaWRJbnB1dGBdIOKAlCB0aGUgc2NoZWR1bGUgaXMgbm90IGBSZXZva2VkYC4KKiBbYEZvcmdlRXJyb3I6OkFyaXRobWV0aWNPdmVyZmxvd2BdIOKAlCB0aGUgcmVmdW5kYWJsZSBhbW91bnQgZG9lcyBub3QKZml0IHRoZSByZWNvcmRlZCB0b3RhbHMuCiogW2BGb3JnZUVycm9yOjpUb2tlblRyYW5zZmVyRmFpbGVkYF0g4oCUIHRoZSB0b2tlbiByZWplY3RlZCB0aGUgcmVmdW5kLgAAAAAADnJlZnVuZF9yZXZva2VkAAAAAAABAAAAAAAAAAtzY2hlZHVsZV9pZAAAAAAGAAAAAQAAA+kAAAALAAAH0AAAAApGb3JnZUVycm9yAAA=",
         "AAAAAAAAAxNSZXZva2UgYSBsaW5lYXIgc2NoZWR1bGUgYmVmb3JlIGNvbXBsZXRpb24gYW5kIHBlcm1hbmVudGx5IHN0b3AKZnVydGhlciB2ZXN0aW5nLgoKVHJhbnNpdGlvbnMgYExvY2tlZCB8IFZlc3RpbmcgLT4gUmV2b2tlZGAgYW5kIGZyZWV6ZXMgdGhlIHZlc3RlZAphbW91bnQgYXQgdGhpcyBsZWRnZXIgdGltZXN0YW1wIGludG8gYHJldm9rZWRfdmVzdGVkYDogYGNsYWltYAphZnRlcndhcmRzIHN1Y2NlZWRzIG9ubHkgdXAgdG8gdGhhdCBhbW91bnQsIGFuZCBgY2xhaW1hYmxlYCByZXR1cm5zCmAwYCBvbmNlIGl0IGlzIGNsYWltZWQuIFB1cmUgc3RhdGUtbWFjaGluZSBsb2dpYyDigJQgbm8gdG9rZW5zIG1vdmUgYXQKcmV2b2NhdGlvbi4gUmVxdWlyZXMgdGhlIGBmdW5kZXJgIHJlY29yZGVkIGF0IGNyZWF0aW9uOyB0aGUKYmVuZWZpY2lhcnkgY2Fubm90IHJldm9rZS4KCiMgRXJyb3JzCgoqIFtgRm9yZ2VFcnJvcjo6Tm90Rm91bmRgXSDigJQgbm8gbGluZWFyIHNjaGVkdWxlIHdpdGggdGhpcyBpZCAoYQp0cmFuY2hlIGlkIGlzIGBOb3RGb3VuZGAgaGVyZSkuCiogW2BGb3JnZUVycm9yOjpJbnZhbGlkSW5wdXRgXSDigJQgdGhlIHNjaGVkdWxlIGlzIGBDb21wbGV0ZWRgIG9yCmFscmVhZHkgYFJldm9rZWRgOyBkb3VibGUtcmV2b2tlIGlzIGltcG9zc2libGUuCiogW2BGb3JnZUVycm9yOjpVbmF1dGhvcml6ZWRgXSDigJQgdGhlIGZ1bmRlciBhdXRob3JpemF0aW9uIGlzIG1pc3NpbmcKb3IgaW52YWxpZCAoYSBub24tZnVuZGVyIGNhbGxlciBpcyByZWplY3RlZCBhdCB0aGUgaG9zdCkuAAAAAAZyZXZva2UAAAAAAAEAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAABAAAD6QAAAAIAAAfQAAAACkZvcmdlRXJyb3IAAA==",
+        "AAAAAAAAAEBMaXN0IHNjaGVkdWxlIElEcyBpbiBjcmVhdGlvbiBvcmRlciBmb3IgdGhlIGN1cnJlbnQgYmVuZWZpY2lhcnkuAAAAGXNjaGVkdWxlc19mb3JfYmVuZWZpY2lhcnkAAAAAAAADAAAAAAAAAAtiZW5lZmljaWFyeQAAAAATAAAAAAAAAAZvZmZzZXQAAAAAAAQAAAAAAAAABWxpbWl0AAAAAAAABAAAAAEAAAPpAAAD6gAAAAYAAAfQAAAACkZvcmdlRXJyb3IAAA==",
+        "AAAAAAAAADxMaXN0IHNjaGVkdWxlIElEcyBpbiBjcmVhdGlvbiBvcmRlciBmb3IgdGhlIHJlY29yZGVkIGZ1bmRlci4AAAAUc2NoZWR1bGVzX2Zvcl9mdW5kZXIAAAADAAAAAAAAAAZmdW5kZXIAAAAAABMAAAAAAAAABm9mZnNldAAAAAAABAAAAAAAAAAFbGltaXQAAAAAAAAEAAAAAQAAA+kAAAPqAAAABgAAB9AAAAAKRm9yZ2VFcnJvcgAA",
         "AAAABQAAAAAAAAAAAAAAGUJlbmVmaWNpYXJ5UmVhc3NpZ25lZEZyb20AAAAAAAABAAAAG2JlbmVmaWNpYXJ5X3JlYXNzaWduZWRfZnJvbQAAAAAFAAAAAAAAAAtzY2hlZHVsZV9pZAAAAAAGAAAAAQAAAAAAAAALYmVuZWZpY2lhcnkAAAAAEwAAAAEAAAAAAAAAD25ld19iZW5lZmljaWFyeQAAAAATAAAAAAAAAAAAAAAQdmVzdGVkX3VuY2xhaW1lZAAAAAsAAAAAAAAAAAAAABJyZWFzc2lnbm1lbnRfY291bnQAAAAAAAQAAAAAAAAAAg==",
         "AAAABQAAAAAAAAAAAAAAF0JlbmVmaWNpYXJ5UmVhc3NpZ25lZFRvAAAAAAEAAAAZYmVuZWZpY2lhcnlfcmVhc3NpZ25lZF90bwAAAAAAAAUAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAABAAAAAAAAAAtiZW5lZmljaWFyeQAAAAATAAAAAQAAAAAAAAAPb2xkX2JlbmVmaWNpYXJ5AAAAABMAAAAAAAAAAAAAABB2ZXN0ZWRfdW5jbGFpbWVkAAAACwAAAAAAAAAAAAAAEnJlYXNzaWdubWVudF9jb3VudAAAAAAABAAAAAAAAAAC",
         "AAAABQAAAEhUaGUgdW52ZXN0ZWQgcmVtYWluZGVyIG9mIGEgcmV2b2tlZCBzY2hlZHVsZSB3YXMgcmV0dXJuZWQgdG8gaXRzCmZ1bmRlci4AAAAAAAAAD1Jldm9rZWRSZWZ1bmRlZAAAAAABAAAAEHJldm9rZWRfcmVmdW5kZWQAAAADAAAAAAAAAAtzY2hlZHVsZV9pZAAAAAAGAAAAAQAAAAAAAAAGZnVuZGVyAAAAAAATAAAAAQAAAAAAAAAGYW1vdW50AAAAAAALAAAAAAAAAAI=",
@@ -515,7 +529,9 @@ export class Client extends ContractClient {
         create_schedule: this.txFromJSON<Result<u64>>,
         get_tranche_schedule: this.txFromJSON<Result<TrancheSchedule>>,
         reassign_beneficiary: this.txFromJSON<Result<void>>,
+        schedules_for_funder: this.txFromJSON<Result<Array<u64>>>,
         create_schedules_batch: this.txFromJSON<Result<Array<u64>>>,
-        create_tranche_schedule: this.txFromJSON<Result<u64>>
+        create_tranche_schedule: this.txFromJSON<Result<u64>>,
+        schedules_for_beneficiary: this.txFromJSON<Result<Array<u64>>>
   }
 }

@@ -316,6 +316,22 @@ pub trait SorobanForgeVesting {
         new_beneficiary: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
+    /// List schedule IDs in creation order for the current beneficiary.
+    fn schedules_for_beneficiary(
+        env: Env,
+        beneficiary: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<u64>, ForgeError>;
+
+    /// List schedule IDs in creation order for the recorded funder.
+    fn schedules_for_funder(
+        env: Env,
+        funder: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<u64>, ForgeError>;
+
     /// Read the full linear schedule record (read-only view).
     ///
     /// The record view for the linear kind, mirroring
@@ -524,6 +540,10 @@ enum DataKey {
     /// Unvested amount of a revoked linear schedule already refunded to its
     /// funder. Absent until the first refund.
     RevokedRefund(u64),
+    BeneficiaryIndex(Address),
+    FunderIndex(Address),
+    /// Highest ID created before indexing was introduced.
+    LegacyIndexEnd,
 }
 
 /// A stored schedule of either kind, as returned by [`Vesting::load`].
@@ -533,6 +553,9 @@ enum Stored {
     /// A tranche (discrete unlock table) schedule.
     Tranche(TrancheSchedule),
 }
+
+/// Maximum number of IDs returned by an index query.
+pub const MAX_SCHEDULE_PAGE_SIZE: u32 = 100;
 
 /// The deployable vesting contract.
 #[contract]
@@ -592,6 +615,7 @@ impl Vesting {
         env.storage()
             .instance()
             .set(&DataKey::Schedule(id), &schedule);
+        Self::index_schedule(&env, id, &schedule.beneficiary, &schedule.funder);
         Ok(id)
     }
 
@@ -632,6 +656,7 @@ impl Vesting {
         env.storage()
             .instance()
             .set(&DataKey::TrancheSchedule(id), &schedule);
+        Self::index_schedule(&env, id, &schedule.beneficiary, &schedule.beneficiary);
         Ok(id)
     }
 
@@ -702,6 +727,7 @@ impl Vesting {
             env.storage()
                 .instance()
                 .set(&DataKey::Schedule(id), &schedule);
+            Self::index_schedule(&env, id, &schedule.beneficiary, &schedule.funder);
             events::schedule_created(
                 &env,
                 id,
@@ -862,6 +888,25 @@ impl Vesting {
         if old_balance > 0 {
             env.storage().instance().set(&old_key, &old_balance);
         }
+        if let Some(legacy_end) = env
+            .storage()
+            .instance()
+            .get::<_, u64>(&DataKey::LegacyIndexEnd)
+        {
+            if schedule_id > legacy_end {
+                let old_index = DataKey::BeneficiaryIndex(schedule.beneficiary.clone());
+                let mut ids = Self::read_index(&env, &old_index);
+                if let Ok(position) = ids.binary_search(schedule_id) {
+                    ids.remove(position);
+                    Self::write_index(&env, &old_index, &ids);
+                }
+                Self::insert_index(
+                    &env,
+                    DataKey::BeneficiaryIndex(new_beneficiary.clone()),
+                    schedule_id,
+                );
+            }
+        }
         schedule.beneficiary = new_beneficiary;
         schedule.reassignment_vested = vested;
         schedule.beneficiary_claimed = 0;
@@ -870,6 +915,26 @@ impl Vesting {
             .instance()
             .set(&DataKey::Schedule(schedule_id), &schedule);
         Ok(())
+    }
+
+    /// List schedule IDs in creation order for the current beneficiary.
+    pub fn schedules_for_beneficiary(
+        env: Env,
+        beneficiary: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<u64>, ForgeError> {
+        Self::index_page(&env, DataKey::BeneficiaryIndex(beneficiary), offset, limit)
+    }
+
+    /// List schedule IDs in creation order for the recorded funder.
+    pub fn schedules_for_funder(
+        env: Env,
+        funder: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<u64>, ForgeError> {
+        Self::index_page(&env, DataKey::FunderIndex(funder), offset, limit)
     }
 
     /// Read the full linear schedule record (read-only view; no state
@@ -1120,11 +1185,91 @@ impl Vesting {
         Ok(total)
     }
 
+    fn index_schedule(env: &Env, id: u64, beneficiary: &Address, funder: &Address) {
+        Self::insert_index(env, DataKey::BeneficiaryIndex(beneficiary.clone()), id);
+        Self::insert_index(env, DataKey::FunderIndex(funder.clone()), id);
+    }
+
+    fn read_index(env: &Env, key: &DataKey) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(key)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    fn write_index(env: &Env, key: &DataKey, ids: &Vec<u64>) {
+        env.storage().persistent().set(key, ids);
+        soroban_forge_shared_utils::bump_entry(env, key);
+    }
+
+    fn insert_index(env: &Env, key: DataKey, id: u64) {
+        let mut ids = Self::read_index(env, &key);
+        if let Err(position) = ids.binary_search(id) {
+            ids.insert(position, id);
+            Self::write_index(env, &key, &ids);
+        }
+    }
+
+    fn index_page(
+        env: &Env,
+        key: DataKey,
+        mut offset: u32,
+        limit: u32,
+    ) -> Result<Vec<u64>, ForgeError> {
+        if !(1..=MAX_SCHEDULE_PAGE_SIZE).contains(&limit) {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let instance = env.storage().instance();
+        let legacy_end = instance
+            .get(&DataKey::LegacyIndexEnd)
+            .unwrap_or_else(|| instance.get(&DataKey::Count).unwrap_or(0u64));
+        let mut page = Vec::new(env);
+        // Upgraded contracts read pre-index schedules from their original keys.
+        for id in 1..=legacy_end {
+            let matches = match Self::load(env, id) {
+                Ok(Stored::Linear(schedule)) => match &key {
+                    DataKey::BeneficiaryIndex(owner) => schedule.beneficiary == *owner,
+                    DataKey::FunderIndex(owner) => schedule.funder == *owner,
+                    _ => false,
+                },
+                Ok(Stored::Tranche(schedule)) => match &key {
+                    DataKey::BeneficiaryIndex(owner) | DataKey::FunderIndex(owner) => {
+                        schedule.beneficiary == *owner
+                    }
+                    _ => false,
+                },
+                Err(_) => false,
+            };
+            if matches {
+                if offset > 0 {
+                    offset -= 1;
+                } else {
+                    page.push_back(id);
+                    if page.len() == limit {
+                        return Ok(page);
+                    }
+                }
+            }
+        }
+
+        let ids = Self::read_index(env, &key);
+        if offset < ids.len() {
+            let end = offset.saturating_add(limit - page.len()).min(ids.len());
+            page.append(&ids.slice(offset..end));
+        }
+        Ok(page)
+    }
+
     /// Allocate the next monotonic schedule id.
     fn next_id(env: &Env) -> Result<u64, ForgeError> {
         let count: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
         let id = count.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;
-        env.storage().instance().set(&DataKey::Count, &id);
+        let storage = env.storage().instance();
+        if !storage.has(&DataKey::LegacyIndexEnd) {
+            storage.set(&DataKey::LegacyIndexEnd, &count);
+        }
+        storage.set(&DataKey::Count, &id);
         Ok(id)
     }
 
@@ -1433,3 +1578,6 @@ mod indexer_fixtures;
 
 #[cfg(test)]
 mod model_check;
+
+#[cfg(test)]
+mod index_props;

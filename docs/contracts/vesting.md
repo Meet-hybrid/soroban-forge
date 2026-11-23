@@ -254,3 +254,20 @@ enum DataKey {
 
 Tests live in-crate (`crates/vesting/src/lib.rs`) and run with
 `cargo test -p soroban-forge-vesting --all-targets --locked`.
+
+## Discover schedules by beneficiary or funder
+
+Call `schedules_for_beneficiary(beneficiary, offset, limit)` or
+`schedules_for_funder(funder, offset, limit)` to list IDs in creation order.
+Offsets are zero-based and the page limit is 1 through 100, inclusive. Invalid
+limits return `InvalidInput`. An unknown address or offset beyond the index
+returns an empty list. These calls require no authorization and do not change
+storage or publish events.
+
+Reassignment moves the ID between beneficiary indexes and keeps its creation
+position in the resulting list. The funder index stays the same. An index
+includes schedules after claims or revocation. Tranche creation records only an
+authorizing beneficiary. For discovery, the tranche ID appears under that address
+in both indexes. Token transfers into vesting custody do not establish a
+different funder for the tranche. On upgraded deployments, the queries read
+pre-index schedules from their original records.
