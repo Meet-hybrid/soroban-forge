@@ -5,7 +5,7 @@
  * accounts, or testnet credentials.  They verify:
  *
  *   1. Client construction and configuration surface
- *   2. All 11 generated escrow methods are present
+ *   2. All 28 generated escrow methods are present
  *   3. Argument encoding via ContractSpec.funcArgsToScVals()
  *   4. The ForgeError runtime object (codes and messages)
  *   5. ABI shape — function names, parameter names, and parameter types —
@@ -530,9 +530,11 @@ const _statusCancelled: EscrowStatus = { tag: "Cancelled", values: undefined };
 const _escrowDataShape: EscrowData = {
   amount: 500n,
   arbiter: FIXTURE_ARBITER,
+  acceptance_deadline: undefined,
   buyer: FIXTURE_BUYER,
   created_at: 0n,
   escrow_id: 1n,
+  evidence_commitment: undefined,
   seller: FIXTURE_SELLER,
   status: { tag: "Pending", values: undefined },
   timeout: 86_400n,
