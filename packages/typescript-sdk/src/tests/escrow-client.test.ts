@@ -312,16 +312,25 @@ test("deposit: escrow_id encodes as scvU64", () => {
   assert.equal(args[0]!.u64().toString(), "3");
 });
 
-test("dispute: encodes escrow_id (scvU64) and claimant (scvAddress)", () => {
+test("dispute: encodes escrow_id (scvU64), claimant (scvAddress), and evidence_commitment (Option)", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   const args = client.spec.funcArgsToScVals("dispute", {
     escrow_id: 5n,
     claimant: FIXTURE_BUYER,
+    evidence_commitment: null,
   });
-  assert.equal(args.length, 2);
+  assert.equal(args.length, 3);
   assert.equal(args[0]!.switch().name, "scvU64");
   assert.equal(args[0]!.u64().toString(), "5");
   assert.equal(args[1]!.switch().name, "scvAddress");
+  assert.equal(args[2]!.switch().name, "scvVoid", "None encodes as scvVoid");
+
+  const withCommitment = client.spec.funcArgsToScVals("dispute", {
+    escrow_id: 5n,
+    claimant: FIXTURE_BUYER,
+    evidence_commitment: new Uint8Array([0xde, 0xad]),
+  });
+  assert.equal(withCommitment[2]!.switch().name, "scvBytes");
 });
 
 test("release: escrow_id encodes as scvU64", () => {
@@ -373,7 +382,7 @@ test("get_status: escrow_id encodes as scvU64", () => {
   assert.equal(args[0]!.switch().name, "scvU64");
 });
 
-test("create_escrow: encodes 6 args with correct types and values", () => {
+test("create_escrow: encodes 7 args with correct types and values", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   const args = client.spec.funcArgsToScVals("create_escrow", {
     buyer: FIXTURE_BUYER,
@@ -382,8 +391,9 @@ test("create_escrow: encodes 6 args with correct types and values", () => {
     token: FIXTURE_TOKEN,
     amount: 500n,
     timeout: 86_400n,
+    acceptance_deadline: undefined,
   });
-  assert.equal(args.length, 6, "create_escrow must encode 6 arguments");
+  assert.equal(args.length, 7, "create_escrow must encode 7 arguments");
 
   // buyer, seller, arbiter, token → scvAddress
   assert.equal(args[0]!.switch().name, "scvAddress", "buyer must be scvAddress");
@@ -402,6 +412,13 @@ test("create_escrow: encodes 6 args with correct types and values", () => {
   // timeout → scvU64
   assert.equal(args[5]!.switch().name, "scvU64", "timeout must be scvU64");
   assert.equal(args[5]!.u64().toString(), "86400", "timeout must equal 86400");
+
+  // acceptance_deadline → scvVoid (None)
+  assert.equal(
+    args[6]!.switch().name,
+    "scvVoid",
+    "acceptance_deadline must encode as scvVoid",
+  );
 });
 
 // ---------------------------------------------------------------------------
