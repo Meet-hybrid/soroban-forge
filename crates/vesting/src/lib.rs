@@ -1182,12 +1182,16 @@ impl Vesting {
             return Ok(schedule.total_amount);
         }
         let elapsed = now - cliff_time;
-        let vested = schedule
+        // Preserve the overflow error exposed by existing linear schedules.
+        schedule
             .total_amount
-            .checked_mul(elapsed as i128)
-            .ok_or(ForgeError::ArithmeticOverflow)?
-            / period as i128;
-        Ok(vested)
+            .checked_mul(i128::from(elapsed))
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        soroban_forge_shared_utils::math::mul_div_floor(
+            schedule.total_amount,
+            i128::from(elapsed),
+            i128::from(period),
+        )
     }
 
     /// Claimable amount belonging to a beneficiary for one linear schedule.
