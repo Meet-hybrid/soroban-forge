@@ -117,6 +117,7 @@ impl<'a> ChaosTarget for EscrowTarget<'a> {
                     &self.token,
                     &AMOUNT,
                     &TIMEOUT,
+                    &None,
                 );
                 self.escrow_id = Some(id);
                 return StepOutcome::Ok;

@@ -113,7 +113,12 @@ for (const contract of contracts) {
     generatedSource,
     generatedText.replace(
       clientClass,
-      `export interface Client {\n  readonly spec: ContractSpec;\n  txFromJSON<T = unknown>(json: string): AssembledTransaction<T>;\n}\n${clientClass}`,
+      // `txFromJSON` is declared as a property to match the stellar-sdk
+      // base class of the same name: the stellar-sdk base class defines it
+      // as an instance member property, and a method-style declaration in a
+      // derived class trips TS2425 ("defines instance member property ...
+      // but extended class defines it as instance member function").
+      `export interface Client {\n  readonly spec: ContractSpec;\n  txFromJSON: <T>(json: string) => AssembledTransaction<T>;\n}\n${clientClass}`,
     ),
   );
   cpSync(generatedSource, join(sdkClientsDir, `${contract.module}.ts`));

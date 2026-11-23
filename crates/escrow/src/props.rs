@@ -138,6 +138,7 @@ impl World {
             &self.token,
             &amount,
             &timeout,
+            &None,
         )
     }
 
@@ -219,7 +220,7 @@ proptest! {
                     0 => &w.buyer,
                     _ => &w.seller,
                 };
-                w.escrow_client().dispute(&id, claimant_addr);
+                w.escrow_client().dispute(&id, claimant_addr, &None);
                 w.escrow_client().resolve(&id, &pay_seller);
             }
         }
@@ -294,7 +295,7 @@ proptest! {
                         0 => &w.buyer,
                         _ => &w.seller,
                     };
-                    w.escrow_client().dispute(&id, claimant_addr);
+                    w.escrow_client().dispute(&id, claimant_addr, &None);
                     w.escrow_client().resolve(&id, &pay_seller);
                 }
             }
@@ -535,7 +536,7 @@ proptest! {
                         1 => w.seller.clone(),
                         _ => w.outsider.clone(),
                     };
-                    let res = client.try_dispute(&id, &claimant_addr);
+                    let res = client.try_dispute(&id, &claimant_addr, &None);
                     match state {
                         Funded if claimant <= 1 => {
                             prop_assert!(matches!(res, Ok(Ok(()))), "party dispute must succeed while Funded");
@@ -615,7 +616,7 @@ proptest! {
             prop_assert!(client.try_release(&id).is_err());
             prop_assert!(client.try_release_partial(&id, &1).is_err());
             prop_assert!(client.try_refund(&id).is_err());
-            prop_assert!(client.try_dispute(&id, &w.buyer).is_err());
+            prop_assert!(client.try_dispute(&id, &w.buyer, &None).is_err());
             prop_assert!(client.try_resolve(&id, &true).is_err());
 
             // Remaining and released must be fully accounted in terminal records.
@@ -687,6 +688,7 @@ proptest! {
                     &w.token,
                     &1_i128,
                     &1_u64,
+                    &None,
                 );
                 ids.push_back(id);
             } else {
@@ -803,6 +805,7 @@ impl BasketWorld {
             &self.arbiter,
             &assets,
             &timeout,
+            &None,
         )
     }
 
@@ -896,7 +899,7 @@ proptest! {
                     0 => &w.buyer,
                     _ => &w.seller,
                 };
-                w.escrow_client().dispute_basket(&id, claimant_addr);
+                w.escrow_client().dispute_basket(&id, claimant_addr, &None);
                 w.escrow_client().resolve_basket(&id, &pay_seller);
             }
         }
@@ -979,7 +982,7 @@ proptest! {
                         0 => &w.buyer,
                         _ => &w.seller,
                     };
-                    w.escrow_client().dispute_basket(&id, claimant_addr);
+                    w.escrow_client().dispute_basket(&id, claimant_addr, &None);
                     w.escrow_client().resolve_basket(&id, &pay_seller);
                 }
             }
@@ -1024,7 +1027,7 @@ proptest! {
         let total_b = w.pool_total_b();
 
         let claimant_addr = if claimant == 0 { &w.buyer } else { &w.seller };
-        w.escrow_client().dispute_basket(&id, claimant_addr);
+        w.escrow_client().dispute_basket(&id, claimant_addr, &None);
 
         let client = w.escrow_client();
         prop_assert_eq!(client.get_status(&id), EscrowStatus::Disputed);
@@ -1099,6 +1102,7 @@ proptest! {
             &w.token_a,
             &a_amt,
             &timeout,
+            &None,
         );
         let assets = w.legs(a_amt, b_amt);
         let basket = w.escrow_client().create_basket(
@@ -1107,6 +1111,7 @@ proptest! {
             &w.arbiter,
             &assets,
             &timeout,
+            &None,
         );
         prop_assert_eq!(single + 1, basket, "ids are monotonic across kinds");
 
@@ -1171,7 +1176,7 @@ impl MultiPartyWorld {
 
     fn create_escrow(&self, buyer: &Address, seller: &Address) -> u64 {
         self.client()
-            .create_escrow(buyer, seller, &self.arbiter, &self.token, &1_i128, &1_u64)
+            .create_escrow(buyer, seller, &self.arbiter, &self.token, &1_i128, &1_u64, &None)
     }
 
     fn deposit(&self, id: u64, buyer: &Address) {

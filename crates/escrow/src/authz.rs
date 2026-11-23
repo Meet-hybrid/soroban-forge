@@ -47,7 +47,7 @@ use soroban_sdk::testutils::{
     Address as _, AuthorizedFunction, AuthorizedInvocation, Ledger as _, MockAuth, MockAuthInvoke,
 };
 use soroban_sdk::token::StellarAssetClient;
-use soroban_sdk::{Address, Env, IntoVal, InvokeError, Symbol, Vec};
+use soroban_sdk::{Address, Bytes, Env, IntoVal, InvokeError, Symbol, Vec};
 
 const START: u64 = 1_000_000;
 const TIMEOUT: u64 = 1_000;
@@ -171,13 +171,13 @@ fn create_accepts_buyer_signature_with_matching_args() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_escrow",
-            args: (buyer, seller, arbiter, &token, AMOUNT, TIMEOUT).into_val(&env),
+            args: (buyer, seller, arbiter, &token, AMOUNT, TIMEOUT, &None::<u64>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
     let id = client
-        .try_create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT)
+        .try_create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None)
         .expect("outer ok")
         .expect("contract ok");
     assert_eq!(client.get_status(&id), EscrowStatus::Pending);
@@ -197,12 +197,12 @@ fn create_rejects_signature_from_non_buyer() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_escrow",
-            args: (buyer, seller, arbiter, &token, AMOUNT, TIMEOUT).into_val(&env),
+            args: (buyer, seller, arbiter, &token, AMOUNT, TIMEOUT, &None::<u64>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let res = client.try_create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     assert_auth_abort!(res);
 }
 
@@ -221,12 +221,12 @@ fn create_rejects_signature_over_different_args() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_escrow",
-            args: (buyer, seller, arbiter, &token, AMOUNT + 500, TIMEOUT).into_val(&env),
+            args: (buyer, seller, arbiter, &token, AMOUNT + 500, TIMEOUT, &None::<u64>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let res = client.try_create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     assert_auth_abort!(res);
 }
 
@@ -240,7 +240,7 @@ fn deposit_accepts_full_buyer_authorization_chain() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
 
     // Two frames, both buyer-signed: the entrypoint and the token pull
     // into the contract's custody address.
@@ -271,7 +271,7 @@ fn deposit_rejects_entrypoint_signature_without_token_authorization() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
 
     // Only the entrypoint frame is armed; the nested SAC transfer pull has
     // no authorization. Funds must not move on an entrypoint signature
@@ -301,7 +301,7 @@ fn deposit_rejects_token_authorization_over_a_different_amount() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
 
     // The nested token authorization names a different amount than the
     // escrow pulls — the host must reject the mismatch.
@@ -336,7 +336,7 @@ fn release_rejects_buyer_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     // Only the seller confirms delivery. The buyer arming their own
@@ -368,7 +368,7 @@ fn release_completes_on_seller_signature_alone() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     env.mock_auths(&[MockAuth {
@@ -393,7 +393,7 @@ fn release_authorization_tree_is_seller_over_transfer() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     client.release(&id);
@@ -426,7 +426,7 @@ fn refund_pre_deadline_rejects_buyer_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     // Before the deadline only the seller may refund. The buyer arming
@@ -453,7 +453,7 @@ fn refund_authorization_tree_is_seller_pre_deadline() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     client.refund(&id);
@@ -481,7 +481,7 @@ fn refund_expired_requires_no_party_authorization() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     env.ledger().set_timestamp(START + TIMEOUT + 1);
@@ -501,7 +501,7 @@ fn dispute_accepts_claimant_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     // Dispute performs no token transfer, so the claimant's entrypoint
@@ -511,12 +511,12 @@ fn dispute_accepts_claimant_signature() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "dispute",
-            args: (id, buyer).into_val(&env),
+            args: (id, buyer, &None::<Bytes>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    client.try_dispute(&id, buyer).expect("outer ok").unwrap();
+    client.try_dispute(&id, buyer, &None).expect("outer ok").unwrap();
     assert_eq!(client.get_status(&id), EscrowStatus::Disputed);
 }
 
@@ -526,7 +526,7 @@ fn dispute_rejects_signature_from_a_non_claimant() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     // A third party signs, but the claim on-chain is the buyer's. The
@@ -537,12 +537,12 @@ fn dispute_rejects_signature_from_a_non_claimant() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "dispute",
-            args: (id, buyer).into_val(&env),
+            args: (id, buyer, &None::<Bytes>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_dispute(&id, buyer);
+    let res = client.try_dispute(&id, buyer, &None);
     assert_auth_abort!(res);
     assert_eq!(client.get_status(&id), EscrowStatus::Funded);
 }
@@ -553,7 +553,7 @@ fn dispute_rejects_other_party_signing_as_claimant() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     // The seller signs a call whose claimant is the buyer: the signature
@@ -563,12 +563,12 @@ fn dispute_rejects_other_party_signing_as_claimant() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "dispute",
-            args: (id, buyer).into_val(&env),
+            args: (id, buyer, &None::<Bytes>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_dispute(&id, buyer);
+    let res = client.try_dispute(&id, buyer, &None);
     assert_auth_abort!(res);
     assert_eq!(client.get_status(&id), EscrowStatus::Funded);
 }
@@ -583,9 +583,9 @@ fn resolve_rejects_non_arbiter_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
-    client.dispute(&id, buyer);
+    client.dispute(&id, buyer, &None);
 
     // A party (buyer) signs the resolve instead of the arbiter.
     env.mock_auths(&[MockAuth {
@@ -610,9 +610,9 @@ fn resolve_authorization_tree_is_arbiter_over_transfer() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
-    client.dispute(&id, buyer);
+    client.dispute(&id, buyer, &None);
 
     client.resolve(&id, &true);
 
@@ -643,7 +643,7 @@ fn cancel_accepts_buyer_rejects_seller() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
 
     // Seller cannot cancel a pending escrow.
     env.mock_auths(&[MockAuth {
@@ -683,7 +683,7 @@ fn blank_envelope_aborts_release_and_preserves_custody() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     // No authorization entries whatsoever: every require_auth fails.
@@ -704,11 +704,11 @@ fn blank_envelope_aborts_create_and_writes_nothing() {
 
     env.set_auths(&[]);
 
-    let res = client.try_create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let res = client.try_create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     assert_auth_abort!(res);
     // The id counter must not have advanced: the next escrow is id 1.
     env.mock_all_auths();
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     assert_eq!(id, 1);
 }
 
@@ -722,7 +722,7 @@ fn release_partial_rejects_buyer_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     // Buyer attempts to collect a partial release — must be rejected.
@@ -749,7 +749,7 @@ fn release_partial_accepts_seller_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     // Positive control: seller's signature is sufficient.
@@ -777,7 +777,7 @@ fn release_partial_rejects_arbiter_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     env.mock_auths(&[MockAuth {
@@ -801,7 +801,7 @@ fn release_partial_rejects_signature_over_different_amount() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     // Seller signs for one amount but the invocation sends a different amount.
@@ -828,7 +828,7 @@ fn release_partial_authorization_tree_is_seller_only() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     client.release_partial(&id, &(AMOUNT / 3));
@@ -856,7 +856,7 @@ fn blank_envelope_aborts_release_partial() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     env.set_auths(&[]);
@@ -900,7 +900,7 @@ fn release_partial_mutation_test_no_auth_aborts() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None);
     client.deposit(&id);
 
     // Blank envelope: every require_auth fails.
@@ -956,13 +956,13 @@ fn create_basket_accepts_buyer_signature_with_matching_assets() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_basket",
-            args: (buyer, seller, arbiter, &assets, TIMEOUT).into_val(&env),
+            args: (buyer, seller, arbiter, &assets, TIMEOUT, &None::<u64>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
     let id = client
-        .try_create_basket(buyer, seller, arbiter, &assets, &TIMEOUT)
+        .try_create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None)
         .expect("outer ok")
         .expect("contract ok");
     assert_eq!(client.get_status(&id), EscrowStatus::Pending);
@@ -981,12 +981,12 @@ fn create_basket_rejects_signature_from_non_buyer() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_basket",
-            args: (buyer, seller, arbiter, &assets, TIMEOUT).into_val(&env),
+            args: (buyer, seller, arbiter, &assets, TIMEOUT, &None::<u64>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let res = client.try_create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     assert_auth_abort!(res);
 }
 
@@ -1016,12 +1016,12 @@ fn create_basket_rejects_signature_over_different_basket_terms() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_basket",
-            args: (buyer, seller, arbiter, &changed, TIMEOUT).into_val(&env),
+            args: (buyer, seller, arbiter, &changed, TIMEOUT, &None::<u64>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let res = client.try_create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     assert_auth_abort!(res);
 }
 
@@ -1035,7 +1035,7 @@ fn deposit_basket_accepts_buyer_chain_authorizing_every_leg() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
 
     env.mock_auths(&[MockAuth {
         address: buyer,
@@ -1076,7 +1076,7 @@ fn deposit_basket_rejects_missing_leg_authorization_without_partial_custody() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
 
     env.mock_auths(&[MockAuth {
         address: buyer,
@@ -1112,7 +1112,7 @@ fn release_basket_rejects_buyer_signature() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     client.deposit_basket(&id);
 
     env.mock_auths(&[MockAuth {
@@ -1142,7 +1142,7 @@ fn release_basket_authorization_tree_is_seller_only() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     client.deposit_basket(&id);
 
     client.release_basket(&id);
@@ -1171,7 +1171,7 @@ fn release_partial_basket_rejects_non_seller() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     client.deposit_basket(&id);
 
     env.mock_auths(&[MockAuth {
@@ -1200,7 +1200,7 @@ fn release_partial_basket_rejects_signature_over_other_leg() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     client.deposit_basket(&id);
 
     env.mock_auths(&[MockAuth {
@@ -1226,7 +1226,7 @@ fn refund_basket_pre_deadline_rejects_buyer_signature() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     client.deposit_basket(&id);
 
     // Before the deadline only the seller may refund. The buyer's own
@@ -1255,7 +1255,7 @@ fn refund_basket_post_deadline_rejects_seller_signature() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     client.deposit_basket(&id);
 
     env.ledger().set_timestamp(START + TIMEOUT + 1);
@@ -1281,7 +1281,7 @@ fn dispute_basket_rejects_seller_signing_as_buyer_claimant() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     client.deposit_basket(&id);
 
     // The seller signs a call whose claimant is the buyer: the signature
@@ -1291,12 +1291,12 @@ fn dispute_basket_rejects_seller_signing_as_buyer_claimant() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "dispute_basket",
-            args: (id, buyer).into_val(&env),
+            args: (id, buyer, &None::<Bytes>).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_dispute_basket(&id, buyer);
+    let res = client.try_dispute_basket(&id, buyer, &None);
     assert_auth_abort!(res);
     assert_eq!(client.get_status(&id), EscrowStatus::Funded);
 }
@@ -1309,9 +1309,9 @@ fn resolve_basket_rejects_party_signature_and_ships_arbiter_tree() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     client.deposit_basket(&id);
-    client.dispute_basket(&id, buyer);
+    client.dispute_basket(&id, buyer, &None);
 
     env.mock_auths(&[MockAuth {
         address: buyer,
@@ -1354,7 +1354,7 @@ fn cancel_basket_accepts_buyer_rejects_seller() {
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
     let assets = basket_assets(&env, &token_a, &token_b);
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
 
     env.mock_auths(&[MockAuth {
         address: seller,
@@ -1392,10 +1392,192 @@ fn blank_envelope_aborts_basket_create_and_writes_nothing() {
 
     env.set_auths(&[]);
 
-    let res = client.try_create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let res = client.try_create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     assert_auth_abort!(res);
     // The id counter must not have advanced: the next escrow is id 1.
     env.mock_all_auths();
-    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT);
+    let id = client.create_basket(buyer, seller, arbiter, &assets, &TIMEOUT, &None);
     assert_eq!(id, 1);
+}
+
+// -----------------------------------------------------------------------
+// Issue #728 — acceptance deadlines
+//
+// At and after the acceptance deadline the normal refund path switches its
+// authorizer to the buyer; the seller's signature is rejected at the
+// entrypoint from then on.
+// -----------------------------------------------------------------------
+
+#[test]
+fn refund_post_deadline_rejects_seller_signature() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(START + 50));
+    client.deposit(&id);
+    env.ledger().set_timestamp(START + 50);
+
+    // The deadline is reached: the normal `refund` path now demands the
+    // buyer. A seller-signed refund is rejected by the host.
+    env.mock_auths(&[MockAuth {
+        address: seller,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "refund",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_refund(&id);
+    assert_auth_abort!(res);
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+    assert_eq!(_tc.balance(&contract_id), AMOUNT);
+}
+
+#[test]
+fn refund_post_deadline_accepts_buyer_signature() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(START + 50));
+    client.deposit(&id);
+    env.ledger().set_timestamp(START + 50);
+
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "refund",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.try_refund(&id).expect("outer ok").unwrap();
+    assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
+    assert_eq!(tc.balance(buyer), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+}
+
+#[test]
+fn refund_expired_post_deadline_requires_no_authorization() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(START + 50));
+    client.deposit(&id);
+    env.ledger().set_timestamp(START + 50);
+
+    // The deadline-refund path is permissionless.
+    env.set_auths(&[]);
+    client.refund_expired(&id);
+
+    assert!(env.auths().is_empty());
+    assert_eq!(tc.balance(buyer), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+}
+
+// -----------------------------------------------------------------------
+// Issue #726 — review-window release requests
+// -----------------------------------------------------------------------
+
+#[test]
+fn request_release_rejects_non_buyer_signature() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None::<u64>);
+    client.deposit(&id);
+
+    // Only the buyer may open a release request.
+    env.mock_auths(&[MockAuth {
+        address: seller,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "request_release",
+            args: (id, 100u64).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_request_release(&id, &100);
+    assert_auth_abort!(res);
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+}
+
+#[test]
+fn approve_release_request_rejects_seller_signature() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None::<u64>);
+    client.deposit(&id);
+    client.request_release(&id, &1000);
+
+    // Only the buyer may approve the request.
+    env.mock_auths(&[MockAuth {
+        address: seller,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "approve_release_request",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_approve_release_request(&id);
+    assert_auth_abort!(res);
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+}
+
+#[test]
+fn approve_release_request_accepts_buyer_signature() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None::<u64>);
+    client.deposit(&id);
+    client.request_release(&id, &1000);
+
+    env.mock_auths(&[MockAuth {
+        address: buyer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "approve_release_request",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.try_approve_release_request(&id).expect("outer ok").unwrap();
+    assert_eq!(tc.balance(seller), AMOUNT);
+    assert_eq!(client.get_status(&id), EscrowStatus::Completed);
+}
+
+#[test]
+fn expire_release_request_is_permissionless() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None::<u64>);
+    client.deposit(&id);
+    client.request_release(&id, &100);
+    env.ledger().set_timestamp(START + 100);
+
+    // Expiry settlement pays the buyer and needs no authorization.
+    env.set_auths(&[]);
+    client.expire_release_request(&id);
+
+    assert!(env.auths().is_empty());
+    assert_eq!(tc.balance(buyer), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
 }

@@ -121,24 +121,41 @@ test("EXPECTED_CONTRACT_ID is a valid Stellar contract address", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. Method surface — all 11 escrow methods must be present
+// 2. Method surface — every escrow method must be present
 // ---------------------------------------------------------------------------
 
 const EXPECTED_METHODS = [
+  "approve_release_request",
   "cancel",
-  "refund",
+  "cancel_basket",
+  "create_basket",
+  "create_escrow",
   "deposit",
+  "deposit_basket",
   "dispute",
-  "release",
-  "resolve",
-  "touch_ttl",
+  "dispute_basket",
+  "escrows_for_participant",
+  "expire_release_request",
+  "get_basket",
+  "get_basket_summary",
   "get_escrow",
   "get_status",
-  "create_escrow",
-  "escrows_for_participant",
+  "refund",
+  "refund_basket",
+  "refund_expired",
+  "release",
+  "release_basket",
+  "release_partial",
+  "release_partial_basket",
+  "request_release",
+  "resolve",
+  "resolve_basket",
+  "resolve_split",
+  "touch_ttl",
+  "ttl_info",
 ] as const;
 
-test("Client exposes all 11 escrow method functions", () => {
+test("Client exposes every escrow method function", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   for (const method of EXPECTED_METHODS) {
     assert.equal(
@@ -149,7 +166,7 @@ test("Client exposes all 11 escrow method functions", () => {
   }
 });
 
-test("fromJSON exposes deserialization helpers for all 11 methods", () => {
+test("fromJSON exposes deserialization helpers for every method", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   for (const method of EXPECTED_METHODS) {
     assert.equal(
@@ -175,7 +192,7 @@ test("ContractSpec is accessible via client.spec", () => {
   );
 });
 
-test("ABI exposes exactly the 11 expected function names", () => {
+test("ABI exposes exactly the expected function names", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   const funcNames = client.spec.funcs().map((f) => f.name().toString());
   const sortedExpected = [...EXPECTED_METHODS].sort();
@@ -198,6 +215,7 @@ const EXPECTED_ABI_SHAPE: Record<string, Array<[string, string]>> = {
   dispute: [
     ["escrow_id", "scSpecTypeU64"],
     ["claimant", "scSpecTypeAddress"],
+    ["evidence_commitment", "scSpecTypeOption"],
   ],
   release: [["escrow_id", "scSpecTypeU64"]],
   resolve: [
@@ -205,6 +223,7 @@ const EXPECTED_ABI_SHAPE: Record<string, Array<[string, string]>> = {
     ["in_favor_of_seller", "scSpecTypeBool"],
   ],
   touch_ttl: [["escrow_id", "scSpecTypeU64"]],
+  ttl_info: [["escrow_id", "scSpecTypeU64"]],
   get_escrow: [["escrow_id", "scSpecTypeU64"]],
   get_status: [["escrow_id", "scSpecTypeU64"]],
   escrows_for_participant: [
@@ -219,7 +238,17 @@ const EXPECTED_ABI_SHAPE: Record<string, Array<[string, string]>> = {
     ["token", "scSpecTypeAddress"],
     ["amount", "scSpecTypeI128"],
     ["timeout", "scSpecTypeU64"],
+    ["acceptance_deadline", "scSpecTypeOption"],
   ],
+  // Issue #726 — review-window release requests.
+  request_release: [
+    ["escrow_id", "scSpecTypeU64"],
+    ["review_window", "scSpecTypeU64"],
+  ],
+  approve_release_request: [["escrow_id", "scSpecTypeU64"]],
+  expire_release_request: [["escrow_id", "scSpecTypeU64"]],
+  // Issue #729 — basket settlement summary view.
+  get_basket_summary: [["escrow_id", "scSpecTypeU64"]],
 };
 
 test("ABI parameter names and types match expected shape", () => {
@@ -442,10 +471,28 @@ const EXPECTED_ESCROW_EVENTS = [
   "EscrowCreated",
   "Deposited",
   "Released",
+  "PartiallyReleased",
   "Refunded",
   "Disputed",
   "Resolved",
+  "ResolvedSplit",
   "Cancelled",
+  // Basket lifecycle events (multi-asset baskets, issue #238).
+  "BasketCreated",
+  "BasketDeposited",
+  "BasketReleased",
+  "BasketPartiallyReleased",
+  "BasketRefunded",
+  "BasketDisputed",
+  "BasketResolved",
+  "BasketCancelled",
+  // Issue #728 — basket acceptance-deadline refund path.
+  "RefundExpired",
+  "BasketRefundExpired",
+  // Issue #726 — review-window release requests.
+  "ReleaseRequestCreated",
+  "ReleaseRequestApproved",
+  "ReleaseRequestExpired",
 ] as const;
 
 test("ContractSpec includes all documented escrow event types", () => {
