@@ -68,7 +68,7 @@ fn withdrawal_and_refund_never_allow_negative_prepaid_balance() {
     let err = client.try_withdraw_balance(&id, &301).unwrap_err().unwrap();
     assert_eq!(
         err,
-        soroban_forge_shared_utils::ForgeError::TokenTransferFailed
+        soroban_forge_shared_utils::ForgeError::InsufficientFunds
     );
     assert_eq!(client.get_subscription(&id).prepaid_balance, Some(300));
 
@@ -98,7 +98,7 @@ fn rejected_transition_preserves_balance_status_and_tokens() {
     );
     assert_eq!(
         client.try_withdraw_balance(&id, &501).unwrap_err().unwrap(),
-        soroban_forge_shared_utils::ForgeError::TokenTransferFailed
+        soroban_forge_shared_utils::ForgeError::InsufficientFunds
     );
 
     assert_eq!(
@@ -153,4 +153,27 @@ fn catchup_consumes_one_period_and_residual_arrears_remain() {
     assert_eq!(token_client.balance(&provider), AMOUNT * 2);
     assert_eq!(token_client.balance(&subscriber), 10_000 - AMOUNT * 2);
     assert_eq!(token_client.balance(&contract), 0);
+}
+
+#[test]
+fn over_withdrawal_cannot_spend_another_subscriptions_escrow() {
+    let (env, token, _subscriber, provider, contract, id, client) = fixture();
+    let token_client = TokenClient::new(&env, &token);
+    let other_subscriber = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&other_subscriber, &10_000);
+    let other_id = client.subscribe(&other_subscriber, &provider, &token, &AMOUNT, &PERIOD);
+    client.deposit(&id, &300);
+    client.deposit(&other_id, &500);
+
+    assert_eq!(
+        client.try_withdraw_balance(&id, &301).unwrap_err().unwrap(),
+        soroban_forge_shared_utils::ForgeError::InsufficientFunds,
+        "a withdrawal larger than this subscription's balance must be rejected          even when the contract holds enough tokens from other subscriptions"
+    );
+    assert_eq!(client.get_subscription(&id).prepaid_balance, Some(300));
+    assert_eq!(
+        client.get_subscription(&other_id).prepaid_balance,
+        Some(500)
+    );
+    assert_eq!(token_client.balance(&contract), 800);
 }

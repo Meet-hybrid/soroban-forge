@@ -5672,3 +5672,6 @@ mod call_tests {
         assert_eq!(err, ForgeError::Unauthorized);
     }
 }
+
+#[cfg(test)]
+mod wallet_state_machine;
