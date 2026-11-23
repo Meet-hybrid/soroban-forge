@@ -128,6 +128,6 @@ test("vesting: every ABI method encodes zero and edge arguments", () => {
   assertEveryMethodEncodes("vesting", client);
 });
 
-test("vesting: ForgeError 1 through 16 map to names and messages", () => {
+test("vesting: ForgeError 1 through 17 map to names and messages", () => {
   assertForgeErrors(ForgeError);
 });
