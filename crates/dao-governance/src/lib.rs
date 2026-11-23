@@ -4409,3 +4409,6 @@ mod indexer_fixtures;
 
 #[cfg(test)]
 mod model_check;
+
+#[cfg(test)]
+mod vote_transfer_props;
