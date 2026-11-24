@@ -407,6 +407,55 @@ pub trait SorobanForgeVesting {
         env: Env,
         schedule_id: u64,
     ) -> Result<VestingStatus, soroban_forge_shared_utils::ForgeError>;
+
+    /// Preview claimable amount and unlock schedule timing (read-only view).
+    ///
+    /// Evaluates at current ledger time without modifying contract state.
+    /// Returns the claimable amount, evaluated ledger timestamp, and the
+    /// timestamp of the next unlock boundary (`None` when completed, revoked,
+    /// or post-final).
+    fn preview_claimable(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<TranchePreview, soroban_forge_shared_utils::ForgeError>;
+
+    /// Alias for [`preview_claimable`](Self::preview_claimable).
+    fn preview_tranche(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<TranchePreview, soroban_forge_shared_utils::ForgeError>;
+}
+
+/// Preview of claimable tokens and tranche/unlock timing.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranchePreview {
+    /// Amount claimable at the evaluation timestamp.
+    pub claimable: i128,
+    /// Ledger timestamp at which the preview was evaluated.
+    pub evaluated_timestamp: u64,
+    /// Ledger timestamp of the next unlock boundary, or `None` if fully unlocked or terminal.
+    pub next_unlock_timestamp: Option<u64>,
+}
+
+/// Type alias for [`TranchePreview`].
+pub type ClaimableTranchePreview = TranchePreview;
+
+impl TranchePreview {
+    /// Amount claimable at the evaluation timestamp (alias for `claimable`).
+    pub fn claimable_amount(&self) -> i128 {
+        self.claimable
+    }
+
+    /// Evaluated ledger timestamp (alias for `evaluated_timestamp`).
+    pub fn evaluated_at(&self) -> u64 {
+        self.evaluated_timestamp
+    }
+
+    /// Next unlock ledger timestamp (alias for `next_unlock_timestamp`).
+    pub fn next_unlock(&self) -> Option<u64> {
+        self.next_unlock_timestamp
+    }
 }
 
 /// Lifecycle state of a vesting schedule.
@@ -1041,6 +1090,127 @@ impl Vesting {
         match Self::load(&env, schedule_id)? {
             Stored::Linear(schedule) => Self::current_status(&schedule, now),
             Stored::Tranche(schedule) => Self::tranche_status(&schedule, now),
+        }
+    }
+
+    /// Read-only preview of claimable tokens and next unlock timestamp.
+    ///
+    /// Matches the amount `claim` would transfer at the same ledger time.
+    /// Completed and revoked schedules return documented terminal values:
+    /// `next_unlock_timestamp: None`, with `claimable: 0` for completed schedules
+    /// and the remaining frozen balance (or `0`) for revoked schedules.
+    pub fn preview_claimable(env: Env, schedule_id: u64) -> Result<TranchePreview, ForgeError> {
+        let now = env.ledger().timestamp();
+        Self::preview_schedule_at(&env, schedule_id, now)
+    }
+
+    /// Alias for [`preview_claimable`](Self::preview_claimable).
+    pub fn preview_tranche(env: Env, schedule_id: u64) -> Result<TranchePreview, ForgeError> {
+        Self::preview_claimable(env, schedule_id)
+    }
+
+    /// Derive the claimable preview at ledger timestamp `now`.
+    fn preview_schedule_at(
+        env: &Env,
+        schedule_id: u64,
+        now: u64,
+    ) -> Result<TranchePreview, ForgeError> {
+        match Self::load(env, schedule_id)? {
+            Stored::Linear(schedule) => {
+                let claimable = Self::linear_claimable_for(
+                    env,
+                    schedule_id,
+                    &schedule,
+                    &schedule.beneficiary,
+                    now,
+                )?;
+
+                // Revoked schedules return documented terminal values:
+                // claimable is the remaining frozen amount (or 0 once claimed),
+                // evaluated_timestamp is now, and next_unlock_timestamp is None.
+                if schedule.revoked_vested.is_some() || schedule.status == VestingStatus::Revoked {
+                    return Ok(TranchePreview {
+                        claimable,
+                        evaluated_timestamp: now,
+                        next_unlock_timestamp: None,
+                    });
+                }
+
+                // Completed schedules return documented terminal values:
+                // claimable is 0, evaluated_timestamp is now, and next_unlock_timestamp is None.
+                if schedule.claimed >= schedule.total_amount
+                    || schedule.status == VestingStatus::Completed
+                {
+                    return Ok(TranchePreview {
+                        claimable: 0,
+                        evaluated_timestamp: now,
+                        next_unlock_timestamp: None,
+                    });
+                }
+
+                let cliff_time = schedule
+                    .start
+                    .checked_add(schedule.cliff)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+                let end_time = schedule
+                    .start
+                    .checked_add(schedule.duration)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+
+                let next_unlock_timestamp = if now < cliff_time {
+                    Some(cliff_time)
+                } else if now < end_time {
+                    Some(end_time)
+                } else {
+                    None
+                };
+
+                Ok(TranchePreview {
+                    claimable,
+                    evaluated_timestamp: now,
+                    next_unlock_timestamp,
+                })
+            }
+            Stored::Tranche(schedule) => {
+                let claimable = if schedule.claimed >= schedule.total_amount
+                    || schedule.status == VestingStatus::Completed
+                {
+                    0
+                } else {
+                    Self::tranche_claimable(&schedule, now)?
+                };
+
+                // Completed or revoked schedules return documented terminal values.
+                if schedule.claimed >= schedule.total_amount
+                    || schedule.status == VestingStatus::Completed
+                    || schedule.status == VestingStatus::Revoked
+                {
+                    return Ok(TranchePreview {
+                        claimable,
+                        evaluated_timestamp: now,
+                        next_unlock_timestamp: None,
+                    });
+                }
+
+                let elapsed = Self::elapsed_since(schedule.start, now);
+                let mut next_unlock_timestamp: Option<u64> = None;
+                for tranche in schedule.tranches.iter() {
+                    if tranche.unlock_at > elapsed {
+                        let unlock_time = schedule
+                            .start
+                            .checked_add(tranche.unlock_at)
+                            .ok_or(ForgeError::ArithmeticOverflow)?;
+                        next_unlock_timestamp = Some(unlock_time);
+                        break;
+                    }
+                }
+
+                Ok(TranchePreview {
+                    claimable,
+                    evaluated_timestamp: now,
+                    next_unlock_timestamp,
+                })
+            }
         }
     }
 
