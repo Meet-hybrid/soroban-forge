@@ -10,6 +10,7 @@ Soroban smart contracts and developer tooling for the Stellar ecosystem.
 - [Architecture](architecture/architecture.md)
 - [Best Practices](best-practices/index.md)
 - [Contracts](contracts/index.md)
+- [Authorization Matrix](contracts/authorization-matrix.md)
 - [Tutorials](tutorials/getting-started.md)
 
 ## Project status
