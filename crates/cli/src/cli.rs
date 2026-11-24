@@ -131,3 +131,25 @@ pub struct DoctorArgs {
     #[arg(long, value_name = "PATH")]
     pub wasm: Option<PathBuf>,
 }
+
+#[derive(Args, Debug, Clone)]
+pub struct SimulateArgs {
+    /// Contract address or alias
+    #[arg(long)]
+    pub contract: String,
+    /// Function name to invoke
+    #[arg(long)]
+    pub function: String,
+    /// Function arguments (key=value format)
+    #[arg(long = "arg", action = clap::ArgAction::Append)]
+    pub args: Vec<String>,
+    /// Network to use
+    #[arg(long, default_value = "testnet")]
+    pub network: String,
+    /// Source account
+    #[arg(long)]
+    pub source: Option<String>,
+    /// Output as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}

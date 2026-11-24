@@ -18,7 +18,7 @@ mod commands;
 use clap::{Parser, Subcommand};
 use cli::{
     BuildArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs,
-    ScaffoldValidateArgs, TestArgs, VerifyArgs,
+    ScaffoldValidateArgs, SimulateArgs, TestArgs, VerifyArgs,
 };
 
 #[derive(Parser, Debug)]
@@ -46,6 +46,7 @@ pub enum Commands {
     Events(EventsArgs),
     Inspect(InspectArgs),
     Doctor(DoctorArgs),
+    Simulate(SimulateArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -64,6 +65,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,
         Commands::Doctor(args) => commands::doctor::run(args)?,
+        Commands::Simulate(args) => commands::simulate::run(args)?,
     }
 
     Ok(())

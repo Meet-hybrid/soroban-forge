@@ -6,6 +6,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -63,6 +64,66 @@ function run(command, args, cwd = rootDir) {
   }
 }
 
+/**
+ * Calculate SHA-256 checksum of a file
+ */
+function calculateChecksum(filePath) {
+  const content = readFileSync(filePath);
+  return createHash("sha256").update(content).digest("hex");
+}
+
+/**
+ * Get the current Git commit SHA
+ */
+function getGitCommit() {
+  const result = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: rootDir,
+    encoding: "utf8",
+  });
+  
+  if (result.error) {
+    throw new Error(`Failed to get git commit: ${result.error.message}`);
+  }
+  
+  if (result.status !== 0) {
+    throw new Error(`git rev-parse failed with status ${result.status}: ${result.stderr}`);
+  }
+  
+  return result.stdout.trim();
+}
+
+/**
+ * Get version from a Cargo.toml file
+ */
+function getCargoVersion(crateName) {
+  const cargoPath = join(rootDir, "crates", crateName.replace("soroban-forge-", ""), "Cargo.toml");
+  
+  if (!existsSync(cargoPath)) {
+    throw new Error(`Cargo.toml not found for crate ${crateName} at ${cargoPath}`);
+  }
+  
+  const content = readFileSync(cargoPath, "utf8");
+  
+  // Check for workspace version first
+  if (content.includes("version.workspace = true")) {
+    const workspaceCargoPath = join(rootDir, "Cargo.toml");
+    const workspaceContent = readFileSync(workspaceCargoPath, "utf8");
+    const versionMatch = workspaceContent.match(/^\s*version\s*=\s*"([^"]+)"/m);
+    
+    if (versionMatch) {
+      return versionMatch[1];
+    }
+  }
+  
+  // Check for direct version
+  const versionMatch = content.match(/^\[package\][^\[]*version\s*=\s*"([^"]+)"/ms);
+  if (versionMatch) {
+    return versionMatch[1];
+  }
+  
+  throw new Error(`Could not determine version for ${crateName}`);
+}
+
 console.log(`==> Building contract WASMs for target '${target}'`);
 run("cargo", [
   "build",
@@ -74,6 +135,11 @@ run("cargo", [
 ]);
 
 mkdirSync(sdkClientsDir, { recursive: true });
+
+// Track manifest data
+const manifestContracts = [];
+const generationCommit = getGitCommit();
+console.log(`==> Generation commit: ${generationCommit}`);
 
 for (const contract of contracts) {
   const wasmPath = join(releaseDir, contract.wasm);
@@ -118,12 +184,41 @@ for (const contract of contracts) {
   );
   cpSync(generatedSource, join(sdkClientsDir, `${contract.module}.ts`));
 
+  // Collect manifest data for this contract
+  const contractVersion = getCargoVersion(contract.crate);
+  const clientFilePath = `src/clients/${contract.module}.ts`;
+  const clientChecksum = calculateChecksum(join(sdkClientsDir, `${contract.module}.ts`));
+  
+  const manifestEntry = {
+    crateName: contract.crate,
+    clientModule: contract.module,
+    contractVersion,
+    generatedFiles: {
+      [clientFilePath]: clientChecksum,
+    },
+  };
+
   if (contract.package) {
     const packageDir = join(rootDir, "packages", contract.package);
     rmSync(packageDir, { recursive: true, force: true });
     mkdirSync(packageDir, { recursive: true });
     cpSync(outputDir, packageDir, { recursive: true });
+    manifestEntry.standalonePackage = contract.package;
   }
+  
+  manifestContracts.push(manifestEntry);
 }
+
+// Generate manifest
+const manifest = {
+  schema: "soroban-forge-generated-clients-v1",
+  generatedAt: new Date().toISOString(),
+  generationCommit,
+  contracts: manifestContracts,
+};
+
+const manifestPath = join(sdkDir, "generated-client-manifest.json");
+writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+console.log(`==> Generated manifest at ${manifestPath}`);
 
 console.log(`==> All six clients generated in ${sdkClientsDir} and standalone packages.`);
