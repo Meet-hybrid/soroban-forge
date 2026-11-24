@@ -570,21 +570,112 @@ fn total_amount_i128_max_at_duration_succeeds() {
 #[test]
 fn start_plus_duration_u64_overflow_reported() {
     let (env, _token, _tc, _cid, client, accounts) = setup!();
-    // A schedule whose duration would cause start + duration to overflow u64.
+    // Creating a schedule above MAX_VESTING_DURATION is rejected at creation.
+    let err = client
+        .try_create_schedule(
+            &accounts.deployer,
+            &accounts.user1,
+            &accounts.validator,
+            &TOTAL,
+            &0_u64,
+            &u64::MAX,
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+
+    // A schedule created with a valid duration near u64::MAX whose
+    // start + duration overflows u64 reports ArithmeticOverflow on claimable/claim.
+    env.ledger().set_timestamp(u64::MAX - 500);
     let id = client.create_schedule(
         &accounts.deployer,
         &accounts.user1,
         &accounts.validator,
         &TOTAL,
         &0_u64,
-        &u64::MAX,
+        &1_000_u64,
     );
-    env.ledger().set_timestamp(START + 100);
+    env.ledger().set_timestamp(u64::MAX - 100);
     let err = client.try_claimable(&id).unwrap_err().unwrap();
     assert_eq!(err, ForgeError::ArithmeticOverflow);
 
     let claim_err = client.try_claim(&id).unwrap_err().unwrap();
     assert_eq!(claim_err, ForgeError::ArithmeticOverflow);
+}
+
+#[test]
+fn create_schedule_validates_max_duration_and_exposes_cliff_in_status_queries() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+
+    // Above MAX_VESTING_DURATION is rejected.
+    let err = client
+        .try_create_schedule(
+            &accounts.deployer,
+            &accounts.user1,
+            &token,
+            &TOTAL,
+            &CLIFF,
+            &(MAX_VESTING_DURATION + 1),
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+
+    // Exactly at MAX_VESTING_DURATION is accepted.
+    let max_id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user1,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &MAX_VESTING_DURATION,
+    );
+    let max_status = client.get_schedule_status(&max_id);
+    assert_eq!(max_status.cliff, CLIFF);
+    assert_eq!(max_status.cliff_timestamp, START + CLIFF);
+    assert_eq!(max_status.duration, MAX_VESTING_DURATION);
+    assert_eq!(max_status.status, VestingStatus::Locked);
+
+    // Linear schedule with cliff: verify before, at, and after cliff timestamps.
+    let id = create(&client, &token, &accounts);
+
+    // Before cliff: Locked, claimable == 0, cliff exposed in status query.
+    env.ledger().set_timestamp(START + CLIFF - 1);
+    let before = client.get_schedule_status(&id);
+    assert_eq!(before.status, VestingStatus::Locked);
+    assert_eq!(before.cliff, CLIFF);
+    assert_eq!(before.cliff_timestamp, START + CLIFF);
+    assert_eq!(before.claimable, 0);
+    assert_eq!(client.claimable(&id), 0);
+
+    // Exactly at cliff: transitions to Vesting, claimable is still 0 (elapsed == 0).
+    env.ledger().set_timestamp(START + CLIFF);
+    let at_cliff = client.get_schedule_status(&id);
+    assert_eq!(at_cliff.status, VestingStatus::Vesting);
+    assert_eq!(at_cliff.cliff, CLIFF);
+    assert_eq!(at_cliff.cliff_timestamp, START + CLIFF);
+    assert_eq!(at_cliff.claimable, 0);
+    assert_eq!(client.claimable(&id), 0);
+
+    // After cliff (midway between cliff and duration): linear ramp accrues half.
+    env.ledger()
+        .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
+    let after_cliff = client.get_schedule_status(&id);
+    assert_eq!(after_cliff.status, VestingStatus::Vesting);
+    assert_eq!(after_cliff.cliff, CLIFF);
+    assert_eq!(after_cliff.claimable, TOTAL / 2);
+    assert_eq!(client.claim(&id), TOTAL / 2);
+
+    // After full duration and claim: Completed, cliff metadata preserved.
+    env.ledger().set_timestamp(START + DURATION);
+    assert_eq!(client.claim(&id), TOTAL - TOTAL / 2);
+    let completed = client.get_schedule_status(&id);
+    assert_eq!(completed.status, VestingStatus::Completed);
+    assert_eq!(completed.cliff, CLIFF);
+    assert_eq!(completed.claimed, TOTAL);
+    assert_eq!(completed.claimable, 0);
+    assert_eq!(tc.balance(&accounts.user1), TOTAL);
+    assert_eq!(tc.balance(&contract_id), 0);
 }
 
 #[test]

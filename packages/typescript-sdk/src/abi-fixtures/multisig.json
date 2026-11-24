@@ -127,6 +127,18 @@
       ]
     },
     {
+      "name": "expire_tx",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_confirmations",
       "inputs": [
         {
@@ -281,6 +293,18 @@
       ],
       "outputs": [
         "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "is_expired",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<bool,udt:ForgeError>"
       ]
     },
     {
