@@ -23,8 +23,8 @@ mod decode_failure;
 use clap::{Parser, Subcommand};
 use cli::{
     BuildArgs, CompareArgs, DeployArgs, DeployCheckArgs, DoctorArgs, EventsArgs, InspectArgs,
-    InvokeArgs, KeysArgs, LintArgs, NewArgs, ProfileArgs, ScaffoldValidateArgs, StorageDiffArgs,
-    TestArgs, ValidatePlanArgs, VerifyArgs,
+    InvokeArgs, KeysArgs, LintArgs, NewArgs, ProfileArgs, ScaffoldValidateArgs, SimulateArgs,
+    StorageDiffArgs, TestArgs, ValidatePlanArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 
@@ -69,6 +69,7 @@ pub enum Commands {
     ValidatePlan(ValidatePlanArgs),
     Compare(CompareArgs),
     StorageDiff(StorageDiffArgs),
+    Simulate(SimulateArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -94,6 +95,7 @@ fn main() -> anyhow::Result<()> {
         Commands::ValidatePlan(args) => commands::plan::run(args)?,
         Commands::Compare(args) => commands::compare::run(args)?,
         Commands::StorageDiff(args) => commands::storage_diff::run(args)?,
+        Commands::Simulate(args) => commands::simulate::run(args)?,
     }
 
     Ok(())
