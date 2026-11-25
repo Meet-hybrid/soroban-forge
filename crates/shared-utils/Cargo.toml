@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Shared utilities for Soroban Forge contracts"
 
+[features]
+# Test-only fixtures for contract test suites. No production API is affected.
+testutils = ["soroban-sdk/testutils"]
+
 [dependencies]
 soroban-sdk.workspace = true
 

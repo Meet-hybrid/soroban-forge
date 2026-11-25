@@ -25,8 +25,11 @@ use super::*;
 use crate::tests::{owner_vec, DEPOSIT};
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
+use soroban_forge_shared_utils::{
+    jump_after, jump_before, jump_to, BalanceSnapshot, TEST_START_TIMESTAMP,
+};
 use soroban_forge_test_utils::TestAccounts;
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::Address as _;
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use std::vec::Vec as StdVec;
 
@@ -39,7 +42,7 @@ const WINDOWS: [u64; 3] = [HOUR, DAY, WEEK];
 /// interferes with the limit invariants unless a test wants it to.
 const FUNDING: i128 = 1_000_000;
 
-const T0: u64 = 1_000_000;
+const T0: u64 = TEST_START_TIMESTAMP;
 
 type Client<'a> = SorobanForgeMultiSigWalletClient<'a>;
 
@@ -105,16 +108,16 @@ fn window_pruning_drops_entries_exactly_at_the_horizon() {
     for window in WINDOWS {
         let (env, client, accounts, token, _token_client) = custody!();
         fund(&env, &client, &accounts, &token);
-        env.ledger().set_timestamp(T0);
+        jump_to(&env, T0);
         limited!(client, accounts, token, 1_000_i128, window);
 
         for (offset, amount) in [(0, 100_i128), (10, 200), (20, 300)] {
-            env.ledger().set_timestamp(T0 + offset);
+            jump_to(&env, T0 + offset);
             approved(&client, &accounts, &token, amount);
         }
 
         // One second before the first entry's horizon everything counts.
-        env.ledger().set_timestamp(T0 + window - 1);
+        jump_before(&env, T0 + window, 1);
         assert_eq!(client.get_window_usage(&token), 600, "window {window}");
         assert_eq!(
             client.get_withdrawal_window(&token),
@@ -127,7 +130,7 @@ fn window_pruning_drops_entries_exactly_at_the_horizon() {
 
         // Exactly at the horizon the first entry leaves the window. Views
         // report it without writing; the next write prunes storage.
-        env.ledger().set_timestamp(T0 + window);
+        jump_to(&env, T0 + window);
         assert_eq!(client.get_window_usage(&token), 500);
         assert_eq!(stored_entries(&env, &client.address, &token).len(), 3);
         approved(&client, &accounts, &token, 50);
@@ -150,7 +153,7 @@ fn window_pruning_drops_entries_exactly_at_the_horizon() {
 
         // Far past every horizon the window is empty, and the next write
         // leaves exactly one entry: no stale history and no orphaned total.
-        env.ledger().set_timestamp(T0 + 5 * window);
+        jump_to(&env, T0 + 5 * window);
         assert_eq!(client.get_window_usage(&token), 0);
         assert_eq!(
             client.get_withdrawal_window(&token),
@@ -174,7 +177,7 @@ fn executing_withdrawals_never_adds_usage_or_stale_history() {
     for window in WINDOWS {
         let (env, client, accounts, token, _token_client) = custody!();
         fund(&env, &client, &accounts, &token);
-        env.ledger().set_timestamp(T0);
+        jump_to(&env, T0);
         limited!(client, accounts, token, 900_i128, window);
 
         let txs: StdVec<u64> = (0..3)
@@ -188,7 +191,7 @@ fn executing_withdrawals_never_adds_usage_or_stale_history() {
         assert_eq!(stored_entries(&env, &client.address, &token), before);
         assert_eq!(client.get_window_usage(&token), 900);
 
-        env.ledger().set_timestamp(T0 + window);
+        jump_to(&env, T0 + window);
         assert_eq!(client.get_window_usage(&token), 0);
         approved(&client, &accounts, &token, 900);
         assert_eq!(stored_entries(&env, &client.address, &token).len(), 1);
@@ -205,7 +208,7 @@ fn consuming_one_tokens_limit_never_touches_another_token() {
         let (env, client, accounts, token_a, _token_client) = custody!();
         fund(&env, &client, &accounts, &token_a);
         let token_b = second_token(&env, &client, &accounts);
-        env.ledger().set_timestamp(T0);
+        jump_to(&env, T0);
         limited!(client, accounts, token_a, 1_000_i128, window_a);
         limited!(client, accounts, token_b, 500_i128, window_b);
         let b_limit = client.get_withdrawal_limit(&token_b);
@@ -246,7 +249,7 @@ fn consuming_one_tokens_limit_never_touches_another_token() {
         assert_eq!(client.get_withdrawal_limit(&token_b), b_limit);
 
         // Each window expires on its own clock.
-        env.ledger().set_timestamp(T0 + window_a.min(window_b));
+        jump_to(&env, T0 + window_a.min(window_b));
         let (expired, kept) = if window_a < window_b {
             (&token_a, &token_b)
         } else {
@@ -270,7 +273,7 @@ fn exactly_the_remaining_allowance_passes_and_one_stroop_more_fails() {
     for window in WINDOWS {
         let (env, client, accounts, token, _token_client) = custody!();
         fund(&env, &client, &accounts, &token);
-        env.ledger().set_timestamp(T0);
+        jump_to(&env, T0);
         limited!(client, accounts, token, 1_000_i128, window);
 
         // Empty window: the whole limit is the remaining allowance.
@@ -284,7 +287,7 @@ fn exactly_the_remaining_allowance_passes_and_one_stroop_more_fails() {
         );
 
         approved(&client, &accounts, &token, 400);
-        env.ledger().set_timestamp(T0 + 1);
+        jump_after(&env, T0, 1);
         assert_eq!(
             client.check_withdrawal(&token, &601),
             CheckResult::LimitExceeded
@@ -302,7 +305,7 @@ fn exactly_the_remaining_allowance_passes_and_one_stroop_more_fails() {
         );
 
         // When the first entry expires, exactly its 400 is free again.
-        env.ledger().set_timestamp(T0 + window);
+        jump_to(&env, T0 + window);
         assert_eq!(
             submit_err(&client, &accounts, &token, 401),
             ForgeError::WithdrawalLimitExceeded
@@ -319,9 +322,9 @@ fn exactly_the_remaining_allowance_passes_and_one_stroop_more_fails() {
 #[test]
 fn stale_approval_is_rechecked_against_the_limit_in_force() {
     for window in WINDOWS {
-        let (env, client, accounts, token, token_client) = custody!();
+        let (env, client, accounts, token, _token_client) = custody!();
         fund(&env, &client, &accounts, &token);
-        env.ledger().set_timestamp(T0);
+        jump_to(&env, T0);
         limited!(client, accounts, token, 1_000_i128, window);
 
         let stale = approved(&client, &accounts, &token, 700);
@@ -329,22 +332,25 @@ fn stale_approval_is_rechecked_against_the_limit_in_force() {
 
         // Lowered below the in-window total: the stale approval fails with
         // nothing changed, and stays pending.
-        env.ledger().set_timestamp(T0 + 1);
+        jump_after(&env, T0, 1);
         limited!(client, accounts, token, 899_i128, window);
         assert_eq!(
             client.try_execute(&stale).unwrap_err().unwrap(),
             ForgeError::WithdrawalLimitExceeded
         );
         assert_eq!(client.get_tx(&stale).status, TxStatus::Pending);
-        assert_eq!(client.balance(&token), FUNDING);
-        assert_eq!(token_client.balance(&accounts.arbiter), 0);
+        let holders = [accounts.arbiter.clone(), client.address.clone()];
+        let mid = BalanceSnapshot::new(&env, &token, &holders);
+        mid.assert_balances(&[0, FUNDING]);
         assert_eq!(client.get_window_usage(&token), 900);
 
         // Lowered to exactly the in-window total: both settle, counted once.
         limited!(client, accounts, token, 900_i128, window);
         client.execute(&stale);
         client.execute(&other);
-        assert_eq!(token_client.balance(&accounts.arbiter), 900);
+        let after = BalanceSnapshot::new(&env, &token, &holders);
+        mid.assert_delta(&after, &[900, -900]);
+        assert_eq!(mid.total(), after.total());
         assert_eq!(client.get_window_usage(&token), 900);
         assert_eq!(stored_total(&env, &client.address, &token), 900);
     }
@@ -355,14 +361,14 @@ fn withdrawal_submitted_before_any_limit_is_admitted_at_execution() {
     for window in WINDOWS {
         let (env, client, accounts, token, token_client) = custody!();
         fund(&env, &client, &accounts, &token);
-        env.ledger().set_timestamp(T0);
+        jump_to(&env, T0);
 
         // No limit at submission: nothing is recorded.
         let big = approved(&client, &accounts, &token, 800);
         let small = approved(&client, &accounts, &token, 300);
         assert!(stored_entries(&env, &client.address, &token).is_empty());
 
-        env.ledger().set_timestamp(T0 + 1);
+        jump_after(&env, T0, 1);
         limited!(client, accounts, token, 500_i128, window);
 
         // 800 alone breaks the new limit.
@@ -385,7 +391,7 @@ fn withdrawal_submitted_before_any_limit_is_admitted_at_execution() {
         assert_eq!(client.check_withdrawal(&token, &200), CheckResult::Allowed);
 
         // Once that window clears and the limit is raised, the big one fits.
-        env.ledger().set_timestamp(T0 + 1 + window);
+        jump_to(&env, T0 + 1 + window);
         limited!(client, accounts, token, 800_i128, window);
         client.execute(&big);
         assert_eq!(token_client.balance(&accounts.arbiter), 1_100);
@@ -398,12 +404,12 @@ fn approval_older_than_its_window_must_fit_the_current_window_again() {
     for window in WINDOWS {
         let (env, client, accounts, token, token_client) = custody!();
         fund(&env, &client, &accounts, &token);
-        env.ledger().set_timestamp(T0);
+        jump_to(&env, T0);
         limited!(client, accounts, token, 1_000_i128, window);
         let old = approved(&client, &accounts, &token, 600);
 
         // The old entry expires; newer withdrawals fill the window.
-        env.ledger().set_timestamp(T0 + window);
+        jump_to(&env, T0 + window);
         approved(&client, &accounts, &token, 500);
         assert_eq!(client.get_window_usage(&token), 500);
         assert_eq!(
@@ -413,7 +419,7 @@ fn approval_older_than_its_window_must_fit_the_current_window_again() {
         );
 
         // When the newer entries clear, it is recorded again at execution.
-        env.ledger().set_timestamp(T0 + 2 * window);
+        jump_to(&env, T0 + 2 * window);
         client.execute(&old);
         assert_eq!(token_client.balance(&accounts.arbiter), 600);
         assert_eq!(client.get_window_usage(&token), 600);
@@ -431,7 +437,7 @@ fn approval_older_than_its_window_must_fit_the_current_window_again() {
 fn removed_limit_lets_stale_approvals_settle() {
     let (env, client, accounts, token, token_client) = custody!();
     fund(&env, &client, &accounts, &token);
-    env.ledger().set_timestamp(T0);
+    jump_to(&env, T0);
     limited!(client, accounts, token, 1_000_i128, HOUR);
     let pending = approved(&client, &accounts, &token, 1_000);
     limited!(client, accounts, token, 1_i128, HOUR);
@@ -527,7 +533,7 @@ proptest! {
         let token_b = second_token(&env, &client, &accounts);
         let tokens = [token_a, token_b];
         let mut now = T0;
-        env.ledger().set_timestamp(now);
+        jump_to(&env, now);
 
         let mut models = [
             TokenModel { limit: limits.0, window: windows.0, entries: StdVec::new() },
@@ -615,7 +621,7 @@ proptest! {
                 }
                 Op::Advance { seconds } => {
                     now += seconds;
-                    env.ledger().set_timestamp(now);
+                    jump_to(&env, now);
                 }
                 Op::SetLimit { token, amount } => {
                     let window = models[token].window;
