@@ -12,6 +12,7 @@
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::{Address, Env};
 
+mod boundary_auth_rollback;
 mod dao_dispatch;
 mod dao_dispute;
 mod full_lifecycle_conservation;
