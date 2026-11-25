@@ -1,24 +1,26 @@
 use crate::{SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus};
-use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk:testutils:{Address as _, Ledger as _};
-use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+use soroban_forge_shared_utils::{
+    jump_before, jump_to, jump_to_timestamp, BalanceSnapshot, ForgeError, TestSac,
+    TEST_START_TIMESTAMP,
+};
+use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::TokenInterface;
 use soroban_sdk::{Address, Env};
 
-const START: u64 = 1_000_000;
+const START: u64 = TEST_START_TIMESTAMP;
 const PERIOD: u64 = 1_000;
 const AMOUNT: i128 = 250;
 
 fn setup() -> (Env, Address, Address, Address, Address, u64) {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
-    env.ledger().set_timestamp(START);
-    let admin = Address::generate(&env);
-    let sac = env.register_stellar_asset_contract_v2(admin);
-    let token = sac.address();
+    jump_to_timestamp(&env, TEST_START_TIMESTAMP);
+    let sac = TestSac::new(&env);
+    let token = sac.token.clone();
     let subscriber = Address::generate(&env);
     let provider = Address::generate(&env);
-    StellarAssetClient::new(&env, &token).mint(&subscriber, &10_000);
+    sac.mint(&subscriber, 10_000);
     let contract_id = env.register(SubscriptionPayments, ());
     let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
     let id = client.subscribe(&subscriber, &provider, &token, &AMOUNT, &PERIOD);
@@ -29,16 +31,14 @@ fn setup() -> (Env, Address, Address, Address, Address, u64) {
 fn charge_transfers_tokens_from_subscriber_to_provider() {
     let (env, token, subscriber, provider, contract_id, id) = setup();
     let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
-    let token_client = TokenClient::new(&env, &token);
     client.deposit(&id, &AMOUNT);
-    env.ledger().set_timestamp(START + PERIOD);
+    let holders = [contract_id.clone(), provider.clone(), subscriber.clone()];
+    let before = BalanceSnapshot::new(&env, &token, &holders);
+    jump_to(&env, START + PERIOD);
     assert_eq!(client.charge(&id), AMOUNT);
-    assert_eq!(token_client.balance(&provider), AMOUNT);
-    assert_eq!(token_client.balance(&contract_id), 0);
-    assert_eq!(
-        token_client.balance(&subscriber),
-        10_000 - AMOUNT
-    );
+    let after = BalanceSnapshot::new(&env, &token, &holders);
+    before.assert_delta(&after, &[-AMOUNT, AMOUNT, 0]);
+    assert_eq!(before.total(), after.total());
     assert_eq!(client.get_subscription(&id).prepaid_balance, Some(0));
 }
 
@@ -78,18 +78,16 @@ fn failed_transfer_reverts_state_and_balances() {
 fn multiple_charges_across_periods_conserve_totals() {
     let (env, token, subscriber, provider, contract_id, id) = setup();
     let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
-    let token_client = TokenClient::new(&env, &token);
     client.deposit(&id, &(AMOUNT * 3));
+    let holders = [contract_id.clone(), provider.clone(), subscriber.clone()];
+    let before = BalanceSnapshot::new(&env, &token, &holders);
     for period in 1..=3 {
-        env.ledger().set_timestamp(START + PERIOD * period);
+        jump_to(&env, START + PERIOD * period);
         assert_eq!(client.charge(&id), AMOUNT);
     }
-    assert_eq!(token_client.balance(&provider), AMOUNT * 3);
-    assert_eq!(token_client.balance(&contract_id), 0);
-    assert_eq!(
-        token_client.balance(&subscriber),
-        10_000 - AMOUNT * 3
-    );
+    let after = BalanceSnapshot::new(&env, &token, &holders);
+    before.assert_delta(&after, &[-AMOUNT * 3, AMOUNT * 3, 0]);
+    assert_eq!(before.total(), after.total());
     assert_eq!(client.get_subscription(&id).prepaid_balance, Some(0));
 }
 
@@ -97,36 +95,33 @@ fn multiple_charges_across_periods_conserve_totals() {
 fn zero_balance_subscription_marks_past_due_without_transfer() {
     let (env, token, subscriber, provider, contract_id, id) = setup();
     let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
-    let token_client = TokenClient::new(&env, &token);
-    env.ledger().set_timestamp(START + PERIOD);
+    let holders = [provider.clone(), contract_id.clone(), subscriber.clone()];
+    let before = BalanceSnapshot::new(&env, &token, &holders);
+    jump_to(&env, START + PERIOD);
     assert_eq!(client.charge(&id), 0);
     assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::PastDue);
-    assert_eq!(token_client.balance(&provider), 0);
-    assert_eq!(token_client.balance(&contract_id), 0);
-    assert_eq!(token_client.balance(&subscriber), 10_000);
+    let after = BalanceSnapshot::new(&env, &token, &holders);
+    before.assert_delta(&after, &[0, 0, 0]);
 }
 
 #[test]
 fn charge_catchup_settles_each_period_with_transfers() {
     let (env, token, subscriber, provider, contract_id, id) = setup();
     let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
-    let token_client = TokenClient::new(&env, &token);
     client.deposit(&id, &(AMOUNT * 2));
-    env.ledger().set_timestamp(START + PERIOD * 2);
+    let holders = [contract_id.clone(), provider.clone(), subscriber.clone()];
+    let before = BalanceSnapshot::new(&env, &token, &holders);
+    jump_to(&env, START + PERIOD * 2);
     // Catchup of one period is allowed by the prepaid policy.
     assert_eq!(client.charge_catchup(&id, &1), AMOUNT);
-    assert_eq!(token_client.balance(&provider), AMOUNT);
     assert_eq!(client.get_subscription(&id).prepaid_balance, Some(AMOUNT));
     // A second catchup of one period is also allowed.
-    env.ledger().set_timestamp(START + PERIOD * 3);
+    jump_to(&env, START + PERIOD * 3);
     assert_eq!(client.charge_catchup(&id, &1), AMOUNT);
-    assert_eq!(token_client.balance(&provider), AMOUNT * 2);
     assert_eq!(client.get_subscription(&id).prepaid_balance, Some(0));
-    assert_eq!(token_client.balance(&contract_id), 0);
-    assert_eq!(
-        token_client.balance(&subscriber),
-        10_000 - AMOUNT * 2
-    );
+    let after = BalanceSnapshot::new(&env, &token, &holders);
+    before.assert_delta(&after, &[-AMOUNT * 2, AMOUNT * 2, 0]);
+    assert_eq!(before.total(), after.total());
 }
 
 #[test]
@@ -171,38 +166,32 @@ fn charge_event_reports_transfer_amount() {
 fn charge_conservation_total_collected_equals_total_distributed() {
     let (env, token, subscriber, provider, contract_id, id) = setup();
     let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
-    let token_client = TokenClient::new(&env, &token);
-    let subscriber_start = token_client.balance(&subscriber);
-    let provider_start = token_client.balance(&provider);
+    let holders = [subscriber.clone(), provider.clone(), contract_id.clone()];
+    let before = BalanceSnapshot::new(&env, &token, &holders);
     client.deposit(&id, &(AMOUNT * 2));
     for period in 1..=2 {
-        env.ledger().set_timestamp(START + PERIOD * period);
+        jump_to(&env, START + PERIOD * period);
         assert_eq!(client.charge(&id), AMOUNT);
     }
-    let subscriber_end = token_client.balance(&subscriber);
-    let provider_end = token_client.balance(&provider);
-    let collected = subscriber_start - subscriber_end;
-    let distributed = provider_end - provider_start;
-    assert_eq!(collected, distributed);
-    assert_eq!(collected, AMOUNT * 2);
-    assert_eq!(token_client.balance(&contract_id), 0);
+    let after = BalanceSnapshot::new(&env, &token, &holders);
+    before.assert_delta(&after, &[-AMOUNT * 2, AMOUNT * 2, 0]);
+    assert_eq!(before.total(), after.total());
 }
 
 #[test]
 fn charge_requires_auth_on_subscriber() {
     let env = Env::default();
-    env.ledger().set_timestamp(START);
-    let admin = Address::generate(&env);
-    let sac = env.register_stellar_asset_contract_v2(admin);
-    let token = sac.address();
+    jump_to_timestamp(&env, TEST_START_TIMESTAMP);
+    let sac = TestSac::new(&env);
+    let token = sac.token.clone();
     let subscriber = Address::generate(&env);
     let provider = Address::generate(&env);
-    StellarAssetClient::new(&env, &token).mint(&subscriber, &10_000);
+    sac.mint(&subscriber, 10_000);
     let contract_id = env.register(SubscriptionPayments, ());
     let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
     // Auth is not mocked here, so the subscriber auth must be required.
     let id = client.subscribe(&subscriber, &provider, &token, &AMOUNT, &PERIOD);
-    env.ledger().set_timestamp(START + PERIOD);
+    jump_to(&env, START + PERIOD);
     // Without mocked auths, charge must fail authorization.
     assert!(client.try_charge(&id).is_err());
     // No tokens moved.
@@ -326,35 +315,31 @@ fn charge_catchup_event_reports_amount() {
 fn charge_catchup_conservation_holds() {
     let (env, token, subscriber, provider, contract_id, id) = setup();
     let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
-    let token_client = TokenClient::new(&env, &token);
-    let subscriber_start = token_client.balance(&subscriber);
-    let provider_start = token_client.balance(&provider);
+    let holders = [subscriber.clone(), provider.clone(), contract_id.clone()];
+    let before = BalanceSnapshot::new(&env, &token, &holders);
     client.deposit(&id, &(AMOUNT * 2));
-    env.ledger().set_timestamp(START + PERIOD);
+    jump_to(&env, START + PERIOD);
     assert_eq!(client.charge_catchup(&id, &1), AMOUNT);
-    env.ledger().set_timestamp(START + PERIOD * 2);
+    jump_to(&env, START + PERIOD * 2);
     assert_eq!(client.charge_catchup(&id, &1), AMOUNT);
-    let collected = subscriber_start - token_client.balance(&subscriber);
-    let distributed = token_client.balance(&provider) - provider_start;
-    assert_eq!(collected, distributed);
-    assert_eq!(collected, AMOUNT * 2);
-    assert_eq!(token_client.balance(&contract_id), 0);
+    let after = BalanceSnapshot::new(&env, &token, &holders);
+    before.assert_delta(&after, &[-AMOUNT * 2, AMOUNT * 2, 0]);
+    assert_eq!(before.total(), after.total());
 }
 
 #[test]
 fn charge_catchup_requires_auth() {
     let env = Env::default();
-    env.ledger().set_timestamp(START);
-    let admin = Address::generate(&env);
-    let sac = env.register_stellar_asset_contract_v2(admin);
-    let token = sac.address();
+    jump_to_timestamp(&env, TEST_START_TIMESTAMP);
+    let sac = TestSac::new(&env);
+    let token = sac.token.clone();
     let subscriber = Address::generate(&env);
     let provider = Address::generate(&env);
-    StellarAssetClient::new(&env, &token).mint(&subscriber, &10_000);
+    sac.mint(&subscriber, 10_000);
     let contract_id = env.register(SubscriptionPayments, ());
     let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
     let id = client.subscribe(&subscriber, &provider, &token, &AMOUNT, &PERIOD);
-    env.ledger().set_timestamp(START + PERIOD);
+    jump_to(&env, START + PERIOD);
     assert!(client.try_charge_catchup(&id, &1).is_error());
     let token_client = TokenClient::new(&env, &token);
     assert_eq!(token_client.balance(&provider), 0);
@@ -478,8 +463,8 @@ fn charge_catchup_respects_ledger_timestamp_not_due_() {
     let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
     let token_client = TokenClient::new(&env, &token);
     client.deposit(&id, &AMOUNT);
-    // Not yet due.
-    env.ledger().set_timestamp(START + PERIOD - 1);
+    // Not yet due: one second before the period boundary.
+    jump_before(&env, START + PERIOD, 1);
     assert_eq!(client.charge_catchup(&id, &1), 0);
     assert_eq!(token_client.balance(&provider), 0);
     assert_eq!(

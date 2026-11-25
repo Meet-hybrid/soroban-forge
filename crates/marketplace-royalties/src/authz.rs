@@ -513,3 +513,95 @@ fn set_royalty_splits_rejects_non_collection_signature_without_writing_config() 
     assert_auth_abort!(client.try_set_royalty_splits(&collection, &splits));
     assert!(client.try_get_royalty(&collection).is_err());
 }
+
+#[test]
+fn set_royalty_tiers_accepts_collection_signature() {
+    let (env, _token, contract_id, client, collection, _recipient, _seller, _payer) = setup!();
+    let tiers = soroban_sdk::vec![&env, (1_i128, 500_u32), (1_000_i128, 250_u32)];
+
+    env.mock_auths(&[MockAuth {
+        address: &collection,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_royalty_tiers",
+            args: (&collection, tiers.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_set_royalty_tiers(&collection, &tiers)
+        .expect("outer ok")
+        .expect("contract ok");
+    assert_eq!(client.get_royalty_tiers(&collection), tiers);
+}
+
+#[test]
+fn set_royalty_tiers_rejects_non_collection_signature_when_setting_or_clearing() {
+    let (env, _token, contract_id, client, collection, recipient, _seller, _payer) = setup!();
+    let tiers = soroban_sdk::vec![&env, (1_i128, 500_u32), (1_000_i128, 250_u32)];
+
+    env.mock_auths(&[MockAuth {
+        address: &recipient,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_royalty_tiers",
+            args: (&collection, tiers.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_auth_abort!(client.try_set_royalty_tiers(&collection, &tiers));
+    assert!(client.get_royalty_tiers(&collection).is_empty());
+
+    // Store tiers with mocked auth, then verify non-collection cannot clear them.
+    env.mock_all_auths();
+    client.set_royalty_tiers(&collection, &tiers);
+
+    let empty: soroban_sdk::Vec<(i128, u32)> = soroban_sdk::Vec::new(&env);
+    env.mock_auths(&[MockAuth {
+        address: &recipient,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_royalty_tiers",
+            args: (&collection, empty.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_auth_abort!(client.try_set_royalty_tiers(&collection, &empty));
+    assert_eq!(client.get_royalty_tiers(&collection), tiers);
+
+    env.mock_auths(&[MockAuth {
+        address: &recipient,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "clear_royalty_tiers",
+            args: (&collection,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_auth_abort!(client.try_clear_royalty_tiers(&collection));
+    assert_eq!(client.get_royalty_tiers(&collection), tiers);
+}
+
+#[test]
+fn clear_royalty_tiers_accepts_collection_signature() {
+    let (env, _token, contract_id, client, collection, _recipient, _seller, _payer) = setup!();
+    let tiers = soroban_sdk::vec![&env, (1_i128, 500_u32)];
+    client.set_royalty_tiers(&collection, &tiers);
+
+    env.mock_auths(&[MockAuth {
+        address: &collection,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "clear_royalty_tiers",
+            args: (&collection,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_clear_royalty_tiers(&collection)
+        .expect("outer ok")
+        .expect("contract ok");
+    assert!(client.get_royalty_tiers(&collection).is_empty());
+}

@@ -110,6 +110,10 @@
       "name": "create_tranche_schedule",
       "inputs": [
         {
+          "name": "funder",
+          "type": "address"
+        },
+        {
           "name": "beneficiary",
           "type": "address"
         },
@@ -136,6 +140,18 @@
       ],
       "outputs": [
         "result<udt:VestingSchedule,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_schedule_status",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:ScheduleStatus,udt:ForgeError>"
       ]
     },
     {
@@ -200,6 +216,18 @@
       ],
       "outputs": [
         "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "revoke_tranche_schedule",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
       ]
     },
     {
@@ -339,6 +367,28 @@
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "TrancheRevoked",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "unlocked_at_revocation",
+          "type": "i128"
+        },
+        {
+          "name": "refunded_to_funder",
+          "type": "i128"
+        }
+      ]
     }
   ],
   "types": [
@@ -444,6 +494,44 @@
     },
     {
       "kind": "struct",
+      "name": "ScheduleStatus",
+      "fields": [
+        {
+          "name": "claimable",
+          "type": "i128"
+        },
+        {
+          "name": "claimed",
+          "type": "i128"
+        },
+        {
+          "name": "cliff",
+          "type": "u64"
+        },
+        {
+          "name": "cliff_timestamp",
+          "type": "u64"
+        },
+        {
+          "name": "duration",
+          "type": "u64"
+        },
+        {
+          "name": "start",
+          "type": "u64"
+        },
+        {
+          "name": "status",
+          "type": "udt:VestingStatus"
+        },
+        {
+          "name": "total_amount",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
       "name": "Tranche",
       "fields": [
         {
@@ -467,6 +555,18 @@
         {
           "name": "claimed",
           "type": "i128"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "refunded_amount",
+          "type": "i128"
+        },
+        {
+          "name": "revoked_unlocked",
+          "type": "option<i128>"
         },
         {
           "name": "start",

@@ -8,6 +8,8 @@ pull a fixed `amount` per `period` (seconds) through SEP-41 token transfers.
 ```rust
 fn subscribe(subscriber, provider, token, amount, period) -> Result<u64, ForgeError>
 fn subscribe_on_behalf_of(provider, subscriber, token, amount, period) -> Result<u64, ForgeError>
+fn subscribe_with_trial(subscriber, provider, token, amount, period, trial_seconds: u64) -> Result<u64, ForgeError>
+fn get_trial_end(subscription_id) -> Option<u64>
 fn authorize_provider(subscriber, provider) -> Result<(), ForgeError>
 fn revoke_provider(subscriber, provider) -> Result<(), ForgeError>
 fn is_provider_authorized(subscriber, provider) -> bool
@@ -68,6 +70,38 @@ elapsed_periods)` periods in one atomic invocation. `max_periods == 0` is a
 - `cancel` requires the subscriber and prevents further charges.
 - `set_quotas`, `record_usage`, and the metering views are described under
   [Metered usage](#metered-usage-quotas-and-overage).
+
+## Free Trials
+
+`subscribe_with_trial(subscriber, provider, token, amount, period, trial_seconds)`
+requires the subscriber and creates a subscription whose **first charge is due
+at `trial_end = now + trial_seconds`**. The trial end timestamp is stored under
+its own persistent `TrialEnd(subscription_id)` key so the serialized
+`Subscription` record layout remains unchanged.
+
+### Parameters and cap
+
+- `trial_seconds` must be strictly positive (`> 0`) and at most
+  `TRIAL_MAX_SECONDS` (`7_776_000` seconds / 90 days).
+- Values of `0` or above `TRIAL_MAX_SECONDS`, or non-positive `amount` /
+  `period`, fail with `ForgeError::InvalidInput` before authorization.
+- If `now + trial_seconds` overflows `u64`, `ForgeError::ArithmeticOverflow` is
+  returned before any subscription state is written.
+
+### Lifecycle rules
+
+| Situation | Behaviour |
+|---|---|
+| `charge` or `charge_catchup` while `now < trial_end` | Returns `0`; no tokens move, no state changes, no events emitted. |
+| First successful `charge` at `now >= trial_end` | Bills one period (pull or prepaid), sets `last_charged = trial_end`, and emits `TrialConverted` and `Charged`. Subsequent charges follow the normal cadence (`trial_end + period`, `trial_end + 2 * period`, …) without retroactively billing trial time. |
+| Failed first `charge` at `now >= trial_end` | Follows the existing arrears retry path (`PastDue` / `Cancelled`) without advancing `last_charged` or emitting `TrialConverted`; retrying once funded converts the trial and bills the period due at `trial_end`. |
+| `charge_catchup` at `now >= trial_end` | Bills `min(max_periods, 1 + (now - trial_end) / period)` periods starting from `trial_end`, emitting `TrialConverted` once and `Charged` per settled period. Trial time is never retroactively billed. `max_periods == 0` is a no-op and does not convert the trial. |
+| `cancel` / `cancel_by_provider` during the trial | Costs nothing and refunds any prepaid balance in full before recording `Cancelled`. |
+| `pause` during the trial, then `resume` | Extends `trial_end` (and `last_charged`) by the elapsed paused duration, matching how `resume` shifts due dates on regular subscriptions. Pausing after trial conversion shifts `last_charged` only and leaves the historical `trial_end` unchanged. |
+
+`get_trial_end(subscription_id)` is a read-only view returning `Some(trial_end)`
+for trial subscriptions (reflecting any pause extensions made during the trial)
+and `None` for subscriptions created without a trial.
 
 ## Metered usage: quotas and overage
 
@@ -291,6 +325,10 @@ of `0` fails with `ForgeError::InvalidInput`.
 - `AutoTopup(subscription_id)` — persistent `AutoTopup { trigger_threshold,
   topup_amount }` record; a separate key, so the `Subscription` wire shape is
   unchanged.
+- `TrialEnd(subscription_id)` — persistent `u64` trial end timestamp written by
+  `subscribe_with_trial` and extended by `resume` when paused during a trial;
+  stored separately so the `Subscription` wire shape is unchanged, and refreshed
+  by `touch_ttl`.
 - `Usage(subscription_id, metric)` — a persistent open-period raw unit counter
   for one metric, stamped with the `last_charged` window it belongs to; removed
   by the charge that closes the period.
@@ -345,6 +383,8 @@ The contract emits typed on-chain lifecycle events for indexers and off-chain mo
 - `BalanceDebited` (topic: `subscription_id: u64`) — successful prepaid period settlement; contains the exact `amount` and `balance_after`.
 - `BalanceRefunded` (topic: `subscription_id: u64`) — successful subscriber withdrawal or cancellation refund; contains `amount` and `balance_after`.
 - `AutoTopupTriggered` (topic: `subscription_id: u64`) — a prepaid balance was topped up from the subscriber during `charge`; contains the top-up `amount` and the `balance_after` it, before the period's debit.
+- `TrialStarted` (topic: `subscription_id: u64`) — emitted by `subscribe_with_trial` on success; contains `trial_end`, the timestamp when the first charge becomes due.
+- `TrialConverted` (topic: `subscription_id: u64`) — emitted once when the first successful post-trial `charge` or `charge_catchup` converts the subscription into paid billing; contains `trial_end`.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
 - `Charged` (topic: `subscription_id: u64`) — emitted on successful billing via `charge` (one event) or `charge_catchup` (one event per settled period). Contains `amount`, `last_charged`, and `next_charge_at`.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
