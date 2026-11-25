@@ -25,7 +25,7 @@
 //!   sub-invocations, and a claim payout legitimately completes on the beneficiary's
 //!   signature alone.
 
-use crate::{SorobanForgeVestingClient, Vesting, VestingStatus};
+use crate::{SorobanForgeVestingClient, Tranche, Vesting, VestingStatus};
 
 extern crate std;
 use soroban_sdk::testutils::{
@@ -874,4 +874,157 @@ fn refund_revoked_rejects_signature_from_non_funder() {
     // Nothing was recorded: the funder can still take the full refund.
     env.mock_all_auths();
     assert_eq!(client.refund_revoked(&id), TOTAL);
+}
+
+// -----------------------------------------------------------------------
+// revoke_tranche_schedule authorization & negative-auth tests
+// -----------------------------------------------------------------------
+
+fn create_tranche_for_authz(
+    env: &Env,
+    client: &SorobanForgeVestingClient<'_>,
+    funder: &Address,
+    beneficiary: &Address,
+    token: &Address,
+) -> u64 {
+    let tranches = soroban_sdk::Vec::from_array(
+        env,
+        [
+            Tranche {
+                unlock_at: 1_000,
+                amount: 2_000,
+            },
+            Tranche {
+                unlock_at: 3_000,
+                amount: 8_000,
+            },
+        ],
+    );
+    client.create_tranche_schedule(funder, beneficiary, token, &tranches)
+}
+
+#[test]
+fn revoke_tranche_schedule_accepts_funder_signature_alone() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id = create_tranche_for_authz(&env, &client, funder, beneficiary, &token);
+
+    env.ledger().set_timestamp(START + 2_000);
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke_tranche_schedule",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let refunded = client
+        .try_revoke_tranche_schedule(&id)
+        .expect("outer ok")
+        .expect("revoke ok");
+    assert_eq!(refunded, 8_000);
+    assert_eq!(tc.balance(funder), 8_000);
+    assert_eq!(tc.balance(&contract_id), 2_000);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+    assert_eq!(client.get_tranche_schedule(&id).refunded_amount, 8_000);
+}
+
+#[test]
+fn revoke_tranche_schedule_rejects_beneficiary_and_outsider_signatures() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id = create_tranche_for_authz(&env, &client, funder, beneficiary, &token);
+
+    env.ledger().set_timestamp(START + 2_000);
+    for signer in [beneficiary, &accounts.user2] {
+        env.mock_auths(&[MockAuth {
+            address: signer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "revoke_tranche_schedule",
+                args: (id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_revoke_tranche_schedule(&id);
+        assert_auth_abort!(res);
+        assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+        assert_eq!(client.get_tranche_schedule(&id).revoked_unlocked, None);
+        assert_eq!(client.get_tranche_schedule(&id).refunded_amount, 0);
+        assert_eq!(tc.balance(funder), 0);
+        assert_eq!(tc.balance(&contract_id), TOTAL);
+    }
+}
+
+#[test]
+fn revoke_tranche_schedule_rejects_signature_over_different_schedule_id() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id1 = create_tranche_for_authz(&env, &client, funder, beneficiary, &token);
+    let id2 = create_tranche_for_authz(&env, &client, funder, beneficiary, &token);
+
+    env.ledger().set_timestamp(START + 2_000);
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke_tranche_schedule",
+            args: (id1,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_revoke_tranche_schedule(&id2);
+    assert_auth_abort!(res);
+    assert_eq!(client.get_tranche_schedule(&id2).revoked_unlocked, None);
+    assert_eq!(tc.balance(funder), 0);
+}
+
+#[test]
+fn blank_envelope_aborts_revoke_tranche_schedule_and_preserves_state() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id = create_tranche_for_authz(&env, &client, funder, beneficiary, &token);
+
+    env.ledger().set_timestamp(START + 2_000);
+    env.set_auths(&[]);
+
+    let res = client.try_revoke_tranche_schedule(&id);
+    assert_auth_abort!(res);
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+    assert_eq!(client.get_tranche_schedule(&id).refunded_amount, 0);
+    assert_eq!(tc.balance(&contract_id), TOTAL);
+}
+
+#[test]
+fn revoke_tranche_schedule_authorization_tree_is_funder_root_entrypoint() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id = create_tranche_for_authz(&env, &client, funder, beneficiary, &token);
+
+    env.ledger().set_timestamp(START + 2_000);
+    client.revoke_tranche_schedule(&id);
+
+    assert_eq!(
+        env.auths(),
+        [(
+            funder.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "revoke_tranche_schedule"),
+                    (id,).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
 }

@@ -213,6 +213,27 @@ test("vesting: RevokedRefunded has two topic fields", () => {
   });
 });
 
+test("vesting: TrancheRevoked decodes topic and refund fields", () => {
+  const event = okEvent(
+    decodeVestingEvent(
+      raw(
+        [sym("tranche_revoked"), u64(4n), addr(5)],
+        map([["refunded_to_funder", i128(750n)], ["unlocked_at_revocation", i128(250n)]]),
+      ),
+    ),
+  );
+  assert.deepEqual(event, {
+    contract: "vesting",
+    event: "TrancheRevoked",
+    fields: {
+      schedule_id: 4n,
+      funder: contractId(5),
+      unlocked_at_revocation: 250n,
+      refunded_to_funder: 750n,
+    },
+  });
+});
+
 test("multisig: WithdrawalLimitRemoved accepts a void or empty-map value", () => {
   const expected = {
     contract: "multisig",

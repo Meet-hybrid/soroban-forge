@@ -3,6 +3,18 @@
   "contract": "soroban-forge-marketplace-royalties",
   "functions": [
     {
+      "name": "clear_royalty_tiers",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "distribute",
       "inputs": [
         {
@@ -64,6 +76,18 @@
       ],
       "outputs": [
         "result<vec<udt:RoyaltyShare>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_royalty_tiers",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "vec<tuple<i128,u32>>"
       ]
     },
     {
@@ -156,6 +180,22 @@
         {
           "name": "recipients",
           "type": "vec<udt:RoyaltyShare>"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_royalty_tiers",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "tiers",
+          "type": "vec<tuple<i128,u32>>"
         }
       ],
       "outputs": [
