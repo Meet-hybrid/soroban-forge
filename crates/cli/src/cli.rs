@@ -17,7 +17,6 @@ pub struct BuildArgs {
     #[arg(long, default_value_t = false)]
     pub check_size: bool,
 }
-
 #[derive(Args, Debug, Clone)]
 pub struct LintArgs {
     #[arg(short, long, default_value_t = false)]
@@ -130,4 +129,52 @@ pub struct DoctorArgs {
     /// Optional WASM artifact to validate as a regular, non-empty file.
     #[arg(long, value_name = "PATH")]
     pub wasm: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TtlAuditArgs {
+    /// Contract address (Stellar strkey, starts with C).
+    #[arg(long)]
+    pub contract: String,
+    /// Network profile (`testnet`, `mainnet`, `futurenet`) or a full Soroban
+    /// RPC URL (e.g. `http://localhost:8000`).
+    #[arg(long, default_value = "testnet")]
+    pub network: String,
+    /// JSON key-spec file listing additional persistent `LedgerKey` entries to
+    /// audit.  Each element must be `{ "xdr": "<base64 LedgerKey XDR>" }`;
+    /// the optional `"label"` field sets the display name in reports.
+    #[arg(long, value_name = "FILE")]
+    pub keys: Option<PathBuf>,
+    /// Minimum number of ledgers that must remain before an entry is flagged.
+    /// Defaults to 120 960 (≈ 1 week at 5 s/ledger).
+    #[arg(long, value_name = "LEDGERS")]
+    pub threshold: Option<u32>,
+    /// Output format: `table` (default) or `json`.
+    #[arg(long, value_name = "FORMAT", value_parser = ["table", "json"])]
+    pub format: Option<String>,
+    /// Write an extend-TTL plan compatible with the `plan` subcommand to this
+    /// path.  The plan contains one `extend_ttl` call per entry that is below
+    /// the threshold.
+    #[arg(long, value_name = "FILE")]
+    pub plan: Option<PathBuf>,
+    /// Source account used in the generated extend-TTL plan.  Has no effect
+    /// unless `--plan` is also set.
+    #[arg(long)]
+    pub source: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PlanArgs {
+    /// Path to the plan JSON file (version 1 format).
+    #[arg(value_name = "PLAN_FILE")]
+    pub plan: std::path::PathBuf,
+    /// Print what would be executed without sending transactions.
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
+    /// Execute without an interactive confirmation prompt.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
+    /// Write the execution receipt to this path instead of `<plan>.receipt.json`.
+    #[arg(long, value_name = "FILE")]
+    pub receipt: Option<std::path::PathBuf>,
 }

@@ -58,7 +58,7 @@ fn validate_call(idx: usize, call: &Call) -> Result<()> {
     }
     for (jdx, arg) in call.args.iter().enumerate() {
         if arg.contains('=') {
-            let (key, value) = arg
+            let (key, _value) = arg
                 .split_once('=')
                 .expect("split_once failed for arg with `=`");
             if key.trim().is_empty() {
@@ -104,7 +104,7 @@ fn confirmation_prompt(plan: &Plan) -> Result<()> {
     std::io::stdin()
         .read_line(&mut answer)
         .context("failed to read confirmation from stdin")?;
-    if answer.trim().to_ascii_lowercase() != "yes" {
+    if !answer.trim().eq_ignore_ascii_case("yes") {
         bail!("plan execution aborted by user");
     }
     Ok(())
@@ -118,6 +118,8 @@ fn execute_plan(plan: &Plan, plan_path: &Path, receipt_path: Option<&Path>) -> R
         plan_file: plan_path.to_string_lossy().into_owned(),
         network: plan.network.clone(),
         started_at: chrono_now_iso(),
+        finished_at: None,
+        succeeded: false,
         steps: Vec::new(),
         completed_transaction_hashes: Vec::new(),
         errors: Vec::new(),
@@ -130,7 +132,9 @@ fn execute_plan(plan: &Plan, plan_path: &Path, receipt_path: Option<&Path>) -> R
             contract: call.contract.clone(),
             function: call.function.clone(),
             args: call.args.clone(),
-            status: step_result.status.clone(),
+            status: ResultStatus {
+                ok: step_result.status.is_ok(),
+            },
             detail: step_result.detail.clone(),
             transaction_hash: step_result.transaction_hash.clone(),
         };
@@ -141,9 +145,8 @@ fn execute_plan(plan: &Plan, plan_path: &Path, receipt_path: Option<&Path>) -> R
         if let Err(ref detail) = step_result.status {
             receipt.errors.push(format!("step {idx}: {detail}"));
         }
-        if step_result.status.is_err() {
+        if let Err(error_message) = step_result.status {
             let _ = fs::write(&receipt_path, serde_json::to_string_pretty(&receipt)?);
-            let error_message = step_result.status.as_ref().unwrap_err().clone();
             bail!(
                 "plan failed at step {idx}: {detail}",
                 idx = idx,
@@ -151,7 +154,7 @@ fn execute_plan(plan: &Plan, plan_path: &Path, receipt_path: Option<&Path>) -> R
             );
         }
         if let Some(assertion) = &call.assertion {
-            evaluate_assertion(&assertion, &step, &receipt_path)?;
+            evaluate_assertion(assertion, &receipt.steps[idx], &receipt_path)?;
         }
     }
 
@@ -163,6 +166,13 @@ fn execute_plan(plan: &Plan, plan_path: &Path, receipt_path: Option<&Path>) -> R
     Ok(())
 }
 
+/// Private result type for one execution step, used only inside this module.
+struct StepResult {
+    status: Result<(), String>,
+    detail: Option<String>,
+    transaction_hash: Option<String>,
+}
+
 fn execute_call(idx: usize, call: &Call, source: &str, network: &str) -> StepResult {
     match call.kind.as_deref().unwrap_or("invoke") {
         "invoke" => execute_invoke(idx, call, source, network),
@@ -170,7 +180,7 @@ fn execute_call(idx: usize, call: &Call, source: &str, network: &str) -> StepRes
         other => {
             let msg = format!("unsupported call kind `{other}`");
             StepResult {
-                status: Err(msg.clone()),
+                status: Err(msg),
                 detail: None,
                 transaction_hash: None,
             }
@@ -178,7 +188,7 @@ fn execute_call(idx: usize, call: &Call, source: &str, network: &str) -> StepRes
     }
 }
 
-fn execute_invoke(idx: usize, call: &Call, source: &str, network: &str) -> StepResult {
+fn execute_invoke(_idx: usize, call: &Call, source: &str, network: &str) -> StepResult {
     let mut cmd = Command::new("stellar");
     cmd.arg("contract")
         .arg("invoke")
@@ -200,7 +210,7 @@ fn execute_invoke(idx: usize, call: &Call, source: &str, network: &str) -> StepR
             let ok = output.status.success();
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            let combined: String = vec![stdout, stderr]
+            let combined: String = [stdout.clone(), stderr]
                 .into_iter()
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
@@ -208,12 +218,12 @@ fn execute_invoke(idx: usize, call: &Call, source: &str, network: &str) -> StepR
             if ok {
                 StepResult {
                     status: Ok(()),
-                    detail: Some(combined),
+                    detail: Some(combined.clone()),
                     transaction_hash: first_transaction_hash(&stdout),
                 }
             } else {
                 StepResult {
-                    status: Err(combined),
+                    status: Err(combined.clone()),
                     detail: Some(combined),
                     transaction_hash: None,
                 }
@@ -222,7 +232,7 @@ fn execute_invoke(idx: usize, call: &Call, source: &str, network: &str) -> StepR
         Err(error) => {
             let msg = error.to_string();
             StepResult {
-                status: Err(msg.clone()),
+                status: Err(msg),
                 detail: None,
                 transaction_hash: None,
             }
@@ -230,23 +240,28 @@ fn execute_invoke(idx: usize, call: &Call, source: &str, network: &str) -> StepR
     }
 }
 
-fn execute_deploy(idx: usize, call: &Call, source: &str, network: &str) -> StepResult {
-    let wasm = call
-        .args
-        .iter()
-        .find_map(|arg| {
-            let (key, value) = arg
-                .split_once('=')
-                .expect("args are validated as key=value");
-            if key == "wasm" {
-                Some(value)
-            } else {
-                None
+fn execute_deploy(_idx: usize, call: &Call, source: &str, network: &str) -> StepResult {
+    let wasm = match call.args.iter().find_map(|arg| {
+        let (key, value) = arg
+            .split_once('=')
+            .expect("args are validated as key=value");
+        if key == "wasm" {
+            Some(value.to_owned())
+        } else {
+            None
+        }
+    }) {
+        Some(w) => w,
+        None => {
+            return StepResult {
+                status: Err("deploy call must include wasm=WASM_PATH".to_owned()),
+                detail: None,
+                transaction_hash: None,
             }
-        })
-        .ok_or_else(|| "deploy call must include wasm=WASM_PATH".to_string())?;
+        }
+    };
     let mut cmd = Command::new("stellar");
-    cmd.arg("contract").arg("deploy").arg("--wasm").arg(wasm);
+    cmd.arg("contract").arg("deploy").arg("--wasm").arg(&wasm);
     if !source.is_empty() {
         cmd.arg("--source-account").arg(source);
     }
@@ -256,7 +271,7 @@ fn execute_deploy(idx: usize, call: &Call, source: &str, network: &str) -> StepR
             let ok = output.status.success();
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            let combined: String = vec![stdout, stderr]
+            let combined: String = [stdout.clone(), stderr]
                 .into_iter()
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
@@ -264,12 +279,12 @@ fn execute_deploy(idx: usize, call: &Call, source: &str, network: &str) -> StepR
             if ok {
                 StepResult {
                     status: Ok(()),
-                    detail: Some(combined),
+                    detail: Some(combined.clone()),
                     transaction_hash: first_transaction_hash(&stdout),
                 }
             } else {
                 StepResult {
-                    status: Err(combined),
+                    status: Err(combined.clone()),
                     detail: Some(combined),
                     transaction_hash: None,
                 }
@@ -278,7 +293,7 @@ fn execute_deploy(idx: usize, call: &Call, source: &str, network: &str) -> StepR
         Err(error) => {
             let msg = error.to_string();
             StepResult {
-                status: Err(msg.clone()),
+                status: Err(msg),
                 detail: None,
                 transaction_hash: None,
             }
@@ -290,8 +305,8 @@ fn first_transaction_hash(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let trimmed = line.trim();
         let lowered = trimmed.to_ascii_lowercase();
-        if lowered.starts_with("transaction:") {
-            return Some(lowered["transaction:".len()..].trim().to_string());
+        if let Some(stripped) = lowered.strip_prefix("transaction:") {
+            return Some(stripped.trim().to_string());
         }
         let segments: Vec<&str> = trimmed.split_whitespace().collect();
         if segments.len() >= 3 {
@@ -305,7 +320,7 @@ fn first_transaction_hash(output: &str) -> Option<String> {
 }
 
 fn evaluate_assertion(assertion: &Assertion, step: &PlanStep, _receipt_path: &Path) -> Result<()> {
-    match assertion.kind.as_deref().unwrap_or("result") {
+    match assertion.kind.as_str() {
         "result" => {
             let found = step
                 .detail
@@ -365,7 +380,6 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
     };
     let mut year = year.max(1);
     loop {
-        let days_in_year = if is_leap(year) { 366 } else { 365 };
         let next_start = cumulative_days_before_year(year + 1);
         if total < next_start {
             break;
@@ -469,10 +483,7 @@ pub struct ResultStatus {
 
 impl From<anyhow::Result<()>> for ResultStatus {
     fn from(result: anyhow::Result<()>) -> Self {
-        match result {
-            Ok(()) => ResultStatus { ok: true },
-            Err(_) => ResultStatus { ok: false },
-        }
+        ResultStatus { ok: result.is_ok() }
     }
 }
 
