@@ -14,11 +14,13 @@ use soroban_sdk::{Address, Env};
 
 mod dao_dispatch;
 mod dao_dispute;
+mod full_lifecycle_conservation;
 mod harness;
 mod multi_sig_escrow;
 mod royalty_settlement;
 mod vesting_subscription;
 mod wallet_escrow_settlement;
+mod wallet_subscription_settlement;
 
 /// Helper to create a test environment for composition tests.
 fn setup_env() -> (Env, soroban_forge_test_utils::TestAccounts) {
