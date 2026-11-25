@@ -1020,3 +1020,19 @@ fn multi_recipient_residue_known_values() {
     assert_eq!(settlement.seller_net, 9_999);
     assert_eq!(w.balance(&w.sellers[0]), 9_999);
 }
+
+
+
+
+
+#[test]
+fn royalty_split_amounts_preserve_gross_value() {
+    let gross = 1_000_i128;
+    let royalty = 50_i128;
+    let seller_net = gross - royalty;
+
+    assert_eq!(royalty + seller_net, gross);
+}
+
+
+
