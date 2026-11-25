@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod errors;
+pub mod math;
 pub mod storage;
 pub mod token;
 pub mod ttl;

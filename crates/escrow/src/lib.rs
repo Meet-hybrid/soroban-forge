@@ -676,6 +676,16 @@ pub trait SorobanForgeEscrow {
     // Deadline extension
     // -------------------------------------------------------------------
 
+    /// Replace the arbiter in Pending or Funded with buyer and seller authorization.
+    fn replace_arbiter(env: Env, escrow_id: u64, new_arbiter: Address) -> Result<(), ForgeError>;
+
+    /// Replace the arbiter in Pending or Funded with buyer and seller authorization.
+    fn replace_basket_arbiter(
+        env: Env,
+        escrow_id: u64,
+        new_arbiter: Address,
+    ) -> Result<(), ForgeError>;
+
     /// Move a funded single-token escrow's deadline later by replacing its
     /// `timeout`: the deadline becomes `created_at + new_timeout`. Requires
     /// the **buyer**; only valid while `Funded`.
@@ -2001,6 +2011,64 @@ impl Escrow {
         Ok(())
     }
 
+    /// Replace the arbiter in Pending or Funded with buyer and seller authorization.
+    pub fn replace_arbiter(
+        env: Env,
+        escrow_id: u64,
+        new_arbiter: Address,
+    ) -> Result<(), ForgeError> {
+        let mut escrow = Self::load_escrow(&env, escrow_id)?;
+        Self::update_arbiter_index(
+            &env,
+            escrow_id,
+            &escrow.status,
+            &escrow.buyer,
+            &escrow.seller,
+            &escrow.arbiter,
+            &new_arbiter,
+        )?;
+        let old_arbiter = core::mem::replace(&mut escrow.arbiter, new_arbiter.clone());
+        let key = DataKey::Escrow(escrow_id);
+        env.storage().persistent().set(&key, &escrow);
+        bump_entry(&env, &key);
+        events::ArbiterReplaced {
+            escrow_id,
+            old_arbiter,
+            new_arbiter,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Replace the arbiter in Pending or Funded with buyer and seller authorization.
+    pub fn replace_basket_arbiter(
+        env: Env,
+        escrow_id: u64,
+        new_arbiter: Address,
+    ) -> Result<(), ForgeError> {
+        let mut escrow = Self::load_basket(&env, escrow_id)?;
+        Self::update_arbiter_index(
+            &env,
+            escrow_id,
+            &escrow.status,
+            &escrow.buyer,
+            &escrow.seller,
+            &escrow.arbiter,
+            &new_arbiter,
+        )?;
+        let old_arbiter = core::mem::replace(&mut escrow.arbiter, new_arbiter.clone());
+        let key = DataKey::Basket(escrow_id);
+        env.storage().persistent().set(&key, &escrow);
+        bump_entry(&env, &key);
+        events::ArbiterReplaced {
+            escrow_id,
+            old_arbiter,
+            new_arbiter,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     // -------------------------------------------------------------------
     // Deadline extension
     // -------------------------------------------------------------------
@@ -2425,6 +2493,42 @@ impl Escrow {
             env.storage().persistent().set(&key, &ids);
             bump_entry(env, &key);
         }
+    }
+
+    fn update_arbiter_index(
+        env: &Env,
+        id: u64,
+        status: &EscrowStatus,
+        buyer: &Address,
+        seller: &Address,
+        old_arbiter: &Address,
+        new_arbiter: &Address,
+    ) -> Result<(), ForgeError> {
+        if !matches!(status, EscrowStatus::Pending | EscrowStatus::Funded) {
+            return Err(ForgeError::InvalidState);
+        }
+        if new_arbiter == old_arbiter || new_arbiter == buyer || new_arbiter == seller {
+            return Err(ForgeError::InvalidInput);
+        }
+        buyer.require_auth();
+        seller.require_auth();
+
+        if old_arbiter != buyer && old_arbiter != seller {
+            Self::remove_index(env, old_arbiter, id);
+        }
+
+        let key = DataKey::ParticipantIndex(new_arbiter.clone());
+        let mut ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        if let Err(position) = ids.binary_search(id) {
+            ids.insert(position, id);
+            env.storage().persistent().set(&key, &ids);
+            bump_entry(env, &key);
+        }
+        Ok(())
     }
 
     /// Remove `id` from each distinct participant's index while preserving
@@ -3151,6 +3255,14 @@ mod events {
     use super::*;
 
     #[contractevent]
+    pub struct ArbiterReplaced {
+        #[topic]
+        pub escrow_id: u64,
+        pub old_arbiter: Address,
+        pub new_arbiter: Address,
+    }
+
+    #[contractevent]
     pub struct EscrowCreated {
         #[topic]
         pub escrow_id: u64,
@@ -3569,6 +3681,9 @@ mod props;
 #[cfg(test)]
 mod basket_props;
 
+#[cfg(test)]
+mod lifecycle_props;
+
 // TTL chaos harness demo: drives randomized ledger gaps through the
 // escrow lifecycle and asserts no persistent entry expires during a
 // legitimate flow.
@@ -3583,3 +3698,6 @@ mod indexer_fixtures;
 
 #[cfg(test)]
 mod model_check;
+
+#[cfg(test)]
+mod arbiter_replacement_tests;

@@ -101,6 +101,18 @@
       ]
     },
     {
+      "name": "get_proposal_snapshot",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:ProposalSnapshot,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_proposal_status",
       "inputs": [
         {
@@ -142,6 +154,38 @@
       ],
       "outputs": [
         "result<udt:VoteReceipt,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_vote_snapshot",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<udt:VoteSnapshot,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_voter_weight",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
       ]
     },
     {
@@ -459,6 +503,10 @@
         {
           "name": "ReleasePending",
           "value": 16
+        },
+        {
+          "name": "InvalidState",
+          "value": 17
         }
       ]
     },
@@ -516,6 +564,24 @@
         },
         {
           "name": "voting_ends",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ProposalSnapshot",
+      "fields": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "snapshot_ledger",
+          "type": "u32"
+        },
+        {
+          "name": "snapshot_timestamp",
           "type": "u64"
         }
       ]
@@ -601,6 +667,36 @@
           "type": "i128"
         }
       ]
+    },
+    {
+      "kind": "struct",
+      "name": "VoteSnapshot",
+      "fields": [
+        {
+          "name": "has_voted",
+          "type": "bool"
+        },
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "snapshot_ledger",
+          "type": "u32"
+        },
+        {
+          "name": "snapshot_timestamp",
+          "type": "u64"
+        },
+        {
+          "name": "support",
+          "type": "option<bool>"
+        },
+        {
+          "name": "weight",
+          "type": "i128"
+        }
+      ]
     }
   ],
   "errors": [
@@ -667,6 +763,10 @@
     {
       "name": "ReleasePending",
       "code": 16
+    },
+    {
+      "name": "InvalidState",
+      "code": 17
     }
   ]
 }

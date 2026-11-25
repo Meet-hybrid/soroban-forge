@@ -142,6 +142,51 @@ fn paused_batch_approves_withdrawal_but_execution_still_obeys_the_limit() {
     );
 }
 
+#[test]
+fn non_owner_mixed_batches_and_threshold_crossing() {
+    let w = Wallet::new();
+    let c = w.client();
+    let tx1 = w.submit(None);
+    let tx2 = w.submit(None);
+    let tx3 = w.submit(None);
+
+    // Non-owner signer is rejected and writes no confirmations.
+    let outsider = Address::generate(&w.env);
+    assert_eq!(
+        c.try_confirm_batch(&Vec::from_array(&w.env, [tx1, tx2]), &outsider),
+        Err(Ok(ForgeError::Unauthorized))
+    );
+    assert!(c.get_confirmations(&tx1).is_empty());
+    assert!(c.get_confirmations(&tx2).is_empty());
+
+    // First owner batch-confirms all three pending transactions (1 of 2 threshold).
+    let all_three = Vec::from_array(&w.env, [tx1, tx2, tx3]);
+    c.confirm_batch(&all_three, &w.owners[0]);
+    assert_eq!(w.env.auths().len(), 1);
+    for id in [tx1, tx2, tx3] {
+        assert_eq!(c.get_confirmations(&id).len(), 1);
+        assert_eq!(c.get_tx_preview(&id).approvals_remaining, 1);
+    }
+
+    // Mixed valid/invalid batch (owner[0] already confirmed tx2) rolls back tx1 and tx3 too.
+    let tx4 = w.submit(None);
+    assert_eq!(
+        c.try_confirm_batch(&Vec::from_array(&w.env, [tx4, tx2]), &w.owners[0]),
+        Err(Ok(ForgeError::InvalidInput))
+    );
+    assert!(c.get_confirmations(&tx4).is_empty());
+
+    // Second owner batch-confirms all three, crossing the 2-of-3 threshold on every tx.
+    c.confirm_batch(&all_three, &w.owners[1]);
+    assert_eq!(w.env.auths().len(), 1);
+    for id in [tx1, tx2, tx3] {
+        assert_eq!(c.get_confirmations(&id).len(), 2);
+        assert_eq!(c.get_tx_preview(&id).approvals_remaining, 0);
+        c.execute(&id);
+        assert_eq!(c.get_tx(&id).status, TxStatus::Executed);
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 24, rng_seed: RngSeed::Fixed(705), ..ProptestConfig::default() })]
     #[test]

@@ -20,7 +20,8 @@ export const FORGE_ERRORS: Record<number, string> = {
   [13]: "WithdrawalLimitExceeded",
   [14]: "SubscriptionPastDue",
   [15]: "ProposerCooldown",
-  [16]: "ReleasePending"
+  [16]: "ReleasePending",
+  [17]: "InvalidState"
 };
 
 /**

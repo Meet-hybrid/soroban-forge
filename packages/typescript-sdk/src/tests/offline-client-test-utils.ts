@@ -23,7 +23,7 @@ export const FORGE_ERRORS: Record<number, string> = {
   5: "AlreadyInitialized", 6: "NotInitialized", 7: "DeadlineReached",
   8: "InsufficientAllowance", 9: "ArithmeticOverflow", 10: "Custom",
   11: "TokenTransferFailed", 12: "ContractInvocationFailed", 13: "WithdrawalLimitExceeded",
-  14: "SubscriptionPastDue", 15: "ProposerCooldown", 16: "ReleasePending",
+  14: "SubscriptionPastDue", 15: "ProposerCooldown", 16: "ReleasePending", 17: "InvalidState",
 };
 
 export type AbiInput = { name: string; type: string };
@@ -61,8 +61,8 @@ export function assertForgeErrors(ForgeError: unknown): void {
   const runtime = ForgeError as Record<number, { message: string }>;
   const runtimeCodes = Object.keys(runtime).map(Number).sort((a, b) => a - b);
 
-  assert.deepEqual(runtimeCodes, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-  for (let code = 1; code <= 16; code += 1) {
+  assert.deepEqual(runtimeCodes, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+  for (let code = 1; code <= 17; code += 1) {
     assert.equal(runtime[code]?.message, FORGE_ERRORS[code], `ForgeError ${code} name/message`);
   }
 }
