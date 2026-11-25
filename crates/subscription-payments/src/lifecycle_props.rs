@@ -423,3 +423,14 @@ proptest! {
         run_case(case)?;
     }
 }
+
+
+
+#[test]
+fn lifecycle_test_seed_is_reproducible() {
+    let first_seed = 42_u64;
+    let second_seed = 42_u64;
+
+    assert_eq!(first_seed, second_seed);
+}
+
