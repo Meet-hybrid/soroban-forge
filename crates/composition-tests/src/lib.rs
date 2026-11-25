@@ -18,6 +18,7 @@ mod harness;
 mod multi_sig_escrow;
 mod royalty_settlement;
 mod vesting_subscription;
+mod wallet_escrow_settlement;
 
 /// Helper to create a test environment for composition tests.
 fn setup_env() -> (Env, soroban_forge_test_utils::TestAccounts) {
