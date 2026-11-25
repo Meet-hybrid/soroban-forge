@@ -15,6 +15,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_SCRIPTS_DIR = Path(__file__).resolve().parent
 
