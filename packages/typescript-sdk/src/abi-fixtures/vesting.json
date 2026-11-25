@@ -143,6 +143,18 @@
       ]
     },
     {
+      "name": "get_schedule_status",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:ScheduleStatus,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_status",
       "inputs": [
         {
@@ -477,6 +489,44 @@
         {
           "name": "InvalidState",
           "value": 17
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ScheduleStatus",
+      "fields": [
+        {
+          "name": "claimable",
+          "type": "i128"
+        },
+        {
+          "name": "claimed",
+          "type": "i128"
+        },
+        {
+          "name": "cliff",
+          "type": "u64"
+        },
+        {
+          "name": "cliff_timestamp",
+          "type": "u64"
+        },
+        {
+          "name": "duration",
+          "type": "u64"
+        },
+        {
+          "name": "start",
+          "type": "u64"
+        },
+        {
+          "name": "status",
+          "type": "udt:VestingStatus"
+        },
+        {
+          "name": "total_amount",
+          "type": "i128"
         }
       ]
     },
