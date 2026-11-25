@@ -14,6 +14,8 @@
 //! ```text
 //! set_royalty(collection, recipient, bps)   -> one-recipient Active config
 //! set_royalty_splits(collection, splits)    -> multi-recipient Active config
+//! set_royalty_tiers(collection, tiers)      -> optional price-bracket rate table
+//! clear_royalty_tiers(collection)           -> removes price-bracket tiers
 //! distribute(collection, token, payer,
 //!             seller, amount)               -> transfers each floored royalty
 //!                                              share from `payer`, returns the
@@ -36,6 +38,10 @@
 //! Authorization model:
 //! - `set_royalty` requires the collection (the contract whose config this
 //!   is), and `bps` must not exceed 100% (10_000 bps).
+//! - `set_royalty_tiers` and `clear_royalty_tiers` require the collection;
+//!   non-empty tiers must start at minimum sale amount `1`, be strictly
+//!   increasing, have `bps <= 10_000` (within any configured max cap), and
+//!   stay within [`MAX_ROYALTY_TIERS`]. Passing an empty list clears tiers.
 //! - `distribute` requires the collection (as `settle_sale` does) and the
 //!   `payer`, whose authorization covers the nested royalty transfer to the
 //!   configured recipient; it returns the seller's net after the configured
@@ -47,7 +53,9 @@
 //! - `settle_sales` has the same trust model as `settle_sale`: one
 //!   collection authorization and one payer authorization cover every
 //!   nested token transfer in the batch — no per-sale re-authorization.
-//! - `get_royalty` and `get_settlement_summary` are read-only views.
+//! - `get_royalty`, `get_royalty_splits`, `get_royalty_tiers`,
+//!   `get_max_royalty_cap`, `get_settlement_summary`, `quote_sale`, and
+//!   `preview_settlement` are read-only views.
 //!
 //! Settlement follows escrow's transfer-before-state ordering: all token
 //! transfers run before any settlement state is committed, `settle_sale`
@@ -93,6 +101,14 @@ pub const MAX_SETTLE_SALES: u32 = 20;
 /// Maximum recipients in a collection royalty split.
 pub const MAX_ROYALTY_RECIPIENTS: u32 = 5;
 
+/// Maximum number of price-bracket tiers a collection may configure.
+///
+/// Rationale: settlement scans the tier table once per sale, including across
+/// [`MAX_SETTLE_SALES`] batches. Capping the table at 16 brackets bounds
+/// persistent storage size and per-transaction lookup work while covering
+/// realistic tiered royalty schedules.
+pub const MAX_ROYALTY_TIERS: u32 = 16;
+
 /// One recipient and its basis-point rate in a collection split.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -129,6 +145,32 @@ pub trait SorobanForgeMarketplaceRoyalties {
 
     /// Read the collection-wide maximum royalty rate, defaulting to 10,000 BPS.
     fn get_max_royalty_cap(env: Env, collection: Address) -> u32;
+
+    /// Set or clear price-bracket royalty tiers `(min_amount, bps)` for
+    /// `collection`.
+    ///
+    /// Requires the collection's authorization. Passing an empty vector clears
+    /// any stored tiers and restores flat-rate behavior. A non-empty table
+    /// must start at minimum sale amount `1`, have strictly increasing minimum
+    /// amounts, have each `bps <= 10_000` (and within the collection's
+    /// configured max royalty cap), and contain at most [`MAX_ROYALTY_TIERS`]
+    /// entries.
+    fn set_royalty_tiers(
+        env: Env,
+        collection: Address,
+        tiers: soroban_sdk::Vec<(i128, u32)>,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Clear any configured price-bracket royalty tiers for `collection`,
+    /// restoring flat-rate behavior. Requires the collection's authorization.
+    fn clear_royalty_tiers(
+        env: Env,
+        collection: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the configured price-bracket royalty tiers for `collection`
+    /// (read-only view). Returns an empty vector when no tiers are set.
+    fn get_royalty_tiers(env: Env, collection: Address) -> soroban_sdk::Vec<(i128, u32)>;
 
     /// Distribute the royalty share of `amount` from a sale of `collection`:
     /// transfer it from `payer` to the configured recipient in `token` and
@@ -372,6 +414,10 @@ enum DataKey {
     Splits(Address),
     /// Collection-wide maximum royalty rate in basis points.
     MaxCap(Address),
+    /// Price-bracket royalty tiers `(min_amount, bps)` in strictly increasing
+    /// `min_amount` order starting at `1`. Appended to preserve the encoded
+    /// discriminants of the existing persistent keys.
+    Tiers(Address),
 }
 
 /// The deployable marketplace royalties contract.
@@ -488,6 +534,13 @@ impl MarketplaceRoyalties {
                 return Err(ForgeError::InvalidInput);
             }
         }
+        if let Some(tiers) = royalty_tiers(&env, &collection) {
+            for (_, bps) in tiers.iter() {
+                if bps > max_bps {
+                    return Err(ForgeError::InvalidInput);
+                }
+            }
+        }
 
         let key = DataKey::MaxCap(collection);
         env.storage().persistent().set(&key, &max_bps);
@@ -501,6 +554,81 @@ impl MarketplaceRoyalties {
             .persistent()
             .get(&DataKey::MaxCap(collection))
             .unwrap_or(10_000)
+    }
+
+    /// Set or clear price-bracket royalty tiers `(min_amount, bps)` for
+    /// `collection`.
+    ///
+    /// Requires the collection's authorization. Passing an empty vector clears
+    /// any stored tiers and restores flat-rate behavior. A non-empty table
+    /// must start at minimum sale amount `1`, have strictly increasing minimum
+    /// amounts, have each `bps <= 10_000` (and within the collection's
+    /// configured max royalty cap), and contain at most [`MAX_ROYALTY_TIERS`]
+    /// entries.
+    pub fn set_royalty_tiers(
+        env: Env,
+        collection: Address,
+        tiers: soroban_sdk::Vec<(i128, u32)>,
+    ) -> Result<(), ForgeError> {
+        if tiers.is_empty() {
+            collection.require_auth();
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Tiers(collection));
+            return Ok(());
+        }
+        if tiers.len() > MAX_ROYALTY_TIERS {
+            return Err(ForgeError::InvalidInput);
+        }
+        let mut prev_min: Option<i128> = None;
+        for (min_amount, bps) in tiers.iter() {
+            if bps > 10_000 {
+                return Err(ForgeError::InvalidInput);
+            }
+            match prev_min {
+                None => {
+                    if min_amount != 1 {
+                        return Err(ForgeError::InvalidInput);
+                    }
+                }
+                Some(prev) => {
+                    if min_amount <= prev {
+                        return Err(ForgeError::InvalidInput);
+                    }
+                }
+            }
+            prev_min = Some(min_amount);
+        }
+        collection.require_auth();
+        let max_cap = max_royalty_cap(&env, &collection);
+        for (_, bps) in tiers.iter() {
+            if bps > max_cap {
+                return Err(ForgeError::InvalidInput);
+            }
+        }
+        let key = DataKey::Tiers(collection);
+        env.storage().persistent().set(&key, &tiers);
+        bump_entry(&env, &key);
+        Ok(())
+    }
+
+    /// Clear any configured price-bracket royalty tiers for `collection`,
+    /// restoring flat-rate behavior. Requires the collection's authorization.
+    pub fn clear_royalty_tiers(env: Env, collection: Address) -> Result<(), ForgeError> {
+        collection.require_auth();
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Tiers(collection));
+        Ok(())
+    }
+
+    /// Read the configured price-bracket royalty tiers for `collection`
+    /// (read-only view). Returns an empty vector when no tiers are set.
+    pub fn get_royalty_tiers(env: Env, collection: Address) -> soroban_sdk::Vec<(i128, u32)> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Tiers(collection))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
     }
 
     /// Distribute the royalty share of `amount` from a sale of `collection`
@@ -544,8 +672,9 @@ impl MarketplaceRoyalties {
         // Every fallible computation runs before the transfer, so an
         // arithmetic failure can never strand funds mid-settlement.
         let recipients = royalty_splits(&env, &royalty)?;
+        let tiers = royalty_tiers(&env, &collection);
         let (shares, royalty_share, seller_net) =
-            split_recipients(&env, amount, &royalty, &recipients)?;
+            split_recipients_for_amount(&env, amount, &royalty, &recipients, tiers.as_ref())?;
         let summary = next_summary(&env, &collection, 1, amount, royalty_share)?;
 
         // Transfer-before-state (escrow pattern): the royalty recipient is
@@ -566,6 +695,10 @@ impl MarketplaceRoyalties {
         let splits_key = DataKey::Splits(collection.clone());
         if env.storage().persistent().has(&splits_key) {
             bump_entry(&env, &splits_key);
+        }
+        let tiers_key = DataKey::Tiers(collection.clone());
+        if env.storage().persistent().has(&tiers_key) {
+            bump_entry(&env, &tiers_key);
         }
         bump_entry(&env, &summary_key);
         events::sale_settled(
@@ -619,8 +752,9 @@ impl MarketplaceRoyalties {
         // Every fallible computation runs before the first transfer, so an
         // arithmetic failure can never strand funds mid-settlement.
         let recipients = royalty_splits(&env, &royalty)?;
+        let tiers = royalty_tiers(&env, &collection);
         let (shares, royalty_share, seller_net) =
-            split_recipients(&env, amount, &royalty, &recipients)?;
+            split_recipients_for_amount(&env, amount, &royalty, &recipients, tiers.as_ref())?;
         let summary = next_summary(&env, &collection, 1, amount, royalty_share)?;
 
         // Transfer-before-state (escrow pattern): the seller is paid first
@@ -644,6 +778,10 @@ impl MarketplaceRoyalties {
         let splits_key = DataKey::Splits(collection.clone());
         if env.storage().persistent().has(&splits_key) {
             bump_entry(&env, &splits_key);
+        }
+        let tiers_key = DataKey::Tiers(collection.clone());
+        if env.storage().persistent().has(&tiers_key) {
+            bump_entry(&env, &tiers_key);
         }
         bump_entry(&env, &summary_key);
         events::sale_settled(
@@ -705,6 +843,7 @@ impl MarketplaceRoyalties {
         // checked add against the stored summary — so an arithmetic failure
         // anywhere in the batch can never strand funds mid-settlement.
         let recipients = royalty_splits(&env, &royalty)?;
+        let tiers = royalty_tiers(&env, &collection);
         let mut settlements = soroban_sdk::Vec::new(&env);
         let mut per_sale_shares = soroban_sdk::Vec::new(&env);
         let mut gross_volume: i128 = 0;
@@ -712,7 +851,7 @@ impl MarketplaceRoyalties {
         let emit_per_sale = count <= 10;
         for (_, amount) in sales.iter() {
             let (shares, royalty_share, seller_net) =
-                split_recipients(&env, amount, &royalty, &recipients)?;
+                split_recipients_for_amount(&env, amount, &royalty, &recipients, tiers.as_ref())?;
             gross_volume = gross_volume
                 .checked_add(amount)
                 .ok_or(ForgeError::ArithmeticOverflow)?;
@@ -789,6 +928,10 @@ impl MarketplaceRoyalties {
         if env.storage().persistent().has(&splits_key) {
             bump_entry(&env, &splits_key);
         }
+        let tiers_key = DataKey::Tiers(collection);
+        if env.storage().persistent().has(&tiers_key) {
+            bump_entry(&env, &tiers_key);
+        }
         bump_entry(&env, &summary_key);
 
         Ok(settlements)
@@ -848,12 +991,13 @@ impl MarketplaceRoyalties {
         collection: Address,
         amount: i128,
     ) -> Result<SaleQuote, ForgeError> {
-        let (royalty, recipients) = quote_inputs(&env, collection, amount)?;
+        let (royalty, recipients) = quote_inputs(&env, collection.clone(), amount)?;
+        let tiers = royalty_tiers(&env, &collection);
         let (_, royalty_amount, seller_net) =
-            split_recipients(&env, amount, &royalty, &recipients)?;
+            split_recipients_for_amount(&env, amount, &royalty, &recipients, tiers.as_ref())?;
         Ok(SaleQuote {
             gross: amount,
-            royalty_bps: effective_bps(&royalty),
+            royalty_bps: effective_bps_for_amount(&royalty, tiers.as_ref(), amount),
             royalty_amount,
             seller_net,
         })
@@ -867,10 +1011,14 @@ impl MarketplaceRoyalties {
         collection: Address,
         amount: i128,
     ) -> Result<SettlementPreview, ForgeError> {
-        let (royalty, recipients) = quote_inputs(&env, collection, amount)?;
+        let (royalty, recipients) = quote_inputs(&env, collection.clone(), amount)?;
+        let tiers = royalty_tiers(&env, &collection);
         let (shares, royalty_amount, seller_net) =
-            split_recipients(&env, amount, &royalty, &recipients)?;
-        let (aggregate_royalty, _) = split(amount, effective_bps(&royalty))?;
+            split_recipients_for_amount(&env, amount, &royalty, &recipients, tiers.as_ref())?;
+        let (aggregate_royalty, _) = split(
+            amount,
+            effective_bps_for_amount(&royalty, tiers.as_ref(), amount),
+        )?;
         let mut payments = soroban_sdk::Vec::new(&env);
         for (recipient, share) in recipients.iter().zip(shares.iter()) {
             payments.push_back((recipient.recipient, share));
@@ -902,6 +1050,10 @@ impl MarketplaceRoyalties {
         if env.storage().persistent().has(&cap_key) {
             bump_entry(&env, &cap_key);
         }
+        let tiers_key = DataKey::Tiers(collection.clone());
+        if env.storage().persistent().has(&tiers_key) {
+            bump_entry(&env, &tiers_key);
+        }
         let summary_key = DataKey::Summary(collection);
         if env.storage().persistent().has(&summary_key) {
             bump_entry(&env, &summary_key);
@@ -929,11 +1081,133 @@ fn quote_inputs(
 
 /// The rate actually applied to sales under `royalty`: zero once the
 /// configuration is disabled, so disabled collections settle in full.
+#[cfg_attr(not(test), allow(dead_code))]
 fn effective_bps(royalty: &Royalty) -> u32 {
     match royalty.status {
         RoyaltyStatus::Active => royalty.bps,
         RoyaltyStatus::Disabled => 0,
     }
+}
+
+/// Load a collection's configured price-bracket tiers, if any.
+fn royalty_tiers(env: &Env, collection: &Address) -> Option<soroban_sdk::Vec<(i128, u32)>> {
+    let tiers: soroban_sdk::Vec<(i128, u32)> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Tiers(collection.clone()))?;
+    if tiers.is_empty() {
+        None
+    } else {
+        Some(tiers)
+    }
+}
+
+/// Select the bps of the highest tier whose minimum sale amount is `<= amount`.
+fn tier_bps_for_amount(tiers: &soroban_sdk::Vec<(i128, u32)>, amount: i128) -> u32 {
+    let mut selected = 0_u32;
+    for (min_amount, bps) in tiers.iter() {
+        if min_amount <= amount {
+            selected = bps;
+        } else {
+            break;
+        }
+    }
+    selected
+}
+
+/// Effective royalty rate for `amount`, accounting for status and optional tiers.
+fn effective_bps_for_amount(
+    royalty: &Royalty,
+    tiers: Option<&soroban_sdk::Vec<(i128, u32)>>,
+    amount: i128,
+) -> u32 {
+    match royalty.status {
+        RoyaltyStatus::Disabled => 0,
+        RoyaltyStatus::Active => {
+            tiers.map_or(royalty.bps, |table| tier_bps_for_amount(table, amount))
+        }
+    }
+}
+
+/// Compute `floor(amount * tier_bps * weight / (10_000 * total_weight))`
+/// without overflowing `i128`, even at `amount == i128::MAX`.
+///
+/// Since `tier_bps <= 10_000` and `weight <= total_weight <= 10_000`,
+/// `numerator <= denominator <= 10^8`.
+fn split_weighted(
+    amount: i128,
+    tier_bps: u32,
+    weight: u32,
+    total_weight: u32,
+) -> Result<i128, ForgeError> {
+    let numerator = i128::from(tier_bps)
+        .checked_mul(i128::from(weight))
+        .ok_or(ForgeError::ArithmeticOverflow)?;
+    let denominator = 10_000_i128
+        .checked_mul(i128::from(total_weight))
+        .ok_or(ForgeError::ArithmeticOverflow)?;
+    let whole = (amount / denominator)
+        .checked_mul(numerator)
+        .ok_or(ForgeError::ArithmeticOverflow)?;
+    let rem = (amount % denominator)
+        .checked_mul(numerator)
+        .ok_or(ForgeError::ArithmeticOverflow)?
+        / denominator;
+    whole.checked_add(rem).ok_or(ForgeError::ArithmeticOverflow)
+}
+
+/// Compute per-recipient floored shares and seller net, applying optional
+/// price-bracket tiers while preserving the existing split proportions.
+fn split_recipients_for_amount(
+    env: &Env,
+    amount: i128,
+    royalty: &Royalty,
+    recipients: &soroban_sdk::Vec<RoyaltyShare>,
+    tiers: Option<&soroban_sdk::Vec<(i128, u32)>>,
+) -> Result<(soroban_sdk::Vec<i128>, i128, i128), ForgeError> {
+    let Some(table) = tiers else {
+        return split_recipients(env, amount, royalty, recipients);
+    };
+    let mut shares = soroban_sdk::Vec::new(env);
+    let mut total = 0_i128;
+    if royalty.status == RoyaltyStatus::Active {
+        let tier_bps = tier_bps_for_amount(table, amount);
+        let mut total_weight = 0_u32;
+        for recipient in recipients.iter() {
+            total_weight = total_weight
+                .checked_add(recipient.bps)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+        }
+        if total_weight > 0 {
+            for recipient in recipients.iter() {
+                let share = split_weighted(amount, tier_bps, recipient.bps, total_weight)?;
+                total = total
+                    .checked_add(share)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+                shares.push_back(share);
+            }
+        } else {
+            let count = recipients.len();
+            if count == 0 {
+                return Err(ForgeError::InvalidInput);
+            }
+            for _ in recipients.iter() {
+                let share = split_weighted(amount, tier_bps, 1, count)?;
+                total = total
+                    .checked_add(share)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+                shares.push_back(share);
+            }
+        }
+    } else {
+        for _ in recipients.iter() {
+            shares.push_back(0_i128);
+        }
+    }
+    let net = amount
+        .checked_sub(total)
+        .ok_or(ForgeError::ArithmeticOverflow)?;
+    Ok((shares, total, net))
 }
 
 /// Load a collection's configured royalty ceiling, defaulting to 100%.
@@ -1140,6 +1414,8 @@ mod events {
 mod authz;
 #[cfg(test)]
 mod props;
+#[cfg(test)]
+mod tier_props;
 
 #[cfg(test)]
 mod indexer_fixtures;
@@ -2950,5 +3226,309 @@ mod tests {
         assert_eq!(tc.balance(seller), balances_before.1);
         assert_eq!(tc.balance(recipient), balances_before.2);
         assert!(env.events().all().events().is_empty());
+    }
+
+    // -------------------------------------------------------------------
+    // Price-bracket royalty tiers
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn royalty_tiers_rejects_unsorted_duplicate_bad_start_over_bps_and_over_cap() {
+        let (env, client, accounts) = setup!();
+        let collection = &accounts.arbiter;
+
+        // Valid baseline so we also verify rejected updates never overwrite.
+        let valid = soroban_sdk::vec![&env, (1_i128, 800_u32), (1_000_i128, 400_u32)];
+        client.set_royalty_tiers(collection, &valid);
+
+        // Unsorted minimum amounts.
+        let unsorted = soroban_sdk::vec![
+            &env,
+            (1_i128, 800_u32),
+            (5_000_i128, 300_u32),
+            (1_000_i128, 500_u32),
+        ];
+        assert_eq!(
+            client.try_set_royalty_tiers(collection, &unsorted),
+            Err(Ok(ForgeError::InvalidInput))
+        );
+
+        // Duplicate minimum amounts (both at start and later).
+        let dup_start = soroban_sdk::vec![&env, (1_i128, 800_u32), (1_i128, 400_u32)];
+        assert_eq!(
+            client.try_set_royalty_tiers(collection, &dup_start),
+            Err(Ok(ForgeError::InvalidInput))
+        );
+        let dup_later = soroban_sdk::vec![
+            &env,
+            (1_i128, 800_u32),
+            (1_000_i128, 400_u32),
+            (1_000_i128, 200_u32),
+        ];
+        assert_eq!(
+            client.try_set_royalty_tiers(collection, &dup_later),
+            Err(Ok(ForgeError::InvalidInput))
+        );
+
+        // Does not start at 1 (0, negative, or > 1).
+        for bad_start in [0_i128, -5_i128, 2_i128, 100_i128] {
+            let bad = soroban_sdk::vec![&env, (bad_start, 500_u32)];
+            assert_eq!(
+                client.try_set_royalty_tiers(collection, &bad),
+                Err(Ok(ForgeError::InvalidInput))
+            );
+        }
+
+        // bps > 10_000.
+        let over_bps = soroban_sdk::vec![&env, (1_i128, 500_u32), (1_000_i128, 10_001_u32)];
+        assert_eq!(
+            client.try_set_royalty_tiers(collection, &over_bps),
+            Err(Ok(ForgeError::InvalidInput))
+        );
+
+        // Over MAX_ROYALTY_TIERS cap.
+        let mut over_cap = soroban_sdk::Vec::new(&env);
+        for i in 0..=MAX_ROYALTY_TIERS {
+            over_cap.push_back((i128::from(i) + 1, 100_u32));
+        }
+        assert_eq!(
+            client.try_set_royalty_tiers(collection, &over_cap),
+            Err(Ok(ForgeError::InvalidInput))
+        );
+
+        // Prior valid tiers remain intact after every rejected write.
+        assert_eq!(client.get_royalty_tiers(collection), valid);
+
+        // Exactly MAX_ROYALTY_TIERS is accepted.
+        let mut at_cap = soroban_sdk::Vec::new(&env);
+        for i in 0..MAX_ROYALTY_TIERS {
+            at_cap.push_back((i128::from(i) * 100 + 1, 1_000_u32 - i * 50));
+        }
+        client.set_royalty_tiers(collection, &at_cap);
+        assert_eq!(client.get_royalty_tiers(collection), at_cap);
+    }
+
+    #[test]
+    fn royalty_tiers_respect_collection_max_royalty_cap() {
+        let (env, client, accounts) = setup!();
+        let collection = &accounts.arbiter;
+        client.set_max_royalty_cap(collection, &600_u32);
+
+        let over_cap = soroban_sdk::vec![&env, (1_i128, 601_u32), (1_000_i128, 300_u32)];
+        assert_eq!(
+            client.try_set_royalty_tiers(collection, &over_cap),
+            Err(Ok(ForgeError::InvalidInput))
+        );
+
+        let within_cap = soroban_sdk::vec![&env, (1_i128, 600_u32), (1_000_i128, 250_u32)];
+        client.set_royalty_tiers(collection, &within_cap);
+
+        // Lowering max cap below an active tier is rejected.
+        assert_eq!(
+            client.try_set_max_royalty_cap(collection, &599_u32),
+            Err(Ok(ForgeError::InvalidInput))
+        );
+        assert_eq!(client.get_max_royalty_cap(collection), 600_u32);
+    }
+
+    #[test]
+    fn royalty_tiers_bracket_edges_and_clearing_restore_flat_rate() {
+        let (env, token, tc, contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let payer = &accounts.user1;
+        let recipient = &accounts.user2;
+        let seller = &accounts.user3;
+        StellarAssetClient::new(&env, &token).mint(payer, &100_000_i128);
+
+        // Default collection has no tiers and behaves identically to flat 500 bps.
+        assert!(client.get_royalty_tiers(collection).is_empty());
+        let flat_quote = client.quote_sale(collection, &1_000_i128);
+        assert_eq!(flat_quote.royalty_bps, 500);
+        assert_eq!(flat_quote.royalty_amount, 50);
+
+        // Configure 3 descending brackets: [1..999] -> 10%, [1000..4999] -> 5%, [5000..] -> 2%.
+        let tiers = soroban_sdk::vec![
+            &env,
+            (1_i128, 1_000_u32),
+            (1_000_i128, 500_u32),
+            (5_000_i128, 200_u32),
+        ];
+        client.set_royalty_tiers(collection, &tiers);
+        assert_eq!(client.get_royalty_tiers(collection), tiers);
+
+        // Verify exact bracket edges: min - 1, min, min + 1.
+        let cases = [
+            (1_i128, 1_000_u32, 0_i128),
+            (999_i128, 1_000_u32, 99_i128),
+            (1_000_i128, 500_u32, 50_i128),
+            (1_001_i128, 500_u32, 50_i128),
+            (4_999_i128, 500_u32, 249_i128),
+            (5_000_i128, 200_u32, 100_i128),
+            (5_001_i128, 200_u32, 100_i128),
+        ];
+        for (amount, expected_bps, expected_royalty) in cases {
+            let quote = client.quote_sale(collection, &amount);
+            assert_eq!(quote.royalty_bps, expected_bps, "amount={amount}");
+            assert_eq!(quote.royalty_amount, expected_royalty, "amount={amount}");
+            assert_eq!(quote.seller_net, amount - expected_royalty);
+
+            let preview = client.preview_settlement(collection, &amount);
+            assert_eq!(preview.royalty_amount, expected_royalty);
+            assert_eq!(preview.seller_net, amount - expected_royalty);
+            assert_eq!(preview.rounding_residue, 0);
+
+            let recipient_before = tc.balance(recipient);
+            let seller_before = tc.balance(seller);
+            let settled = client.settle_sale(collection, &token, payer, seller, &amount);
+            assert_eq!(settled.royalty_share, quote.royalty_amount);
+            assert_eq!(settled.seller_net, quote.seller_net);
+            assert_eq!(tc.balance(recipient) - recipient_before, expected_royalty);
+            assert_eq!(tc.balance(seller) - seller_before, quote.seller_net);
+        }
+
+        // `distribute` also applies the selected bracket.
+        let recipient_before = tc.balance(recipient);
+        let net = client.distribute(collection, &token, payer, seller, &5_000_i128);
+        assert_eq!(net, 4_900);
+        assert_eq!(tc.balance(recipient) - recipient_before, 100);
+
+        // Clearing via empty vec restores flat 500 bps.
+        client.set_royalty_tiers(collection, &soroban_sdk::Vec::new(&env));
+        assert!(client.get_royalty_tiers(collection).is_empty());
+        let restored = client.quote_sale(collection, &5_000_i128);
+        assert_eq!(restored.royalty_bps, 500);
+        assert_eq!(restored.royalty_amount, 250);
+        assert_eq!(restored.seller_net, 4_750);
+
+        // Re-apply and clear via `clear_royalty_tiers`, checking TTL bump first.
+        client.set_royalty_tiers(collection, &tiers);
+        let tiers_key = DataKey::Tiers(collection.clone());
+        let ledger = env.ledger().sequence();
+        let timestamp = env.ledger().timestamp();
+        advance_ledger_to(&env, ledger + BUMP_AMOUNT - BUMP_THRESHOLD + 1, timestamp);
+        let ttl_before = entry_ttl(&env, &contract_id, &tiers_key);
+        assert!(ttl_before < BUMP_THRESHOLD);
+
+        // `get_royalty_tiers` is strictly read-only: no auth, no events, no TTL bump.
+        env.set_auths(&[]);
+        assert_eq!(client.get_royalty_tiers(collection), tiers);
+        assert!(env.events().all().events().is_empty());
+        assert_eq!(entry_ttl(&env, &contract_id, &tiers_key), ttl_before);
+
+        // `touch_ttl` extends the tiers entry TTL.
+        client.touch_ttl(collection);
+        assert_eq!(entry_ttl(&env, &contract_id, &tiers_key), BUMP_AMOUNT);
+
+        // Clearing via `clear_royalty_tiers` removes tiers and restores flat behavior.
+        env.mock_all_auths();
+        client.clear_royalty_tiers(collection);
+        assert!(client.get_royalty_tiers(collection).is_empty());
+        let settled_after_clear =
+            client.settle_sale(collection, &token, payer, seller, &5_000_i128);
+        assert_eq!(settled_after_clear.royalty_share, 250);
+        assert_eq!(settled_after_clear.seller_net, 4_750);
+    }
+
+    #[test]
+    fn royalty_tiers_mixed_bracket_batch_with_multi_recipient_split() {
+        let (env, token, tc, contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        let payer = &accounts.user1;
+        let recipient_a = &accounts.user2;
+        let recipient_b = &accounts.deployer;
+        let seller_a = &accounts.user3;
+        let seller_b = &accounts.validator;
+        StellarAssetClient::new(&env, &token).mint(payer, &20_000_i128);
+
+        // 60/40 split ratio (300 / 200 bps).
+        let splits = soroban_sdk::vec![
+            &env,
+            RoyaltyShare {
+                recipient: recipient_a.clone(),
+                bps: 300,
+            },
+            RoyaltyShare {
+                recipient: recipient_b.clone(),
+                bps: 200,
+            },
+        ];
+        client.set_royalty_splits(collection, &splits);
+
+        // Brackets: [1..999] -> 1000 bps (10%), [1000..4999] -> 500 bps (5%), [5000..] -> 250 bps (2.5%).
+        let tiers = soroban_sdk::vec![
+            &env,
+            (1_i128, 1_000_u32),
+            (1_000_i128, 500_u32),
+            (5_000_i128, 250_u32),
+        ];
+        client.set_royalty_tiers(collection, &tiers);
+
+        // Batch mixes all three brackets, hitting edges 999, 1000, 4999, 5000.
+        let amounts = [999_i128, 1_000_i128, 4_999_i128, 5_000_i128];
+        let batch = sales_of(
+            &env,
+            &[
+                (seller_a.clone(), amounts[0]),
+                (seller_b.clone(), amounts[1]),
+                (seller_a.clone(), amounts[2]),
+                (seller_b.clone(), amounts[3]),
+            ],
+        );
+
+        let quotes: std::vec::Vec<SaleQuote> = amounts
+            .iter()
+            .map(|a| client.quote_sale(collection, a))
+            .collect();
+        let previews: std::vec::Vec<SettlementPreview> = amounts
+            .iter()
+            .map(|a| client.preview_settlement(collection, a))
+            .collect();
+
+        assert_eq!(quotes[0].royalty_bps, 1_000);
+        assert_eq!(quotes[1].royalty_bps, 500);
+        assert_eq!(quotes[2].royalty_bps, 500);
+        assert_eq!(quotes[3].royalty_bps, 250);
+
+        // Expected per-recipient floored shares:
+        // 999 @ 10% (60/40): A = floor(999*1000*300/5_000_000) = 59, B = floor(999*1000*200/5_000_000) = 39 => roy 98, net 901
+        // 1000 @ 5% (60/40): A = 30, B = 20 => roy 50, net 950
+        // 4999 @ 5% (60/40): A = floor(4999*500*300/5_000_000) = 149, B = floor(4999*500*200/5_000_000) = 99 => roy 248, net 4751
+        // 5000 @ 2.5% (60/40): A = 75, B = 50 => roy 125, net 4875
+        let settled = client.settle_sales(collection, &token, payer, &batch);
+        assert_eq!(settled.len(), 4);
+        for (i, amount) in amounts.iter().enumerate() {
+            let s = settled.get(i as u32).unwrap();
+            assert_eq!(s.royalty_share, quotes[i].royalty_amount);
+            assert_eq!(s.seller_net, quotes[i].seller_net);
+            assert_eq!(s.royalty_share, previews[i].royalty_amount);
+            assert_eq!(s.seller_net, previews[i].seller_net);
+            assert_eq!(s.royalty_share + s.seller_net, *amount);
+        }
+
+        assert_eq!(tc.balance(recipient_a), 59 + 30 + 149 + 75);
+        assert_eq!(tc.balance(recipient_b), 39 + 20 + 99 + 50);
+        assert_eq!(tc.balance(seller_a), 901 + 4_751);
+        assert_eq!(tc.balance(seller_b), 950 + 4_875);
+        assert_eq!(tc.balance(&contract_id), 0);
+
+        let total_gross: i128 = amounts.iter().sum();
+        let total_royalties = tc.balance(recipient_a) + tc.balance(recipient_b);
+        assert_eq!(
+            total_royalties + tc.balance(seller_a) + tc.balance(seller_b),
+            total_gross
+        );
+        assert_eq!(
+            client.get_settlement_summary(collection),
+            SettlementSummary {
+                sales: 4,
+                gross_volume: total_gross,
+                royalties_paid: total_royalties,
+            }
+        );
+
+        // i128::MAX boundary stays overflow-free under tiered multi-recipient splits.
+        let max_quote = client.quote_sale(collection, &i128::MAX);
+        assert_eq!(max_quote.royalty_bps, 250);
+        assert_eq!(max_quote.royalty_amount + max_quote.seller_net, i128::MAX);
     }
 }

@@ -3681,6 +3681,9 @@ mod props;
 #[cfg(test)]
 mod basket_props;
 
+#[cfg(test)]
+mod lifecycle_props;
+
 // TTL chaos harness demo: drives randomized ledger gaps through the
 // escrow lifecycle and asserts no persistent entry expires during a
 // legitimate flow.
