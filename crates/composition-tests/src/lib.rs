@@ -14,6 +14,7 @@ use soroban_sdk::{Address, Env};
 
 mod dao_dispatch;
 mod dao_dispute;
+mod harness;
 mod multi_sig_escrow;
 mod royalty_settlement;
 mod vesting_subscription;
