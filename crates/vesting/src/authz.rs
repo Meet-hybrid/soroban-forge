@@ -725,6 +725,178 @@ fn reassignment_rejects_old_new_and_outsider_signatures() {
     }
 }
 
+#[test]
+fn propose_reassignment_accepts_funder_signature_alone() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let id = client.create_schedule(funder, &accounts.user1, &token, &TOTAL, &CLIFF, &DURATION);
+    let new_beneficiary = &accounts.user2;
+
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "propose_reassignment",
+            args: (id, new_beneficiary).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_propose_reassignment(&id, new_beneficiary)
+        .expect("outer ok")
+        .expect("propose ok");
+    assert_eq!(
+        client.pending_beneficiary(&id),
+        Some(new_beneficiary.clone())
+    );
+}
+
+#[test]
+fn propose_reassignment_rejects_old_new_and_outsider_signatures() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user1,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+    let new_beneficiary = accounts.user2.clone();
+    let outsider = Address::generate(&env);
+
+    for caller in [accounts.user1.clone(), accounts.user2.clone(), outsider] {
+        env.mock_auths(&[MockAuth {
+            address: &caller,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_reassignment",
+                args: (id, &new_beneficiary).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_propose_reassignment(&id, &new_beneficiary);
+        assert_auth_abort!(res);
+        assert_eq!(client.pending_beneficiary(&id), None);
+    }
+}
+
+#[test]
+fn accept_reassignment_accepts_pending_beneficiary_alone() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let id = client.create_schedule(funder, &accounts.user1, &token, &TOTAL, &CLIFF, &DURATION);
+    let new_beneficiary = &accounts.user2;
+
+    client.propose_reassignment(&id, new_beneficiary);
+
+    env.mock_auths(&[MockAuth {
+        address: new_beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "accept_reassignment",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_accept_reassignment(&id)
+        .expect("outer ok")
+        .expect("accept ok");
+    assert_eq!(client.get_schedule(&id).beneficiary, *new_beneficiary);
+    assert_eq!(client.pending_beneficiary(&id), None);
+}
+
+#[test]
+fn accept_reassignment_rejects_old_funder_and_outsider_signatures() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let id = client.create_schedule(funder, &accounts.user1, &token, &TOTAL, &CLIFF, &DURATION);
+    let new_beneficiary = &accounts.user2;
+
+    client.propose_reassignment(&id, new_beneficiary);
+    let outsider = Address::generate(&env);
+
+    for caller in [accounts.deployer.clone(), accounts.user1.clone(), outsider] {
+        env.mock_auths(&[MockAuth {
+            address: &caller,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_reassignment",
+                args: (id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_accept_reassignment(&id);
+        assert_auth_abort!(res);
+        assert_eq!(client.get_schedule(&id).beneficiary, accounts.user1);
+        assert_eq!(
+            client.pending_beneficiary(&id),
+            Some(new_beneficiary.clone())
+        );
+    }
+}
+
+#[test]
+fn cancel_reassignment_accepts_funder_alone() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let id = client.create_schedule(funder, &accounts.user1, &token, &TOTAL, &CLIFF, &DURATION);
+    let new_beneficiary = &accounts.user2;
+
+    client.propose_reassignment(&id, new_beneficiary);
+
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel_reassignment",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_cancel_reassignment(&id)
+        .expect("outer ok")
+        .expect("cancel ok");
+    assert_eq!(client.pending_beneficiary(&id), None);
+}
+
+#[test]
+fn cancel_reassignment_rejects_pending_old_and_outsider() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let id = client.create_schedule(funder, &accounts.user1, &token, &TOTAL, &CLIFF, &DURATION);
+    let new_beneficiary = &accounts.user2;
+
+    client.propose_reassignment(&id, new_beneficiary);
+    let outsider = Address::generate(&env);
+
+    for caller in [accounts.user1.clone(), accounts.user2.clone(), outsider] {
+        env.mock_auths(&[MockAuth {
+            address: &caller,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "cancel_reassignment",
+                args: (id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let res = client.try_cancel_reassignment(&id);
+        assert_auth_abort!(res);
+        assert_eq!(
+            client.pending_beneficiary(&id),
+            Some(new_beneficiary.clone())
+        );
+    }
+}
+
 // -----------------------------------------------------------------------
 //  Issue #609 Authorization Matrix Expansion
 // -----------------------------------------------------------------------

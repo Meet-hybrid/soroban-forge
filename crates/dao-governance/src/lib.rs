@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 //! # Soroban Forge — DAO Governance contract
 //!
@@ -320,6 +321,63 @@ pub trait SorobanForgeDaoGovernance {
 
     /// Read how many active proposals `proposer` currently has in flight (read-only view).
     fn get_active_proposal_count(env: Env, proposer: Address) -> u32;
+
+    /// Configure quorum basis points, minimum participation and voting period.
+    ///
+    /// Requires governance authorization.
+    fn set_governance_policy(
+        env: Env,
+        quorum_bps: u32,
+        min_participation: i128,
+        voting_period: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the currently configured governance policy.
+    fn get_governance_policy(
+        env: Env,
+    ) -> Result<GovernancePolicy, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the snapshotted governance policy for a proposal.
+    fn get_proposal_policy(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<GovernancePolicy, soroban_forge_shared_utils::ForgeError>;
+
+    /// Configure a custom governance address authorized to update policies.
+    fn set_governance_address(
+        env: Env,
+        governance: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Create a proposal with a delayed voting start.
+    fn propose_with_delay(
+        env: Env,
+        proposer: Address,
+        target: Address,
+        action: Bytes,
+        delay: u64,
+        duration: u64,
+        requires: soroban_sdk::Vec<u64>,
+        conflicts_with: Option<u64>,
+    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the timestamp when voting starts for a proposal.
+    fn get_voting_start(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+}
+
+/// Authenticated governance policy controlling proposal lifecycle rules.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GovernancePolicy {
+    /// Quorum required for proposal approval in basis points (0..=10_000).
+    pub quorum_bps: u32,
+    /// Minimum total votes cast (for + against) required for finalization.
+    pub min_participation: i128,
+    /// Default or enforced voting window length in seconds.
+    pub voting_period: u64,
 }
 
 /// Immutable receipt for a single proposal vote.
@@ -494,6 +552,16 @@ enum DataKey {
     /// Appended last so existing `DataKey` discriminants stay unchanged for
     /// contracts upgraded from a version without receipts.
     VoteReceipt(u64, Address),
+    /// Active governance policy controlling newly created proposals.
+    GovernancePolicy,
+    /// Snapshot of the governance policy at creation time for proposal `u64`.
+    ProposalPolicy(u64),
+    /// Explicit governance address override authorized to update governance policies.
+    Governance,
+    /// Ledger timestamp when voting starts for proposal `u64`.
+    VotingStart(u64),
+    /// Voting delay in seconds configured at proposal creation.
+    VotingDelay(u64),
 }
 
 /// Maximum number of concurrent active proposals a single proposer may have by default.
@@ -574,7 +642,46 @@ impl DaoGovernance {
         requires: soroban_sdk::Vec<u64>,
         conflicts_with: Option<u64>,
     ) -> Result<u64, ForgeError> {
-        if duration == 0 {
+        Self::propose_with_delay(
+            env,
+            proposer,
+            target,
+            action,
+            0,
+            duration,
+            requires,
+            conflicts_with,
+        )
+    }
+
+    /// Create a proposal with an explicit voting start delay.
+    pub fn propose_with_delay(
+        env: Env,
+        proposer: Address,
+        target: Address,
+        action: Bytes,
+        delay: u64,
+        duration: u64,
+        requires: soroban_sdk::Vec<u64>,
+        conflicts_with: Option<u64>,
+    ) -> Result<u64, ForgeError> {
+        let active_policy = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernancePolicy)
+            .unwrap_or(GovernancePolicy {
+                quorum_bps: 0,
+                min_participation: 0,
+                voting_period: duration,
+            });
+        let effective_duration = if duration > 0 {
+            duration
+        } else if active_policy.voting_period > 0 {
+            active_policy.voting_period
+        } else {
+            return Err(ForgeError::InvalidInput);
+        };
+        if effective_duration == 0 {
             return Err(ForgeError::InvalidInput);
         }
         proposer.require_auth();
@@ -591,10 +698,13 @@ impl DaoGovernance {
         let count: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
         let proposal_id = count.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;
         Self::validate_dependencies(&env, proposal_id, &requires, conflicts_with)?;
-        let voting_ends = env
+        let voting_start = env
             .ledger()
             .timestamp()
-            .checked_add(duration)
+            .checked_add(delay)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let voting_ends = voting_start
+            .checked_add(effective_duration)
             .ok_or(ForgeError::ArithmeticOverflow)?;
         let held = Self::bond_held(&env);
         let next_held = held
@@ -625,6 +735,23 @@ impl DaoGovernance {
         env.storage().instance().set(&DataKey::Count, &proposal_id);
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
+        let proposal_policy = GovernancePolicy {
+            quorum_bps: active_policy.quorum_bps,
+            min_participation: active_policy.min_participation,
+            voting_period: effective_duration,
+        };
+        let policy_key = DataKey::ProposalPolicy(proposal_id);
+        env.storage()
+            .persistent()
+            .set(&policy_key, &proposal_policy);
+        bump_entry(&env, &policy_key);
+        let start_key = DataKey::VotingStart(proposal_id);
+        env.storage().persistent().set(&start_key, &voting_start);
+        bump_entry(&env, &start_key);
+        let delay_key = DataKey::VotingDelay(proposal_id);
+        env.storage().persistent().set(&delay_key, &delay);
+        bump_entry(&env, &delay_key);
+
         env.storage().instance().set(&DataKey::BondHeld, &next_held);
         Self::inc_active_proposals(&env, &proposer)?;
         events::proposed(&env, &proposal);
@@ -707,6 +834,14 @@ impl DaoGovernance {
         if proposal.state != ProposalState::Active {
             return Err(ForgeError::InvalidInput);
         }
+        let voting_start = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VotingStart(proposal_id))
+            .unwrap_or(0);
+        if env.ledger().timestamp() < voting_start {
+            return Err(ForgeError::InvalidInput);
+        }
         if env.ledger().timestamp() >= proposal.voting_ends {
             return Err(ForgeError::DeadlineReached);
         }
@@ -783,7 +918,35 @@ impl DaoGovernance {
         match proposal.state {
             ProposalState::Active => {
                 let key = DataKey::Proposal(proposal_id);
-                if proposal.for_votes > proposal.against_votes {
+                let policy = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::ProposalPolicy(proposal_id))
+                    .unwrap_or(GovernancePolicy {
+                        quorum_bps: 0,
+                        min_participation: 0,
+                        voting_period: 0,
+                    });
+                let total_votes = proposal
+                    .for_votes
+                    .checked_add(proposal.against_votes)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+                let meets_majority = proposal.for_votes > proposal.against_votes;
+                let meets_participation = total_votes >= policy.min_participation;
+                let meets_quorum = if policy.quorum_bps > 0 {
+                    let for_scaled = proposal
+                        .for_votes
+                        .checked_mul(10_000)
+                        .ok_or(ForgeError::ArithmeticOverflow)?;
+                    let req_scaled = total_votes
+                        .checked_mul(i128::from(policy.quorum_bps))
+                        .ok_or(ForgeError::ArithmeticOverflow)?;
+                    for_scaled >= req_scaled
+                } else {
+                    true
+                };
+
+                if meets_majority && meets_participation && meets_quorum {
                     proposal.state = ProposalState::Succeeded;
                     env.storage().persistent().set(&key, &proposal);
                     bump_entry(&env, &key);
@@ -926,6 +1089,26 @@ impl DaoGovernance {
             return Err(ForgeError::Unauthorized);
         }
         proposer.require_auth();
+
+        let delay: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VotingDelay(proposal_id))
+            .unwrap_or(0);
+        let voting_start: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VotingStart(proposal_id))
+            .unwrap_or(0);
+        let now = env.ledger().timestamp();
+        let voting_started = if delay > 0 {
+            now >= voting_start
+        } else {
+            now > voting_start || proposal.for_votes > 0 || proposal.against_votes > 0
+        };
+        if voting_started {
+            return Err(ForgeError::InvalidInput);
+        }
 
         // Refund before the terminal state write, mirroring `execute`.
         let bond = Self::bond_config_impl(&env)?;
@@ -1145,6 +1328,88 @@ impl DaoGovernance {
                 .set(&DataKey::ActiveProposalCount(proposer.clone()), &next);
         }
     }
+
+    /// Configure quorum basis points, minimum participation and voting period.
+    ///
+    /// Requires governance authorization.
+    pub fn set_governance_policy(
+        env: Env,
+        quorum_bps: u32,
+        min_participation: i128,
+        voting_period: u64,
+    ) -> Result<(), ForgeError> {
+        if quorum_bps > 10_000 || min_participation < 0 || voting_period == 0 {
+            return Err(ForgeError::InvalidInput);
+        }
+        let governance: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Governance)
+            .unwrap_or_else(|| env.current_contract_address());
+        governance.require_auth();
+
+        let policy = GovernancePolicy {
+            quorum_bps,
+            min_participation,
+            voting_period,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::GovernancePolicy, &policy);
+        events::policy_updated(&env, quorum_bps, min_participation, voting_period);
+        Ok(())
+    }
+
+    /// Read the active governance policy.
+    pub fn get_governance_policy(env: Env) -> Result<GovernancePolicy, ForgeError> {
+        Ok(env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernancePolicy)
+            .unwrap_or(GovernancePolicy {
+                quorum_bps: 0,
+                min_participation: 0,
+                voting_period: 0,
+            }))
+    }
+
+    /// Read the snapshotted governance policy for a proposal.
+    pub fn get_proposal_policy(env: Env, proposal_id: u64) -> Result<GovernancePolicy, ForgeError> {
+        let proposal = Self::get_proposal_impl(&env, proposal_id)?;
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&DataKey::ProposalPolicy(proposal_id))
+            .unwrap_or(GovernancePolicy {
+                quorum_bps: 0,
+                min_participation: 0,
+                voting_period: proposal.voting_ends,
+            }))
+    }
+
+    /// Read the timestamp when voting starts for a proposal.
+    pub fn get_voting_start(env: Env, proposal_id: u64) -> Result<u64, ForgeError> {
+        let _proposal = Self::get_proposal_impl(&env, proposal_id)?;
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&DataKey::VotingStart(proposal_id))
+            .unwrap_or(0))
+    }
+
+    /// Configure a custom governance address authorized to update policies.
+    pub fn set_governance_address(env: Env, governance: Address) -> Result<(), ForgeError> {
+        let current: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Governance)
+            .unwrap_or_else(|| env.current_contract_address());
+        current.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::Governance, &governance);
+        Ok(())
+    }
 }
 
 /// Move `amount` of `token` from `from` into this contract.
@@ -1307,7 +1572,26 @@ mod events {
         }
         .publish(env);
     }
+
+    #[contractevent]
+    pub struct PolicyUpdated {
+        pub quorum_bps: u32,
+        pub min_participation: i128,
+        pub voting_period: u64,
+    }
+
+    pub fn policy_updated(env: &Env, quorum_bps: u32, min_participation: i128, voting_period: u64) {
+        PolicyUpdated {
+            quorum_bps,
+            min_participation,
+            voting_period,
+        }
+        .publish(env);
+    }
 }
+
+#[cfg(test)]
+mod lifecycle_props;
 
 #[cfg(test)]
 mod resource_report;
@@ -1990,6 +2274,7 @@ mod tests {
             &requires,
             &None,
         );
+        client.cancel_proposal(&dependency, &accounts.user1);
         client.vote(&consumer, &accounts.user3, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&consumer);
@@ -1997,7 +2282,6 @@ mod tests {
             client.get_proposal(&consumer).state,
             ProposalState::Succeeded
         );
-        client.cancel_proposal(&dependency, &accounts.user1);
         assert_eq!(
             client.try_execute(&consumer).unwrap_err().unwrap(),
             ForgeError::ContractInvocationFailed
@@ -2674,7 +2958,6 @@ mod tests {
     #[test]
     fn proposal_status_reports_defeated_and_cancelled_as_terminal() {
         let (env, client, accounts, defeated_id, target_id) = setup!();
-        client.vote(&defeated_id, &accounts.user2, &false);
         let cancelled_id = client.propose(
             &accounts.user3,
             &target_id,
@@ -2683,9 +2966,10 @@ mod tests {
             &soroban_sdk::Vec::new(&env),
             &None,
         );
+        client.cancel_proposal(&cancelled_id, &accounts.user3);
+        client.vote(&defeated_id, &accounts.user2, &false);
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&defeated_id);
-        client.cancel_proposal(&cancelled_id, &accounts.user3);
 
         let status = client.get_proposal_status(&defeated_id);
         assert_eq!(status.state, ProposalState::Defeated);
@@ -2769,17 +3053,227 @@ mod tests {
     }
 
     #[test]
-    fn cancel_after_quorum_before_execute_succeeds() {
+    fn cancel_after_voting_starts_or_quorum_is_rejected() {
         let (env, client, accounts, proposal_id, _target_id) = setup!();
         client.vote(&proposal_id, &accounts.user2, &true);
         client.vote(&proposal_id, &accounts.user3, &true);
         env.ledger().set_timestamp(START + DURATION + 1);
-        client.cancel_proposal(&proposal_id, &accounts.user1);
+        let err = client
+            .try_cancel_proposal(&proposal_id, &accounts.user1)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidInput);
+    }
+
+    #[test]
+    fn governance_policy_configuration_bounds_and_auth() {
+        let (_env, _token, _token_client, _contract_id, client, _accounts, _target_id) =
+            fresh_bond!();
+        // Bounds validation
         assert_eq!(
-            client.get_proposal(&proposal_id).state,
-            ProposalState::Cancelled
+            client
+                .try_set_governance_policy(&10_001, &0, &DURATION)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
         );
-        assert_eq!(client.get_proposal(&proposal_id).for_votes, FUNDS * 2);
+        assert_eq!(
+            client
+                .try_set_governance_policy(&5_000, &-1, &DURATION)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(
+            client
+                .try_set_governance_policy(&5_000, &0, &0)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // Valid update with mock_all_auths
+        client.set_governance_policy(&6_000, &1_000, &10_000);
+        let policy = client.get_governance_policy();
+        assert_eq!(policy.quorum_bps, 6_000);
+        assert_eq!(policy.min_participation, 1_000);
+        assert_eq!(policy.voting_period, 10_000);
+    }
+
+    #[test]
+    fn proposal_finalization_applies_snapshot_policy_without_changing_existing() {
+        let (env, _token, _token_client, _contract_id, client, accounts, target_id) = fresh_bond!();
+        // Proposal 1 created under default/unconstrained policy (50% simple majority)
+        let p1 = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+
+        // Governance updates policy to require 75% approval (7_500 bps) and 2_000 min participation
+        client.set_governance_policy(&7_500, &2_000, &DURATION);
+
+        // Proposal 2 created under the new strict policy
+        let p2 = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+
+        // Vote: user2 (10,000) votes for, user3 (10,000) votes against, validator (10,000) votes for.
+        // Total: 20,000 for, 10,000 against = 66.6% approval.
+        client.vote(&p1, &accounts.user2, &true);
+        client.vote(&p1, &accounts.user3, &false);
+        client.vote(&p1, &accounts.validator, &true);
+
+        client.vote(&p2, &accounts.user2, &true);
+        client.vote(&p2, &accounts.user3, &false);
+        client.vote(&p2, &accounts.validator, &true);
+
+        env.ledger().set_timestamp(START + DURATION + 1);
+
+        // P1 finalizes under its snapshotted policy: 66.6% > 50% majority -> Succeeded!
+        client.execute(&p1);
+        assert_eq!(client.get_proposal(&p1).state, ProposalState::Succeeded);
+
+        // P2 finalizes under its snapshotted strict policy: 66.6% < 75% -> Defeated!
+        client.execute(&p2);
+        assert_eq!(client.get_proposal(&p2).state, ProposalState::Defeated);
+    }
+
+    #[test]
+    fn governance_policy_quorum_pass_fail_and_exact_period_boundaries() {
+        let (env, _token, _token_client, _contract_id, client, accounts, target_id) = fresh_bond!();
+        // Require 6_000 bps (60%) and 15_000 min participation, duration 5_000
+        client.set_governance_policy(&6_000, &15_000, &5_000);
+
+        let p1 = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &0, // Use policy duration (5_000)
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let proposal = client.get_proposal(&p1);
+        assert_eq!(proposal.voting_ends, START + 5_000);
+
+        // Exact boundary checks:
+        // At START + 4_999: voting is OPEN
+        env.ledger().set_timestamp(START + 4_999);
+        client.vote(&p1, &accounts.user2, &true); // 10,000
+        client.vote(&p1, &accounts.user3, &true); // 10,000 -> total 20,000 for (100%)
+                                                  // Cannot execute before deadline
+        assert_eq!(
+            client.try_execute(&p1).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // At START + 5_000: voting has CLOSED
+        env.ledger().set_timestamp(START + 5_000);
+        assert_eq!(
+            client
+                .try_vote(&p1, &accounts.validator, &false)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::DeadlineReached
+        );
+        // Can execute now
+        client.execute(&p1);
+        assert_eq!(client.get_proposal(&p1).state, ProposalState::Succeeded);
+    }
+
+    #[test]
+    fn cancel_proposal_start_boundary_and_bond_conservation() {
+        let (env, _token, token_client, _contract_id, client, accounts, target_id) = fresh_bond!();
+        let initial_proposer_bal = token_client.balance(&accounts.user1);
+        let initial_contract_bal = token_client.balance(&client.address);
+
+        // Create proposal with delay = 1_000, duration = 5_000
+        let delay = 1_000;
+        let p = client.propose_with_delay(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &delay,
+            &5_000,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        assert_eq!(client.get_voting_start(&p), START + delay);
+        assert_eq!(
+            token_client.balance(&accounts.user1),
+            initial_proposer_bal - BOND
+        );
+        assert_eq!(
+            token_client.balance(&client.address),
+            initial_contract_bal + BOND
+        );
+
+        // Voting at START + 999 fails (voting has not started yet)
+        env.ledger().set_timestamp(START + 999);
+        assert_eq!(
+            client
+                .try_vote(&p, &accounts.user2, &true)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // Proposer cancels before voting start (at START + 999)
+        client.cancel_proposal(&p, &accounts.user1);
+        assert_eq!(client.get_proposal(&p).state, ProposalState::Cancelled);
+        assert_eq!(client.get_proposal(&p).bond_state, BondState::Refunded);
+
+        // Bond is refunded exactly once and conserved
+        assert_eq!(token_client.balance(&accounts.user1), initial_proposer_bal);
+        assert_eq!(token_client.balance(&client.address), initial_contract_bal);
+
+        // Cancelled proposal rejects votes and execution
+        assert_eq!(
+            client
+                .try_vote(&p, &accounts.user2, &true)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(
+            client.try_execute(&p).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // Exact start boundary: create another proposal with delay
+        let p2 = client.propose_with_delay(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &delay,
+            &5_000,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+        let p2_start = client.get_voting_start(&p2);
+        // Advance to exact start boundary
+        env.ledger().set_timestamp(p2_start);
+
+        // Cancellation at or after voting start is rejected
+        assert_eq!(
+            client
+                .try_cancel_proposal(&p2, &accounts.user1)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::InvalidInput
+        );
+
+        // Voting at exact start boundary succeeds
+        client.vote(&p2, &accounts.user2, &true);
+        assert_eq!(client.get_proposal(&p2).for_votes, FUNDS);
     }
 
     #[test]
@@ -3806,6 +4300,7 @@ mod tests {
             &soroban_sdk::Vec::new(&env),
             &None,
         );
+        client.cancel_proposal(&cancelled, &accounts.user2); // refund
         let defeated = client.propose(
             &accounts.user3,
             &target_id,
@@ -3817,14 +4312,13 @@ mod tests {
         client.vote(&executed, &accounts.user2, &true);
         client.vote(&defeated, &accounts.user2, &false);
 
-        // Baseline after posting: three bonds in custody, nothing released.
-        assert_eq!(tc.balance(&contract_id), BOND * 3);
-        assert_eq!(bond_held(&env, &contract_id), BOND * 3);
+        // Baseline after posting and cancel: two bonds in custody (executed and defeated).
+        assert_eq!(tc.balance(&contract_id), BOND * 2);
+        assert_eq!(bond_held(&env, &contract_id), BOND * 2);
 
         env.ledger().set_timestamp(START + DURATION + 1);
         client.execute(&executed); // Active -> Succeeded
         client.execute(&executed); // Succeeded -> Executed (refund)
-        client.cancel_proposal(&cancelled, &accounts.user2); // refund
         client.execute(&defeated); // Active -> Defeated (forfeit)
 
         // Exact per-path deltas from the posted baseline:
