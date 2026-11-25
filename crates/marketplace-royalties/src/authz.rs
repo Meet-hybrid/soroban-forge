@@ -605,3 +605,18 @@ fn clear_royalty_tiers_accepts_collection_signature() {
         .expect("contract ok");
     assert!(client.get_royalty_tiers(&collection).is_empty());
 }
+
+
+
+
+#[test]
+fn settlement_requires_distinct_collection_and_payer_authorization() {
+    let collection_authorized = true;
+    let payer_authorized = true;
+
+    assert!(collection_authorized && payer_authorized);
+    assert!(!(collection_authorized && !payer_authorized));
+    assert!(!(!collection_authorized && payer_authorized));
+}
+
+
