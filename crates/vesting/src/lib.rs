@@ -213,6 +213,17 @@ use soroban_sdk::{contract, contractclient, contractimpl, contracttype, token, A
 /// real agreements; raise it only with a reason.
 pub const MAX_TRANCHES: u32 = 32;
 
+/// Maximum duration (in seconds) allowed for a linear vesting schedule
+/// (10 years = 315,360,000 seconds).
+///
+/// Creation rejects a linear schedule with `duration == 0`,
+/// `duration > MAX_VESTING_DURATION`, or `cliff > duration` with
+/// [`ForgeError::InvalidInput`].
+pub const MAX_VESTING_DURATION: u64 = 10 * 365 * 24 * 60 * 60;
+
+/// Alias for [`MAX_VESTING_DURATION`] for callers referencing schedule bounds.
+pub const MAX_SCHEDULE_DURATION: u64 = MAX_VESTING_DURATION;
+
 /// Public interface for the Soroban Forge vesting contract.
 ///
 /// Declared as a `contractclient` trait so SDK consumers (and the TypeScript
@@ -490,6 +501,40 @@ pub trait SorobanForgeVesting {
         env: Env,
         schedule_id: u64,
     ) -> Result<VestingStatus, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the derived status summary of a linear schedule, including its
+    /// configured cliff duration and cliff timestamp (read-only).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no linear schedule with this id.
+    fn get_schedule_status(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<ScheduleStatus, soroban_forge_shared_utils::ForgeError>;
+}
+
+/// Read-only status summary for a linear vesting schedule, exposing its
+/// configured cliff alongside live accrual and lifecycle state.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleStatus {
+    /// Current derived lifecycle state (`Locked`, `Vesting`, `Completed`, `Revoked`).
+    pub status: VestingStatus,
+    /// Ledger timestamp at which vesting began (creation time).
+    pub start: u64,
+    /// Configured cliff offset in seconds from `start` (`0` when no cliff is configured).
+    pub cliff: u64,
+    /// Absolute ledger timestamp at which the cliff ends (`start + cliff`).
+    pub cliff_timestamp: u64,
+    /// Total schedule duration in seconds from `start`.
+    pub duration: u64,
+    /// Amount currently claimable by the active beneficiary.
+    pub claimable: i128,
+    /// Total amount claimed so far across all beneficiaries.
+    pub claimed: i128,
+    /// Total token allocation of the schedule.
+    pub total_amount: i128,
 }
 
 /// Lifecycle state of a vesting schedule.
@@ -685,7 +730,7 @@ impl Vesting {
         if total_amount <= 0 {
             return Err(ForgeError::InvalidInput);
         }
-        if duration == 0 {
+        if duration == 0 || duration > MAX_VESTING_DURATION {
             return Err(ForgeError::InvalidInput);
         }
         if cliff > duration {
@@ -795,7 +840,7 @@ impl Vesting {
             if args.total_amount <= 0 {
                 return Err(ForgeError::InvalidInput);
             }
-            if args.duration == 0 {
+            if args.duration == 0 || args.duration > MAX_VESTING_DURATION {
                 return Err(ForgeError::InvalidInput);
             }
             if args.cliff > args.duration {
@@ -1227,6 +1272,35 @@ impl Vesting {
             Stored::Linear(schedule) => Self::current_status(&schedule, now),
             Stored::Tranche(schedule) => Self::tranche_status(&schedule, now),
         }
+    }
+
+    /// Read the derived status summary of a linear schedule, exposing the
+    /// configured cliff duration and cliff timestamp alongside live claimable
+    /// and claimed amounts (read-only view).
+    pub fn get_schedule_status(env: Env, schedule_id: u64) -> Result<ScheduleStatus, ForgeError> {
+        let schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(ForgeError::NotFound)?;
+        let now = env.ledger().timestamp();
+        let status = Self::current_status(&schedule, now)?;
+        let cliff_timestamp = schedule
+            .start
+            .checked_add(schedule.cliff)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let claimable =
+            Self::linear_claimable_for(&env, schedule_id, &schedule, &schedule.beneficiary, now)?;
+        Ok(ScheduleStatus {
+            status,
+            start: schedule.start,
+            cliff: schedule.cliff,
+            cliff_timestamp,
+            duration: schedule.duration,
+            claimable,
+            claimed: schedule.claimed,
+            total_amount: schedule.total_amount,
+        })
     }
 
     /// Load a schedule of either kind by id.
