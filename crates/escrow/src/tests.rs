@@ -976,6 +976,41 @@ fn zero_limit_returns_empty_page_without_residual_cursor() {
 }
 
 #[test]
+fn escrows_for_participant_clamps_to_max_page_size() {
+    let (env, token, _tc, _id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+
+    // Create 105 escrows for buyer
+    for _ in 0..105 {
+        create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    }
+
+    // Request limit of 200, which exceeds MAX_PARTICIPANT_PAGE_SIZE (100)
+    let page1 = client.escrows_for_participant(buyer, &0, &200);
+    assert_eq!(page1.total, 105);
+    assert_eq!(page1.ids.len(), 100);
+    assert_eq!(page1.next_cursor, Some(100));
+
+    // Request exact boundary limit of 100
+    let page_exact = client.escrows_for_participant(buyer, &0, &100);
+    assert_eq!(page_exact.ids.len(), 100);
+    assert_eq!(page_exact.next_cursor, Some(100));
+
+    // Fetch the remaining 5
+    let page2 = client.escrows_for_participant(buyer, &100, &200);
+    assert_eq!(page2.total, 105);
+    assert_eq!(page2.ids.len(), 5);
+    assert_eq!(page2.next_cursor, None);
+
+    // Unknown participant returns empty page
+    let unknown = Address::generate(&env);
+    let unknown_page = client.escrows_for_participant(&unknown, &0, &50);
+    assert_eq!(unknown_page.total, 0);
+    assert_eq!(unknown_page.ids.len(), 0);
+    assert_eq!(unknown_page.next_cursor, None);
+}
+
+#[test]
 fn escrows_for_participant_is_read_only() {
     let (_env, token, _tc, _id, client, accounts) = setup!();
     let (buyer, seller, arbiter) = parties(&accounts);

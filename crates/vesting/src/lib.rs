@@ -1755,3 +1755,6 @@ mod model_check;
 
 #[cfg(test)]
 mod index_props;
+
+#[cfg(test)]
+mod schedule_conservation;
