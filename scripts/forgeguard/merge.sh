@@ -32,6 +32,12 @@
 #   FORGEGUARD_HOLD_LABELS      optional  comma-separated labels that block merging
 #                                         (default: do-not-merge,forgeguard:hold)
 #   FORGEGUARD_DRY_RUN          optional  set to 1 to report without posting or merging
+<<<<<<< HEAD
+=======
+#   FORGEGUARD_AUTO_MERGE       optional  set to 0 to scan and post statuses/comments but
+#                                         never merge; ready PRs are left for a maintainer
+#                                         (default: 1)
+>>>>>>> upstream/develop
 #
 # Exit codes: 0 = all PRs handled (merged or deliberately skipped),
 # 1 = ForgeGuard could not run (tooling/API problem).
@@ -58,6 +64,10 @@ FORGEGUARD_REQUIRED_CHECKS="${FORGEGUARD_REQUIRED_CHECKS:-Build,Test,Clippy,Rust
 FORGEGUARD_IGNORED_CHECKS="${FORGEGUARD_IGNORED_CHECKS:-^Vercel}"
 FORGEGUARD_HOLD_LABELS="${FORGEGUARD_HOLD_LABELS:-do-not-merge,forgeguard:hold}"
 FORGEGUARD_DRY_RUN="${FORGEGUARD_DRY_RUN:-0}"
+<<<<<<< HEAD
+=======
+FORGEGUARD_AUTO_MERGE="${FORGEGUARD_AUTO_MERGE:-1}"
+>>>>>>> upstream/develop
 
 # Values below reach API paths or git refspecs, so constrain them first.
 [[ "$FORGEGUARD_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
@@ -260,6 +270,16 @@ process_pr() {
     note "$pr" "[dry-run] would ${FORGEGUARD_MERGE_METHOD}-merge ${sha:0:12}"
     return 0
   fi
+<<<<<<< HEAD
+=======
+  # Scan-only mode: everything above still ran (scan, status, comment), but a
+  # maintainer merges by hand. Merges made with GITHUB_TOKEN are attributed to
+  # github-actions and do not close linked issues, which breaks Drips credit.
+  if [[ "$FORGEGUARD_AUTO_MERGE" != 1 ]]; then
+    note "$pr" "READY ${sha:0:12}: approved, green and clean; auto-merge is off, merge by hand"
+    return 0
+  fi
+>>>>>>> upstream/develop
   if gh api -X PUT "${API}/pulls/${pr}/merge" -f sha="$sha" \
     -f merge_method="$FORGEGUARD_MERGE_METHOD" >/dev/null; then
     note "$pr" "MERGED ${sha:0:12} into ${base}"

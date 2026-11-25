@@ -21,11 +21,12 @@
 //!    settlement steps.
 
 use crate::{
-    MarketplaceRoyalties, SettlementSummary, SorobanForgeMarketplaceRoyaltiesClient,
-    MAX_SETTLE_SALES,
+    MarketplaceRoyalties, RoyaltyShare, SettlementSummary, SorobanForgeMarketplaceRoyaltiesClient,
+    MAX_ROYALTY_RECIPIENTS, MAX_SETTLE_SALES,
 };
 use proptest::collection::vec as prop_vec;
 use proptest::prelude::*;
+use proptest::test_runner::RngSeed;
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};

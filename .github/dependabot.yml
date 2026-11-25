@@ -29,6 +29,13 @@ updates:
     directory: /packages/typescript-sdk
     schedule:
       interval: weekly
+    # Hold @stellar/stellar-sdk on v16 (still maintained: Protocol 30 support
+    # and security backports). v17 rewrites the XDR API and needs a planned
+    # migration of the ABI fixture script, indexer and tests; see #357.
+    # Minor/patch 16.x updates still arrive.
+    ignore:
+      - dependency-name: "@stellar/stellar-sdk"
+        update-types: ["version-update:semver-major"]
     labels:
       - "dependencies"
     open-pull-requests-limit: 3
@@ -42,6 +49,13 @@ updates:
     directory: /packages/nextjs-example
     schedule:
       interval: weekly
+    # Hold @stellar/stellar-sdk on v16 (still maintained: Protocol 30 support
+    # and security backports). v17 rewrites the XDR API and needs a planned
+    # migration of the ABI fixture script, indexer and tests; see #357.
+    # Minor/patch 16.x updates still arrive.
+    ignore:
+      - dependency-name: "@stellar/stellar-sdk"
+        update-types: ["version-update:semver-major"]
     labels:
       - "dependencies"
     open-pull-requests-limit: 3

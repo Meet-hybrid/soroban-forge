@@ -3,7 +3,7 @@ use soroban_forge_test_utils::TestAccounts;
 use soroban_sdk::events::Event as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::Env;
+use soroban_sdk::{Env, Vec as SorobanVec};
 
 const START: u64 = 1_000_000;
 const CLIFF: u64 = 1_000;
@@ -820,6 +820,50 @@ fn revoke_mid_vesting_freezes_amount_and_allows_partial_claim() {
     assert_eq!(tc.balance(&contract_id), TOTAL - TOTAL / 2);
     assert_eq!(client.get_status(&id), VestingStatus::Revoked);
     assert_eq!(client.get_schedule(&id).claimed, TOTAL / 2);
+}
+
+#[test]
+fn claim_then_revoke_conserves_allocation_after_terminal_repeats() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    env.ledger()
+        .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 4);
+    let claimed_before_revoke = client.claim(&id);
+    assert_eq!(claimed_before_revoke, TOTAL / 4);
+
+    env.ledger()
+        .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
+    client.revoke(&id);
+    let frozen_vested = client
+        .get_schedule(&id)
+        .revoked_vested
+        .expect("revoked schedule must retain its frozen vested amount");
+    assert_eq!(frozen_vested, TOTAL / 2);
+
+    env.ledger().set_timestamp(START + DURATION + 1);
+    let claimed_after_revoke = client.claim(&id);
+    assert_eq!(claimed_after_revoke, frozen_vested - claimed_before_revoke);
+    assert_eq!(client.claim(&id), 0);
+    assert_eq!(
+        client.try_revoke(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    assert_eq!(
+        tc.balance(&accounts.user1) + tc.balance(&contract_id),
+        TOTAL,
+        "claims before and after revocation must conserve the schedule allocation"
+    );
+    assert_eq!(tc.balance(&accounts.user1), frozen_vested);
+    assert_eq!(tc.balance(&contract_id), TOTAL - frozen_vested);
+    assert_eq!(client.get_schedule(&id).claimed, frozen_vested);
+    assert_eq!(
+        client.get_schedule(&id).revoked_vested,
+        Some(frozen_vested),
+        "a repeated revoke must not raise the frozen amount"
+    );
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
 }
 
 /// A completed schedule cannot be revoked: the grant ran its course, so

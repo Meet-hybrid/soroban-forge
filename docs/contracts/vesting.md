@@ -113,6 +113,11 @@ claims can never overpay or underpay: for either kind `claim` returns exactly
 compared on the elapsed offset rather than on `start + unlock_at`, so an offset
 of `u64::MAX` cannot overflow — that tranche simply never unlocks.
 
+This also means callers may make partial claims at arbitrary timestamps: each
+claim receives only the newly unlocked amount, while any floor-division residue
+remains in custody until the claim at or after the vesting end pays the exact
+remaining balance.
+
 On a `Revoked` linear schedule the vested amount is frozen at the revocation
 timestamp (`revoked_vested`): the release formula returns that frozen amount
 for every later time, so `claim` succeeds only up to it and `claimable`
@@ -249,3 +254,20 @@ enum DataKey {
 
 Tests live in-crate (`crates/vesting/src/lib.rs`) and run with
 `cargo test -p soroban-forge-vesting --all-targets --locked`.
+
+## Discover schedules by beneficiary or funder
+
+Call `schedules_for_beneficiary(beneficiary, offset, limit)` or
+`schedules_for_funder(funder, offset, limit)` to list IDs in creation order.
+Offsets are zero-based and the page limit is 1 through 100, inclusive. Invalid
+limits return `InvalidInput`. An unknown address or offset beyond the index
+returns an empty list. These calls require no authorization and do not change
+storage or publish events.
+
+Reassignment moves the ID between beneficiary indexes and keeps its creation
+position in the resulting list. The funder index stays the same. An index
+includes schedules after claims or revocation. Tranche creation records only an
+authorizing beneficiary. For discovery, the tranche ID appears under that address
+in both indexes. Token transfers into vesting custody do not establish a
+different funder for the tranche. On upgraded deployments, the queries read
+pre-index schedules from their original records.

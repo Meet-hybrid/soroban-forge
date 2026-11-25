@@ -10,16 +10,22 @@
 //! soroban-forge verify --expected <sha256>
 //! soroban-forge verify --manifest provenance-manifest.json
 //! soroban-forge doctor --wasm target/wasm32v1-none/release/contract.wasm
+//! soroban-forge storage-diff --source old.wasm --target new.wasm
 //! ```
 
 mod cli;
 mod commands;
+mod network_profiles;
+
+#[path = "commands/decode_failure.rs"]
+mod decode_failure;
 
 use clap::{Parser, Subcommand};
 use cli::{
     BuildArgs, DeployArgs, DoctorArgs, EventsArgs, InspectArgs, InvokeArgs, LintArgs, NewArgs,
     ScaffoldValidateArgs, SimulateArgs, TestArgs, VerifyArgs,
 };
+use decode_failure::DecodeFailureArgs;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -39,10 +45,20 @@ pub enum Commands {
     Lint(LintArgs),
     Test(TestArgs),
     Deploy(DeployArgs),
+    #[command(
+        name = "deploy-check",
+        visible_alias = "smoke",
+        about = "Check deployed contracts using the deployment manifest"
+    )]
+    DeployCheck(DeployCheckArgs),
     New(NewArgs),
+    ScaffoldValidate(ScaffoldValidateArgs),
     ScaffoldValidate(ScaffoldValidateArgs),
     Verify(VerifyArgs),
     Invoke(InvokeArgs),
+    Keys(KeysArgs),
+    Profile(ProfileArgs),
+    DecodeFailure(DecodeFailureArgs),
     Events(EventsArgs),
     Inspect(InspectArgs),
     Doctor(DoctorArgs),
@@ -58,10 +74,15 @@ fn main() -> anyhow::Result<()> {
         Commands::Lint(args) => commands::lint::run(args)?,
         Commands::Test(args) => commands::test::run(args)?,
         Commands::Deploy(args) => commands::deploy::run(args)?,
+        Commands::DeployCheck(args) => commands::deploy_check::run(args)?,
         Commands::New(args) => commands::new::run(args)?,
+        Commands::ScaffoldValidate(args) => commands::scaffold_validate::run(args)?,
         Commands::ScaffoldValidate(args) => commands::scaffold_validate::run(args)?,
         Commands::Verify(args) => commands::verify::run(args)?,
         Commands::Invoke(args) => commands::invoke::run(args)?,
+        Commands::Keys(args) => commands::keys::run(args)?,
+        Commands::Profile(args) => commands::profile::run(args)?,
+        Commands::DecodeFailure(args) => decode_failure::run(args)?,
         Commands::Events(args) => commands::events::run(args)?,
         Commands::Inspect(args) => commands::inspect::run(args)?,
         Commands::Doctor(args) => commands::doctor::run(args)?,
@@ -109,6 +130,29 @@ mod tests {
     }
 
     #[test]
+    fn events_follow_alias_topic_and_format_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "events",
+            "--contract",
+            "C123",
+            "--follow",
+            "--topic",
+            "Transfer",
+            "--format",
+            "jsonl",
+        ])
+        .unwrap();
+
+        let Commands::Events(args) = cli.command else {
+            panic!("expected events command");
+        };
+        assert!(args.stream);
+        assert_eq!(args.topic.as_deref(), Some("Transfer"));
+        assert_eq!(args.format, crate::cli::EventsFormat::Jsonl);
+    }
+
+    #[test]
     fn verify_flags_parse() {
         let cli = Cli::try_parse_from([
             "soroban-forge",
@@ -138,6 +182,63 @@ mod tests {
             panic!("expected verify command");
         };
         assert_eq!(args.manifest, "provenance-manifest.json");
+    }
+
+    #[test]
+    fn decode_failure_accepts_receipt_xdr_and_optional_diagnostics() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "decode-failure",
+            "--result-xdr",
+            "AAAA",
+            "--diagnostic-events-xdr",
+            "BBBB",
+        ])
+        .unwrap();
+
+        let Commands::DecodeFailure(args) = cli.command else {
+            panic!("expected decode-failure command");
+        };
+        assert_eq!(args.result_xdr.as_deref(), Some("AAAA"));
+        assert_eq!(args.diagnostic_events_xdr.as_deref(), Some("BBBB"));
+        assert!(args.error.is_none());
+    }
+
+    #[test]
+    fn decode_failure_requires_exactly_one_input() {
+        assert!(Cli::try_parse_from(["soroban-forge", "decode-failure"]).is_err());
+        assert!(Cli::try_parse_from([
+            "soroban-forge",
+            "decode-failure",
+            "--error",
+            "failed",
+            "--result-xdr",
+            "AAAA",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn verify_json_is_a_manifest_output_mode() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "verify",
+            "--manifest",
+            "local.json",
+            "--json",
+        ])
+        .unwrap();
+        let Commands::Verify(args) = cli.command else {
+            panic!("expected verify command");
+        };
+        assert!(args.json);
+        assert_eq!(args.manifest, "local.json");
+        for option in ["--wasm", "--expected"] {
+            assert!(
+                Cli::try_parse_from(["soroban-forge", "verify", "--json", option, "value"])
+                    .is_err()
+            );
+        }
     }
 
     #[test]

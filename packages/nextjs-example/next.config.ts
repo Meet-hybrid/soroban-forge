@@ -1,5 +1,6 @@
 /** @type {import('next').NextConfig} */
 import path from "node:path";
+import path from "node:path";
 
 const nextConfig = {
   reactStrictMode: true,
@@ -7,6 +8,6 @@ const nextConfig = {
   turbopack: {
     root: path.resolve(process.cwd(), ".."),
   },
-}
+};
 
 export default nextConfig

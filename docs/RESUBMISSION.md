@@ -1,8 +1,8 @@
 # Resubmission Plan & Narrative
 
 > **Status (updated):** Phase 1 ✅ complete — workspace on soroban-sdk
-> 27.0.6 / stable Rust, escrow rebuilt with SEP-41 settlement, dispute
-> flow, events, persistent storage + TTL, 104 tests green. Phase 2 ✅
+> 28.0.0 (macros 27.0.6) / stable Rust, escrow rebuilt with SEP-41 settlement, dispute
+> flow, events, persistent storage + TTL, workspace tests green. Phase 2 ✅
 > complete — escrow deployed on testnet with a verified three-round
 > receipt and on-chain conservation; see the README proof table and
 > `scripts/demo-testnet.sh`. Phase 3 (application narrative + design
@@ -54,12 +54,12 @@ stays — it is the strongest contributor asset in the repo.
 
 | Deliverable | Detail |
 |---|---|
-| SDK 27 port | Workspace on soroban-sdk 27.x, current stable Rust, `wasm32v1-none` target where applicable |
+| SDK port | Workspace on soroban-sdk 28.0.0 with macros 27.0.6, current stable Rust, `wasm32v1-none` target where applicable |
 | SEP-41 settlement | `deposit`/`release`/`refund` perform real `TokenClient::transfer`; **transfer-before-state-write ordering** so a failed transfer never corrupts accounting |
 | Arbiter dispute path | `dispute` (buyer or seller) and `resolve` (arbiter, releases or refunds) — makes the stored `arbiter` reachable and `Disputed` live |
 | Events | `escrow_created`, `deposited`, `released`, `refunded`, `disputed`, `resolved`, `cancelled` |
 | Storage | Per-escrow **persistent** entries; instance storage only for the id counter; explicit TTL extension on every write |
-| Property tests | `deposited == released + refunded` invariant at every reachable state; monotonicity across call orderings; negative auth tests re-landed on SDK 27 |
+| Property tests | `deposited == released + refunded` invariant at every reachable state; monotonicity across call orderings; negative-auth tests retained on the current SDK |
 | Honesty docs | `KNOWN-LIMITATIONS.md` and `FEATURE-STATUS.md` updated to the new state |
 
 **Explicitly out of Phase 1:** the other five contracts' settlement work,
@@ -72,7 +72,7 @@ plan management, multi-recipient royalties, audit.
 | Testnet deployment | Escrow deployed to Stellar testnet; **contract ID + WASM hash published in the README** |
 | Receipts | A scripted `create → deposit → release` round on testnet with transaction hashes in the README (Sub Rosa's "proof at a glance" pattern) |
 | Runnable demo | One copy-paste script: `make demo` performs a full lifecycle against the deployed contract |
-| Real TS bindings | Generated bindings for the escrow contract only; the stub SDK is replaced or deleted |
+| Real TS bindings | Generated bindings for escrow plus vesting, multi-sig, subscriptions, marketplace royalties, and DAO governance; the stub SDK is replaced or deleted |
 | Demo walkthrough | Short recorded or scripted walkthrough a reviewer can follow in five minutes |
 
 ## Phase 3 — Resubmit (≈2–3 days)
@@ -86,8 +86,8 @@ plan management, multi-recipient royalties, audit.
 ### The ask (tranche 1)
 
 - **Scope:** the Phase 1 + Phase 2 deliverables, nothing more.
-- **Success criteria:** deployed escrow holds and moves a real testnet
-  USDC round-trip end-to-end; property suite proves the conservation
+- **Success criteria:** deployed escrow holds and moves a real SEP-41
+  testnet token round-trip end-to-end; property suite proves the conservation
   invariant; receipts public.
 - **Roadmap after:** tranche 2 = vesting settlement + TTL keeper; tranche
   3 = multi-sig execution dispatch; each scoped the same way.

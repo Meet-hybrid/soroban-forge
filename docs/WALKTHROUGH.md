@@ -1,7 +1,8 @@
 # Reviewer walkthrough: reproducible escrow smoke flow
 
-This walkthrough verifies the escrow WASM, a live `create_escrow -> deposit ->
-release` flow, lifecycle events, terminal status, and token conservation.
+This walkthrough verifies the escrow WASM deployed on testnet, a live
+`create_escrow -> deposit -> release` flow, lifecycle events, terminal status,
+and token conservation.
 The live path uses caller-provided Stellar CLI identities. It never creates,
 funds, prints, or commits private keys.
 
@@ -9,9 +10,9 @@ funds, prints, or commits private keys.
 
 Install the following on a clean machine:
 
-- Rust stable through [rustup](https://rustup.rs)
-- The workspace target: `rustup target add wasm32v1-none`
-- Stellar CLI v28 or newer: `cargo install stellar-cli --locked`
+- Stellar CLI v25.2.0 or newer: `cargo install --locked stellar-cli`
+- Rust through [rustup](https://rustup.rs), only to reproduce the artifact from
+  source (the workspace pins 1.96.0)
 - Bash, Python 3, and curl
 - `sha256sum` or `shasum -a 256`
 
@@ -24,32 +25,33 @@ python3 --version
 bash --version
 ```
 
-## Step 1: validate the harness without credentials
+## Step 1: verify the deployed WASM without credentials
+
+This fetches the WASM deployed at the proof contract and checks it against
+[`docs/testnet/escrow-wasm.sha256`](testnet/escrow-wasm.sha256). It is
+read-only: it needs the Stellar CLI and network access, but no identities or
+funds.
 
 ```bash
 bash scripts/demo-testnet.sh --help
-bash scripts/demo-testnet.sh --dry-run \
+bash scripts/demo-testnet.sh --verify-deployed \
   --receipt artifacts/escrow-smoke-receipt.json
 ```
 
 Expected output includes:
 
 ```text
-dry-run: no Stellar CLI, credentials, funding, or network calls were used
-planned flow: build -> sha256 verify -> create_escrow -> deposit -> release
-planned events: escrow_created, deposited, released
+contract: CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB
+verified sha256: ccbb6603cce6d194407b822df110c91324939cea92ba21937a6d9f1e2c9e48b9 (18041 bytes)
 ```
 
-The receipt is ignored by git and has this shape:
+The receipt is ignored by git and records `"status": "verified_deployed"` with
+the contract ID and both hashes. To reproduce those bytes from source, see
+"Reproduce the deployed artifact from source" in the [README](../README.md).
 
-```json
-{
-  "schema": "soroban-forge/escrow-smoke@1",
-  "status": "dry_run",
-  "transactions": { "create": "", "deposit": "", "release": "" },
-  "events": ["escrow_created", "deposited", "released"]
-}
-```
+`--dry-run` needs no Stellar CLI or network, but only prints the planned flow
+and writes a template receipt (`"status": "dry_run"`, empty hashes). It
+verifies nothing.
 
 ## Step 2: configure caller-provided testnet identities
 
@@ -78,16 +80,9 @@ AMOUNT=500 \
   --receipt artifacts/escrow-smoke-receipt.json
 ```
 
-The script first runs the locked build:
-
-```bash
-cargo build --locked --release \
-  --target wasm32v1-none \
-  --package soroban-forge-escrow
-```
-
-It verifies the resulting artifact against
-[`docs/testnet/escrow-wasm.sha256`](testnet/escrow-wasm.sha256), then runs:
+The script first fetches the WASM deployed at `ESCROW_ID` and verifies it
+against [`docs/testnet/escrow-wasm.sha256`](testnet/escrow-wasm.sha256), so the
+contract being exercised is provably the recorded artifact. It then runs:
 
 ```text
 create_escrow -> deposit -> release
@@ -102,7 +97,7 @@ conservation check is invalid.
 A successful receipt records:
 
 - The network, escrow contract ID, and token ID.
-- The built WASM path and SHA-256 values.
+- The fetched WASM path and SHA-256 values.
 - The create, deposit, and release transaction hashes.
 - The expected lifecycle event names and receipt verification status.
 - Final buyer, seller, and contract balances.

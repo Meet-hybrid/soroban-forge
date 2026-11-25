@@ -331,7 +331,7 @@ fn deposit_rejects_token_authorization_over_a_different_amount() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn release_rejects_buyer_signature() {
+fn release_rejects_seller_signature() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
@@ -339,10 +339,10 @@ fn release_rejects_buyer_signature() {
     let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
     client.deposit(&id);
 
-    // Only the seller confirms delivery. The buyer arming their own
-    // signature must be rejected at the entrypoint.
+    // A direct release is the buyer's approval. The seller arming their
+    // own signature must be rejected: sellers go through request_release.
     env.mock_auths(&[MockAuth {
-        address: buyer,
+        address: seller,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "release",
@@ -359,10 +359,10 @@ fn release_rejects_buyer_signature() {
 }
 
 #[test]
-fn release_completes_on_seller_signature_alone() {
+fn release_completes_on_buyer_signature_alone() {
     // The negative of the tree assertions below: contract self-auth is
-    // implicit, so the seller's entrypoint signature is the *only*
-    // signature a release needs. A seller signature must be sufficient —
+    // implicit, so the buyer's entrypoint signature is the *only*
+    // signature a release needs. A buyer signature must be sufficient —
     // and it must pay the seller, not the buyer.
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let buyer = &accounts.user1;
@@ -372,7 +372,7 @@ fn release_completes_on_seller_signature_alone() {
     client.deposit(&id);
 
     env.mock_auths(&[MockAuth {
-        address: seller,
+        address: buyer,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "release",
@@ -388,7 +388,7 @@ fn release_completes_on_seller_signature_alone() {
 }
 
 #[test]
-fn release_authorization_tree_is_seller_over_transfer() {
+fn release_authorization_tree_is_buyer_over_transfer() {
     let (env, token, _tc, contract_id, client, accounts) = setup!();
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
@@ -401,7 +401,7 @@ fn release_authorization_tree_is_seller_over_transfer() {
     assert_eq!(
         env.auths(),
         [(
-            seller.clone(),
+            buyer.clone(),
             AuthorizedInvocation {
                 function: AuthorizedFunction::Contract((
                     contract_id.clone(),
@@ -409,7 +409,7 @@ fn release_authorization_tree_is_seller_over_transfer() {
                     (id,).into_val(&env),
                 )),
                 // Contract self-auth is implicit and NOT recorded; the
-                // tree is the seller's entrypoint frame only.
+                // tree is the buyer's entrypoint frame only.
                 sub_invocations: std::vec![],
             },
         )],
@@ -717,7 +717,7 @@ fn blank_envelope_aborts_create_and_writes_nothing() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn release_partial_rejects_buyer_signature() {
+fn release_partial_rejects_seller_signature() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
@@ -725,9 +725,9 @@ fn release_partial_rejects_buyer_signature() {
     let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
     client.deposit(&id);
 
-    // Buyer attempts to collect a partial release — must be rejected.
+    // The seller paying themselves a partial release directly must be rejected.
     env.mock_auths(&[MockAuth {
-        address: buyer,
+        address: seller,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "release_partial",
@@ -744,7 +744,7 @@ fn release_partial_rejects_buyer_signature() {
 }
 
 #[test]
-fn release_partial_accepts_seller_signature() {
+fn release_partial_accepts_buyer_signature() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
@@ -752,9 +752,9 @@ fn release_partial_accepts_seller_signature() {
     let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
     client.deposit(&id);
 
-    // Positive control: seller's signature is sufficient.
+    // Positive control: the buyer's signature is sufficient.
     env.mock_auths(&[MockAuth {
-        address: seller,
+        address: buyer,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "release_partial",
@@ -821,8 +821,8 @@ fn release_partial_rejects_signature_over_different_amount() {
 }
 
 #[test]
-fn release_partial_authorization_tree_is_seller_only() {
-    // Contract self-auth is implicit; the seller's entrypoint frame is the
+fn release_partial_authorization_tree_is_buyer_only() {
+    // Contract self-auth is implicit; the buyer's entrypoint frame is the
     // only entry in env.auths() — same as release and refund.
     let (env, token, _tc, contract_id, client, accounts) = setup!();
     let buyer = &accounts.user1;
@@ -836,7 +836,7 @@ fn release_partial_authorization_tree_is_seller_only() {
     assert_eq!(
         env.auths(),
         [(
-            seller.clone(),
+            buyer.clone(),
             AuthorizedInvocation {
                 function: AuthorizedFunction::Contract((
                     contract_id.clone(),
@@ -918,10 +918,10 @@ fn release_partial_mutation_test_no_auth_aborts() {
         "seller must not have received anything"
     );
 
-    // Re-arm with the correct seller signature to prove the positive path
+    // Re-arm with the correct buyer signature to prove the positive path
     // (and that the escrow itself is intact and can still be used).
     env.mock_auths(&[MockAuth {
-        address: seller,
+        address: buyer,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "release_partial",
@@ -932,7 +932,7 @@ fn release_partial_mutation_test_no_auth_aborts() {
     client
         .try_release_partial(&id, &(AMOUNT / 2))
         .expect("outer ok")
-        .expect("seller auth must succeed after auth is restored");
+        .expect("buyer auth must succeed after auth is restored");
     assert_eq!(tc.balance(seller), AMOUNT / 2);
 }
 
@@ -1106,7 +1106,7 @@ fn deposit_basket_rejects_missing_leg_authorization_without_partial_custody() {
 }
 
 #[test]
-fn release_basket_rejects_buyer_signature() {
+fn release_basket_rejects_seller_signature() {
     let (env, token_a, token_b, tc_a, tc_b, contract_id, client, accounts) = setup_basket!();
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
@@ -1116,7 +1116,7 @@ fn release_basket_rejects_buyer_signature() {
     client.deposit_basket(&id);
 
     env.mock_auths(&[MockAuth {
-        address: buyer,
+        address: seller,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "release_basket",
@@ -1133,8 +1133,8 @@ fn release_basket_rejects_buyer_signature() {
 }
 
 #[test]
-fn release_basket_authorization_tree_is_seller_only() {
-    // Same shape as the single-token release: the seller's entrypoint frame
+fn release_basket_authorization_tree_is_buyer_only() {
+    // Same shape as the single-token release: the buyer's entrypoint frame
     // is the only entry, because contract self-auth for the outgoing payouts
     // is implicit and not recorded.
     let (env, token_a, token_b, _tc_a, _tc_b, contract_id, client, accounts) = setup_basket!();
@@ -1150,7 +1150,7 @@ fn release_basket_authorization_tree_is_seller_only() {
     assert_eq!(
         env.auths(),
         [(
-            seller.clone(),
+            buyer.clone(),
             AuthorizedInvocation {
                 function: AuthorizedFunction::Contract((
                     contract_id.clone(),
@@ -1165,7 +1165,7 @@ fn release_basket_authorization_tree_is_seller_only() {
 }
 
 #[test]
-fn release_partial_basket_rejects_non_seller() {
+fn release_partial_basket_rejects_non_buyer() {
     let (env, token_a, token_b, tc_a, tc_b, contract_id, client, accounts) = setup_basket!();
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
@@ -1175,7 +1175,7 @@ fn release_partial_basket_rejects_non_seller() {
     client.deposit_basket(&id);
 
     env.mock_auths(&[MockAuth {
-        address: buyer,
+        address: seller,
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "release_partial_basket",

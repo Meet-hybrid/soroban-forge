@@ -13,23 +13,23 @@ access.
 
 Contract errors returned by the client use the shared `ForgeError` codes:
 
-| Code | Variant | Meaning |
-|---:|---|---|
-| 1 | `Unauthorized` | The caller is not permitted to perform this action. |
-| 2 | `NotFound` | The requested entity does not exist. |
-| 3 | `InvalidInput` | One or more arguments failed validation. |
-| 4 | `InsufficientFunds` | The contract does not hold enough balance to satisfy the operation. |
-| 5 | `AlreadyInitialized` | The entity was already initialized; re-initialization is rejected. |
-| 6 | `NotInitialized` | The entity was expected to be initialized but was not. |
-| 7 | `DeadlineReached` | The operation was attempted after its deadline elapsed. |
-| 8 | `InsufficientAllowance` | A required token allowance was lower than the amount being spent. |
-| 9 | `ArithmeticOverflow` | An arithmetic operation overflowed. |
-| 10 | `Custom` | A contract-specific error that does not map to the other categories. |
-| 11 | `TokenTransferFailed` | A SEP-41 token invocation failed; the raw token error is bucketed, with the cause available in transaction diagnostic events. |
-| 12 | `ContractInvocationFailed` | A cross-contract invocation failed; the invoking transaction remains un-executed. |
-| 13 | `WithdrawalLimitExceeded` | The withdrawal would exceed the token's configured rolling-window limit. |
-| 14 | `SubscriptionPastDue` | The subscription is lapsed; a catch-up charge must restore it to `Active` before the operation can proceed. |
-| 15 | `ProposerCooldown` | The proposer reached the maximum concurrent active proposals or is within the cooldown window. |
+| Code | Variant                    | Meaning                                                                                                                       |
+| ---: | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+|    1 | `Unauthorized`             | The caller is not permitted to perform this action.                                                                           |
+|    2 | `NotFound`                 | The requested entity does not exist.                                                                                          |
+|    3 | `InvalidInput`             | One or more arguments failed validation.                                                                                      |
+|    4 | `InsufficientFunds`        | The contract does not hold enough balance to satisfy the operation.                                                           |
+|    5 | `AlreadyInitialized`       | The entity was already initialized; re-initialization is rejected.                                                            |
+|    6 | `NotInitialized`           | The entity was expected to be initialized but was not.                                                                        |
+|    7 | `DeadlineReached`          | The operation was attempted after its deadline elapsed.                                                                       |
+|    8 | `InsufficientAllowance`    | A required token allowance was lower than the amount being spent.                                                             |
+|    9 | `ArithmeticOverflow`       | An arithmetic operation overflowed.                                                                                           |
+|   10 | `Custom`                   | A contract-specific error that does not map to the other categories.                                                          |
+|   11 | `TokenTransferFailed`      | A SEP-41 token invocation failed; the raw token error is bucketed, with the cause available in transaction diagnostic events. |
+|   12 | `ContractInvocationFailed` | A cross-contract invocation failed; the invoking transaction remains un-executed.                                             |
+|   13 | `WithdrawalLimitExceeded`  | The withdrawal would exceed the token's configured rolling-window limit.                                                      |
+|   14 | `SubscriptionPastDue`      | The subscription is lapsed; a catch-up charge must restore it to `Active` before the operation can proceed.                   |
+|   15 | `ProposerCooldown`         | The proposer reached the maximum concurrent active proposals or is within the cooldown window.                                |
 
 The canonical error list is maintained in [`crates/shared-utils/src/errors.rs`](../../crates/shared-utils/src/errors.rs); update this table when that definition changes.
 
@@ -47,7 +47,7 @@ Compile the TypeScript source to `dist/`:
 npm run build
 ```
 
-The compiled output is what consumers import.  The `dist/` directory is
+The compiled output is what consumers import. The `dist/` directory is
 published; the `src/` source is authoritative.
 
 ## Usage
@@ -99,6 +99,86 @@ Signers/wallets are supplied per call via `MethodOptions` (`sign`, `simulate`,
 etc.). See the
 [stellar-sdk contract client docs](https://stellar.github.io/js-stellar-sdk/).
 
+### Decode escrow simulation results
+
+For local debugging and offline verification, the package exports a narrow
+helper that decodes the generated escrow result payloads into a readable shape:
+
+```ts
+import { decodeEscrowResult } from "@soroban-forge/escrow-client";
+
+const successful = decodeEscrowResult<{ tag: "Funded"; values: null }>({
+  ok: true,
+  value: { tag: "Funded", values: null },
+});
+
+const failed = decodeEscrowResult<void>({
+  ok: false,
+  error: { code: 3, message: "InvalidInput" },
+});
+```
+
+The helper accepts the generated `Result<T>` form used by the escrow client and
+returns either `{ ok: true, value }` for successful outcomes or a normalized
+failure object with `code`, `message`, and the original raw payload. Malformed
+input falls back to a safe error object instead of throwing.
+
+## Typed event decoders
+
+`indexer.ts` decodes event topics and values generically. The typed decoders
+turn a raw event (the base64 XDR `topic` array and `value` from `getEvents`)
+into a discriminated union keyed by event name, for all six contracts:
+
+```ts
+import { decodeEscrowEvent } from "@soroban-forge/escrow-client";
+
+const result = decodeEscrowEvent({ topic: record.topic, value: record.value });
+if (result.ok) {
+  switch (result.event.event) {
+    case "EscrowCreated":
+      console.log(result.event.fields.escrow_id, result.event.fields.data);
+      break;
+    case "DeadlineExtended":
+      console.log(result.event.fields.new_deadline);
+      break;
+  }
+} else {
+  console.warn(result.error.code, result.error.message);
+}
+```
+
+| Export | Purpose |
+| ------ | ------- |
+| `decodeEscrowEvent`, `decodeVestingEvent`, `decodeMultisigEvent`, `decodeSubscriptionEvent`, `decodeMarketplaceEvent`, `decodeDaoEvent` | Decode one raw event for that contract. |
+| `decodeContractEvent(contract, raw)` | Same, selecting the contract by name (`"escrow"`, `"vesting"`, `"multisig"`, `"subscription"`, `"marketplace"`, `"dao"`). |
+| `EscrowContractEvent`, `VestingContractEvent`, `MultisigContractEvent`, `SubscriptionContractEvent`, `MarketplaceContractEvent`, `DaoContractEvent`, `ForgeContractEvent` | Discriminated unions. Narrow on `contract` and `event`; `fields` is typed per event. |
+| `EventDecodeResult`, `EventDecodeError` | `{ ok: true, event }` or `{ ok: false, error }`. |
+| `FORGE_EVENT_SPECS`, `eventTopicSymbol` | The event layouts and the `topic[0]` symbol for an event name. |
+| `decodeIndexedEvents` | Decode indexer records using a contract ID to contract map. |
+
+Decoded values use the same representations as the generated clients: `u64`
+and `i128` are `bigint`, `u32` is `number`, addresses and symbols are strings.
+User-defined structs, enums and vectors are returned as plain decoded values.
+
+Decoding never throws. Failures carry a `code`: `invalid_input`,
+`malformed_topic`, `unknown_event` (for example a token `transfer` published
+next to a contract event), `malformed_value`, `missing_field` or
+`invalid_field`. Extra fields added to an event later are ignored.
+
+To use the decoders from the indexer, map contract IDs to contract names:
+
+```ts
+const indexer = createIndexer({
+  events,
+  decoders: { [escrowContractId]: "escrow" },
+});
+indexer.decoded(); // [{ record, result }]; result is null without a decoder
+```
+
+The event layouts are checked against `src/abi-fixtures/*.json` by
+`src/tests/event-decoders.test.ts`, so they cannot drift from the generated
+clients without a failing test.
+
 ## Generate all clients
 
 From this directory, run:
@@ -110,23 +190,35 @@ npm run generate
 The script builds all six contract crates for `wasm32v1-none` with Cargo's
 locked release configuration, then generates typed bindings from each WASM.
 The unified package modules are written to `src/clients/`; the five standalone
-client packages are regenerated alongside them. Contract mappings and output
-names are defined in `scripts/generate.mjs`. Generation requires stable Rust,
-the `wasm32v1-none` target, and the Stellar CLI; it does not require network
-access.
+client packages are regenerated alongside them. It also writes normalized ABI
+fixtures for all six clients to `src/abi-fixtures/`, covering function
+signatures, events, user-defined types, and error codes. Contract mappings and
+output names are defined in `scripts/generate.mjs`.
 
-| Contract | Unified package export | Standalone package |
-| --- | --- | --- |
-| Escrow | `escrow` | `@soroban-forge/escrow-client` |
-| Vesting | `vesting` | `@soroban-forge/vesting-client` |
-| Multi-Sig Wallet | `multisig` | `@soroban-forge/multi-sig-wallet-client` |
-| DAO Governance | `dao` | `@soroban-forge/dao-governance-client` |
-| Subscription Payments | `subscription` | `@soroban-forge/subscription-payments-client` |
-| Marketplace Royalties | `marketplace` | `@soroban-forge/marketplace-royalties-client` |
+To verify that generated TypeScript output and checked-in ABI fixtures match
+the current contract artifacts, run:
+
+```bash
+npm run verify:generated
+```
+
+This regenerates the clients and fixtures, then fails with generated file
+differences if the checked-in output is stale. Generation requires stable Rust,
+the `wasm32v1-none` target, the Stellar CLI, and SDK dependencies installed by
+`npm ci`; it does not require network access after setup.
+
+| Contract              | Unified package export | Standalone package                            |
+| --------------------- | ---------------------- | --------------------------------------------- |
+| Escrow                | `escrow`               | `@soroban-forge/escrow-client`                |
+| Vesting               | `vesting`              | `@soroban-forge/vesting-client`               |
+| Multi-Sig Wallet      | `multisig`             | `@soroban-forge/multi-sig-wallet-client`      |
+| DAO Governance        | `dao`                  | `@soroban-forge/dao-governance-client`        |
+| Subscription Payments | `subscription`         | `@soroban-forge/subscription-payments-client` |
+| Marketplace Royalties | `marketplace`          | `@soroban-forge/marketplace-royalties-client` |
 
 ## Offline tests
 
-The test suite runs completely offline.  It does **not** require:
+The test suite runs completely offline. It does **not** require:
 
 - network access
 - private keys
@@ -140,7 +232,14 @@ npm test
 ```
 
 The test script compiles TypeScript first (`tsconfig.test.json` → `dist-test/`)
-and then runs the compiled JavaScript with Node's built-in test runner.
+and then runs the compiled JavaScript with Node's built-in test runner. In
+addition to escrow and ABI compatibility coverage, `vesting-client.test.ts`
+smoke-tests the generated vesting client's `claimable` simulation/read path
+and verifies that a failed `create_schedule` simulation surfaces the RPC error.
+Both cases use deterministic local RPC fixtures and do not contact testnet. ABI
+compatibility tests validate every generated client's functions, parameter and
+return types, events, enums, errors, and public type exports against its
+checked-in fixture. The existing escrow suite remains enabled.
 
 ## Type-check
 
@@ -155,7 +254,7 @@ npm run typecheck
 A separate, **opt-in** script performs one live read-only call (`get_status`)
 against the deployed testnet contract to confirm end-to-end connectivity.
 
-This is **not** part of `npm test`.  Run it only when you have network access
+This is **not** part of `npm test`. Run it only when you have network access
 and a valid escrow ID:
 
 ```bash
@@ -182,7 +281,7 @@ suitable as a post-deployment smoke check in a manual release workflow.
 
 ## Provenance
 
-This package replaces the v0.1.0 console-log placeholder SDK.  The contract
+This package replaces the v0.1.0 console-log placeholder SDK. The contract
 itself, its testnet receipt rounds, and the conservation property are
 documented in the [repository README](https://github.com/Meet-hybrid/soroban-forge).
 

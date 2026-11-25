@@ -1,9 +1,13 @@
-use crate::{SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus};
+use crate::{
+    DataKey, SorobanForgeSubscriptionPaymentsClient, SubscriptionPayments, SubscriptionStatus,
+};
+use soroban_forge_shared_utils::ttl::{BUMP_AMOUNT, BUMP_THRESHOLD};
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_forge_test_utils::{advance_ledger_to, entry_ttl};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::xdr::{ContractEventBody, Int128Parts, ScSymbol, ScVal};
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{Address, Env, IntoVal, InvokeError};
 
 const START: u64 = 1_000_000;
 const PERIOD: u64 = 1_000;
@@ -164,7 +168,7 @@ fn prepaid_events_report_exact_amounts_and_resulting_balances() {
     assert_eq!(client.get_subscription(&id).prepaid_balance, Some(0));
 }
 
-fn events_named(
+pub(super) fn events_named(
     env: &Env,
     contract: &Address,
     name: &str,
@@ -185,7 +189,7 @@ fn events_named(
         .collect()
 }
 
-fn data_field(data: &ScVal, field: &str) -> ScVal {
+pub(super) fn data_field(data: &ScVal, field: &str) -> ScVal {
     let ScVal::Map(Some(entries)) = data else {
         panic!("event data is not a map: {data:?}");
     };
@@ -197,7 +201,7 @@ fn data_field(data: &ScVal, field: &str) -> ScVal {
         .unwrap_or_else(|| panic!("event data has no `{field}` field: {data:?}"))
 }
 
-fn sc_i128(value: i128) -> ScVal {
+pub(super) fn sc_i128(value: i128) -> ScVal {
     ScVal::I128(Int128Parts {
         hi: (value >> 64) as i64,
         lo: value as u64,
@@ -223,4 +227,202 @@ fn prepaid_pause_and_resume_shift_due_date_without_debit() {
     assert_eq!(client.charge(&id), AMOUNT);
     assert_eq!(client.get_subscription(&id).prepaid_balance, Some(0));
     assert_eq!(token_client.balance(&subscriber), 10_000 - AMOUNT);
+}
+
+// ------------------------------------------------- provider-side cancellation
+
+#[test]
+fn provider_cancellation_refunds_prepaid_balance_to_subscriber() {
+    let (env, token, subscriber, provider, contract_id, id) = setup();
+    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+    client.deposit(&id, &(AMOUNT + 83));
+    env.ledger().set_timestamp(START + PERIOD);
+    assert_eq!(client.charge(&id), AMOUNT);
+
+    client.cancel_by_provider(&id);
+
+    // Events are read before any other invocation replaces them.
+    let refunds = events_named(&env, &contract_id, "balance_refunded");
+    assert_eq!(refunds.len(), 1);
+    assert_eq!(data_field(&refunds[0].1, "amount"), sc_i128(83));
+    assert_eq!(data_field(&refunds[0].1, "balance_after"), sc_i128(0));
+    assert_eq!(events_named(&env, &contract_id, "cancelled").len(), 1);
+
+    let cancelled = client.get_subscription(&id);
+    assert_eq!(cancelled.status, SubscriptionStatus::Cancelled);
+    assert_eq!(cancelled.prepaid_balance, Some(0));
+    assert_eq!(cancelled.paused_at, None);
+    assert_eq!(token_client.balance(&subscriber), 10_000 - AMOUNT);
+    assert_eq!(token_client.balance(&provider), AMOUNT);
+    assert_eq!(token_client.balance(&contract_id), 0);
+}
+
+#[test]
+fn provider_cancellation_of_paused_subscription_clears_paused_at() {
+    let (env, token, subscriber, _provider, contract_id, id) = setup();
+    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+    client.deposit(&id, &AMOUNT);
+    client.pause(&id);
+    assert_eq!(client.get_subscription(&id).paused_at, Some(START));
+
+    client.cancel_by_provider(&id);
+
+    let cancelled = client.get_subscription(&id);
+    assert_eq!(cancelled.status, SubscriptionStatus::Cancelled);
+    assert_eq!(cancelled.paused_at, None);
+    assert_eq!(cancelled.prepaid_balance, Some(0));
+    assert_eq!(token_client.balance(&subscriber), 10_000);
+    assert_eq!(token_client.balance(&contract_id), 0);
+    // A cancelled subscription cannot be resumed or charged again.
+    assert_eq!(
+        client.try_resume(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+}
+
+#[test]
+fn provider_cancellation_of_past_due_subscription_refunds_the_shortfall_balance() {
+    let (env, token, subscriber, provider, contract_id, id) = setup();
+    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+    client.deposit(&id, &(AMOUNT - 1));
+    env.ledger().set_timestamp(START + PERIOD);
+    assert_eq!(client.charge(&id), 0);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::PastDue
+    );
+
+    client.cancel_by_provider(&id);
+
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Cancelled
+    );
+    assert_eq!(client.get_subscription(&id).prepaid_balance, Some(0));
+    assert_eq!(token_client.balance(&subscriber), 10_000);
+    assert_eq!(token_client.balance(&provider), 0);
+    assert_eq!(token_client.balance(&contract_id), 0);
+}
+
+#[test]
+fn provider_cancellation_with_zero_balance_moves_no_tokens() {
+    let (env, token, subscriber, _provider, contract_id, id) = setup();
+    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+    client.deposit(&id, &AMOUNT);
+    env.ledger().set_timestamp(START + PERIOD);
+    assert_eq!(client.charge(&id), AMOUNT);
+    assert_eq!(client.get_subscription(&id).prepaid_balance, Some(0));
+
+    client.cancel_by_provider(&id);
+
+    assert!(events_named(&env, &contract_id, "balance_refunded").is_empty());
+    assert_eq!(events_named(&env, &contract_id, "cancelled").len(), 1);
+    let cancelled = client.get_subscription(&id);
+    assert_eq!(cancelled.status, SubscriptionStatus::Cancelled);
+    assert_eq!(cancelled.prepaid_balance, Some(0));
+    assert_eq!(token_client.balance(&subscriber), 10_000 - AMOUNT);
+    assert_eq!(token_client.balance(&contract_id), 0);
+}
+
+#[test]
+fn provider_cancellation_in_pull_mode_keeps_mode_and_moves_no_tokens() {
+    let (env, token, subscriber, _provider, contract_id, id) = setup();
+    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+
+    client.cancel_by_provider(&id);
+
+    assert!(events_named(&env, &contract_id, "balance_refunded").is_empty());
+    assert_eq!(events_named(&env, &contract_id, "cancelled").len(), 1);
+    let cancelled = client.get_subscription(&id);
+    assert_eq!(cancelled.status, SubscriptionStatus::Cancelled);
+    assert_eq!(cancelled.prepaid_balance, None);
+    assert_eq!(token_client.balance(&subscriber), 10_000);
+}
+
+#[test]
+fn provider_cancellation_rejects_cancelled_and_missing_subscriptions() {
+    let (env, token, subscriber, _provider, contract_id, id) = setup();
+    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+    client.deposit(&id, &AMOUNT);
+    client.cancel(&id);
+    let before = client.get_subscription(&id);
+
+    assert_eq!(
+        client.try_cancel_by_provider(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(client.get_subscription(&id), before);
+    assert_eq!(token_client.balance(&subscriber), 10_000);
+    assert_eq!(
+        client
+            .try_cancel_by_provider(&(id + 1))
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::NotFound
+    );
+}
+
+#[test]
+fn provider_cancellation_requires_the_provider_signature() {
+    let (env, token, subscriber, provider, contract_id, id) = setup();
+    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+    client.deposit(&id, &AMOUNT);
+    let before = client.get_subscription(&id);
+
+    for signer in [&subscriber, &Address::generate(&env)] {
+        env.mock_auths(&[MockAuth {
+            address: signer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "cancel_by_provider",
+                args: (id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(matches!(
+            client.try_cancel_by_provider(&id),
+            Err(Err(InvokeError::Abort))
+        ));
+        assert_eq!(client.get_subscription(&id), before);
+        assert_eq!(token_client.balance(&contract_id), AMOUNT);
+    }
+
+    env.mock_auths(&[MockAuth {
+        address: &provider,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel_by_provider",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.cancel_by_provider(&id);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Cancelled
+    );
+    assert_eq!(token_client.balance(&subscriber), 10_000);
+    assert_eq!(token_client.balance(&contract_id), 0);
+}
+
+#[test]
+fn provider_cancellation_extends_the_subscription_ttl() {
+    let (env, _token, _subscriber, _provider, contract_id, id) = setup();
+    let client = SorobanForgeSubscriptionPaymentsClient::new(&env, &contract_id);
+    let key = DataKey::Subscription(id);
+    let sequence = env.ledger().sequence();
+    advance_ledger_to(&env, sequence + BUMP_AMOUNT - BUMP_THRESHOLD + 1, START);
+    let before = entry_ttl(&env, &contract_id, &key);
+    assert!(before < BUMP_THRESHOLD);
+
+    client.cancel_by_provider(&id);
+
+    assert_eq!(entry_ttl(&env, &contract_id, &key), BUMP_AMOUNT);
 }

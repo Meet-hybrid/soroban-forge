@@ -1,4 +1,6 @@
 use clap::Args;
+use clap::Subcommand;
+use clap::ValueEnum;
 use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
@@ -10,7 +12,7 @@ pub struct BuildArgs {
     pub release: bool,
     #[arg(short, long, default_value_t = false)]
     pub all_targets: bool,
-    /// Build release WASM for Soroban contracts using wasm32v1-none.
+    /// Build release WASM for the contract crates with `stellar contract build` (stellar-cli v25.2.0+), as CI does.
     #[arg(long, default_value_t = false)]
     pub wasm: bool,
     /// Check built WASM artifacts against the 150,000-byte contract budget (implies --wasm).
@@ -34,10 +36,41 @@ pub struct TestArgs {
 #[derive(Args, Debug, Clone)]
 pub struct DeployArgs {
     pub wasm: String,
-    #[arg(short, long, default_value = "testnet")]
-    pub network: String,
+    #[arg(short, long)]
+    pub network: Option<String>,
+    #[arg(long)]
+    pub network_profile: Option<String>,
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+    #[arg(long)]
+    pub network_passphrase: Option<String>,
     #[arg(short, long)]
     pub source: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DeployCheckArgs {
+    /// Deployment manifest emitted by `scripts/deploy-testnet.sh`.
+    #[arg(long, default_value = "artifacts/testnet-deployment-manifest.json")]
+    pub manifest: PathBuf,
+    /// Contract key to check; repeat or comma-separate to select several.
+    #[arg(long, value_delimiter = ',')]
+    pub contract: Vec<String>,
+    /// Network override; defaults to the manifest network, then `testnet`.
+    #[arg(long)]
+    pub network: Option<String>,
+    /// Public source account for the simulation-only read check.
+    ///
+    /// The all-zero account is used by default; `--send no` never signs, so
+    /// no secret key is involved.
+    #[arg(
+        long = "source-account",
+        default_value = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+    )]
+    pub source: String,
+    /// Emit a machine-readable JSON summary.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -67,6 +100,9 @@ pub struct VerifyArgs {
     /// Provenance manifest to validate; defaults to `provenance-manifest.json`.
     #[arg(long, default_value = "provenance-manifest.json")]
     pub manifest: String,
+    /// Print a JSON summary of manifest verification to stdout.
+    #[arg(long, conflicts_with_all = ["wasm", "expected"])]
+    pub json: bool,
     /// Crate to rebuild; inferred from the WASM file name when omitted.
     #[arg(short, long)]
     pub package: Option<String>,
@@ -83,12 +119,79 @@ pub struct InvokeArgs {
     /// Function arguments (key=value format)
     #[arg(long = "arg", action = clap::ArgAction::Append)]
     pub args: Vec<String>,
-    /// Network to use
-    #[arg(long, default_value = "testnet")]
-    pub network: String,
+    /// Network name to use
+    #[arg(long)]
+    pub network: Option<String>,
+    #[arg(long)]
+    pub network_profile: Option<String>,
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+    #[arg(long)]
+    pub network_passphrase: Option<String>,
     /// Source account
     #[arg(long)]
     pub source: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct KeysArgs {
+    #[command(subcommand)]
+    pub command: KeysCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum KeysCommand {
+    /// Generate a random Ed25519 keypair.
+    Generate {
+        /// Emit credentials as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Decode and inspect a Stellar public key, contract id, or secret seed.
+    Inspect {
+        /// A G..., C..., or S... StrKey.
+        address_or_key: String,
+    },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProfileArgs {
+    /// Contract address or alias.
+    #[arg(long)]
+    pub contract: String,
+    /// Function name to simulate.
+    #[arg(long)]
+    pub function: String,
+    /// Function arguments (key=value format).
+    #[arg(long = "arg", action = clap::ArgAction::Append)]
+    pub args: Vec<String>,
+    /// Network name to use.
+    #[arg(long)]
+    pub network: Option<String>,
+    #[arg(long)]
+    pub network_profile: Option<String>,
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+    #[arg(long)]
+    pub network_passphrase: Option<String>,
+    /// Source account used for simulation when the network requires one.
+    #[arg(long)]
+    pub source: Option<String>,
+    /// Emit a machine-readable JSON report.
+    #[arg(long)]
+    pub json: bool,
+    /// Maximum allowed CPU instructions.
+    #[arg(long, default_value_t = 100_000_000)]
+    pub max_instructions: u64,
+    /// Maximum allowed metered memory bytes.
+    #[arg(long, default_value_t = 40_000_000)]
+    pub max_memory_bytes: u64,
+    /// Maximum allowed ledger read entries.
+    #[arg(long, default_value_t = 200)]
+    pub max_read_entries: u64,
+    /// Maximum allowed ledger write entries.
+    #[arg(long, default_value_t = 100)]
+    pub max_write_entries: u64,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -102,27 +205,67 @@ pub struct EventsArgs {
     /// Event type filter
     #[arg(long = "type")]
     pub event_type: Option<String>,
-    /// Network to use
-    #[arg(long, default_value = "testnet")]
-    pub network: String,
+    /// Event topic name filter
+    #[arg(long)]
+    pub topic: Option<String>,
+    /// Network name to use
+    #[arg(long)]
+    pub network: Option<String>,
+    #[arg(long)]
+    pub network_profile: Option<String>,
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+    #[arg(long)]
+    pub network_passphrase: Option<String>,
+    /// Follow new events continuously (alias: --follow)
+    #[arg(long, alias = "follow")]
+    pub stream: bool,
+    /// Output format
+    #[arg(long, value_enum, default_value = "pretty")]
+    pub format: EventsFormat,
+    /// Emit one JSON object per event (deprecated; use --format jsonl)
+    #[arg(long)]
+    pub jsonl: bool,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EventsFormat {
+    #[default]
+    Pretty,
+    Jsonl,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct InspectArgs {
-    /// Contract address or alias.
-    pub contract: String,
+    /// Contract address or alias to inspect on-chain. Optional when using the local dry-run check.
+    pub contract: Option<String>,
     /// Specific DataKey entries to inspect (comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub keys: Vec<String>,
     /// Output as JSON for programmatic use.
     #[arg(long, default_value_t = false)]
     pub json: bool,
-    /// Network to use.
-    #[arg(long, default_value = "testnet")]
-    pub network: String,
+    /// Network name to use.
+    #[arg(long)]
+    pub network: Option<String>,
+    #[arg(long)]
+    pub network_profile: Option<String>,
+    #[arg(long)]
+    pub rpc_url: Option<String>,
+    #[arg(long)]
+    pub network_passphrase: Option<String>,
     /// Source account.
     #[arg(long)]
     pub source: Option<String>,
+    /// Local WASM artifact to inspect without network access or signing.
+    #[arg(long, value_name = "PATH")]
+    pub wasm: Option<std::path::PathBuf>,
+    /// Expected SHA-256 for a dry-run artifact comparison.
+    #[arg(long)]
+    pub expected: Option<String>,
+    /// Perform a credential-free local dry-run artifact inspection.
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -130,6 +273,71 @@ pub struct DoctorArgs {
     /// Optional WASM artifact to validate as a regular, non-empty file.
     #[arg(long, value_name = "PATH")]
     pub wasm: Option<PathBuf>,
+    /// Emit machine-readable JSON diagnostics.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CompareArgs {
+    /// Baseline/local WASM artifact.
+    pub old: PathBuf,
+    /// Candidate/new WASM artifact.
+    pub new: PathBuf,
+    /// Emit a machine-readable JSON report.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct StorageDiffArgs {
+    /// Source WASM artifact (the currently deployed contract).
+    #[arg(long, value_name = "PATH")]
+    pub source: PathBuf,
+    /// Target WASM artifact (the proposed replacement contract).
+    #[arg(long, value_name = "PATH")]
+    pub target: PathBuf,
+    /// Emit a machine-readable JSON report; diagnostics go to stderr.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ValidatePlanArgs {
+    #[arg(
+        value_name = "PLAN_PATH",
+        help = "Path to a transaction-plan JSON or TOML file"
+    )]
+    pub file: Option<PathBuf>,
+    #[arg(
+        short = 'f',
+        long,
+        value_name = "PATH",
+        help = "Path to a transaction-plan JSON or TOML file"
+    )]
+    pub plan: Option<PathBuf>,
+    #[arg(long, help = "Expected target network used to detect mismatches")]
+    pub expected_network: Option<String>,
+    #[arg(long, help = "Network override for the plan being validated")]
+    pub network: Option<String>,
+    #[arg(long, help = "Contract strkey or workspace alias override")]
+    pub contract: Option<String>,
+    #[arg(
+        long,
+        visible_alias = "function",
+        help = "Contract method name override"
+    )]
+    pub method: Option<String>,
+    #[arg(long, help = "Source account override")]
+    pub source: Option<String>,
+    #[arg(
+        long = "arg",
+        action = clap::ArgAction::Append,
+        help = "Typed argument as name=type:value"
+    )]
+    pub args: Vec<String>,
+    #[arg(long, help = "Emit a machine-readable JSON validation report")]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, Clone)]

@@ -14,6 +14,9 @@ fn is_provider_authorized(subscriber, provider) -> bool
 fn charge(subscription_id) -> Result<i128, ForgeError>
 fn deposit(subscription_id, amount) -> Result<i128, ForgeError>
 fn withdraw_balance(subscription_id, amount) -> Result<i128, ForgeError>
+fn configure_auto_topup(subscription_id, trigger_threshold: i128, topup_amount: i128) -> Result<(), ForgeError>
+fn disable_auto_topup(subscription_id) -> Result<(), ForgeError>
+fn get_auto_topup(subscription_id) -> Option<AutoTopup>
 fn charge_catchup(subscription_id, max_periods: u32) -> Result<i128, ForgeError>
 fn pause(subscription_id) -> Result<(), ForgeError>
 fn resume(subscription_id) -> Result<(), ForgeError>
@@ -224,6 +227,27 @@ pull mode remains direct subscriber-to-provider settlement. The subscription
 record gains an optional `prepaid_balance` field; ABI clients must be regenerated
 for this record shape change.
 
+## Prepaid auto-topup
+
+`configure_auto_topup(subscription_id, trigger_threshold, topup_amount)`
+requires the subscriber and authorizes the contract to pull `topup_amount`
+from the subscriber into custody during billing. It validates
+`topup_amount > 0` and `trigger_threshold >= 0`, rejects a `Cancelled`
+subscription, and replaces any earlier setting. `disable_auto_topup` (also
+subscriber-only, idempotent) removes it; `get_auto_topup` reads it.
+
+| Due prepaid `charge` | Token movement | Result |
+|---|---|---|
+| `prepaid_balance < period_amount` or `< trigger_threshold`, top-up succeeds | subscriber → contract `topup_amount`, then contract → provider period amount | `AutoTopupTriggered { amount, balance_after }`, then the normal debit |
+| Topped-up balance still below the period amount | subscriber → contract `topup_amount` only | credited; usual `PastDue` / retry-limit cancellation (which refunds the whole balance) |
+| Top-up rejected (insufficient funds, deauthorized account) | none | nothing written by the top-up; debit if the old balance still covers the period, otherwise `PastDue` exactly as without auto-topup |
+
+At most one top-up runs per charge, and it runs before the debit transfer
+and before the subscription is stored (transfer before state). Pull mode and
+`charge_catchup` (which refuses prepaid subscriptions) never top up. With
+auto-topup, prepaid conservation reads `Σdeposits + Σtop-ups − Σperiod
+debits − Σwithdrawals − Σcancellation refunds == prepaid_balance`.
+
 ## Secondary Indices
 
 Each subscription is indexed in two secondary lists, written on the `subscribe`Jsuccess path:
@@ -255,17 +279,37 @@ of `0` fails with `ForgeError::InvalidInput`.
 
 ## Storage
 
-- `Subscription(id)` — the record for id `u64`. The record carries the
-  lapsed bookkeeping (a due-since timestamp or missed-period counter) alongside
-  the existing fields.
+- `Subscription(id)` — a persistent record for id `u64`. Persistent entries
+  are TTL-managed and are refreshed on writes; `touch_ttl(id)` can refresh an
+  existing record without changing its lifecycle state.
 - `Count` — monotonic subscription id counter.
-- `SubscriberSubscriptions(address)` — subscriber id index.
-- `ProviderSubscriptions(address)` — provider id index.
+- `SubscriberSubscriptions(address)` and `ProviderSubscriptions(address)` —
+  persistent, creation-ordered id indexes used by the paginated enumeration
+  methods. New writes refresh their TTLs.
 - `RenewalPolicy(id)` — separate instance-storage record; the `Subscription`
   wire shape remains unchanged.
-- `Usage(subscription_id, metric)` — the open period's raw unit counter for one
-  metric, stamped with the `last_charged` window it belongs to; removed by the
-  charge that closes the period.
+- `AutoTopup(subscription_id)` — persistent `AutoTopup { trigger_threshold,
+  topup_amount }` record; a separate key, so the `Subscription` wire shape is
+  unchanged.
+- `Usage(subscription_id, metric)` — a persistent open-period raw unit counter
+  for one metric, stamped with the `last_charged` window it belongs to; removed
+  by the charge that closes the period.
+
+### Storage migration and TTL compatibility
+
+Older deployments may contain subscription records and indexes in instance
+storage. Reads first use the persistent shape and then fall back to the legacy
+instance entry, including the pre-`prepaid_balance` record shape. A subsequent
+lifecycle write upgrades that record to the current persistent shape; the
+contract does not silently create a default subscription when an entry is
+missing. Index reads also retain the legacy instance fallback while new index
+writes use persistent storage. This makes the migration incremental and keeps
+pagination deterministic.
+
+`touch_ttl` is an explicit maintenance operation for integrations that want to
+refresh a subscription record ahead of its normal write path. It only extends
+the persistent record's TTL and does not charge, pause, resume, cancel, or
+otherwise change subscription state.
 
 ## Payment Semantics
 
@@ -300,6 +344,7 @@ The contract emits typed on-chain lifecycle events for indexers and off-chain mo
 - `Deposited` (topic: `subscription_id: u64`) — successful prepaid deposit; contains `amount` and `balance_after`.
 - `BalanceDebited` (topic: `subscription_id: u64`) — successful prepaid period settlement; contains the exact `amount` and `balance_after`.
 - `BalanceRefunded` (topic: `subscription_id: u64`) — successful subscriber withdrawal or cancellation refund; contains `amount` and `balance_after`.
+- `AutoTopupTriggered` (topic: `subscription_id: u64`) — a prepaid balance was topped up from the subscriber during `charge`; contains the top-up `amount` and the `balance_after` it, before the period's debit.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
 - `Charged` (topic: `subscription_id: u64`) — emitted on successful billing via `charge` (one event) or `charge_catchup` (one event per settled period). Contains `amount`, `last_charged`, and `next_charge_at`.
 - `Cancelled` (topic: `subscription_id: u64`) — emitted when a subscription is cancelled via `cancel`. Contains `subscriber`.
@@ -417,3 +462,42 @@ struct Plan {
 - `Plan(plan_id: u64)` — the plan record.
 - `PlanCount` — monotonic plan id counter (separate from `Count` used for
   subscriptions).
+
+### Change the recurring price
+
+The subscriber and provider both authorize `change_plan(subscription_id,
+new_amount)` for an active subscription. The new base price must be positive
+and different. The billing timestamp and period length stay fixed. The call
+returns the newly granted credit and emits `PlanChanged` with the subscription
+ID, old price, new price and credit, all amounts in token base units.
+
+Credit is the old base price multiplied by the unused seconds in the current
+period, divided by the period length and rounded down. A change at the start
+credits the full old price. A change at or after the due time credits zero.
+Repricing again before billing can change the next price, but the same unused
+period earns credit only once. A separate persistent key tracks this credit,
+so existing subscription records need no migration.
+
+`quote_period` includes available credit. Each successful charge applies as
+much credit as the bill can absorb and carries any excess into later periods.
+For example, with 90 credit and a price of 30, three due periods can settle
+with zero transferred. The billing timestamp still advances. A failed charge
+preserves the credit. Pull and prepaid charges use the same deduction.
+
+### Preview catch-up
+
+Call `preview_catchup(subscription_id, max_periods)` to quote a successful
+`charge_catchup` at the current ledger time. The same maximum of 32 applies.
+The response reports the token amount payable for the selected periods,
+`prepaid_consumed`, the token amount still overdue after the selected periods,
+and the resulting status. A limit of zero shows all arrears under
+`arrears_remaining`. The preview reads the open period's usage and credits
+without transferring tokens, writing records or extending TTLs.
+
+Catch-up accepts active pull subscriptions. For accepted calls,
+`prepaid_consumed` is zero and the resulting status is active. A prepaid,
+paused, cancelled or past-due subscription returns `InvalidInput` from both
+preview and settlement. A quote assumes that the token transfers will succeed.
+If a later transfer fails, catch-up rolls back the entire call. Repeated
+single-period charges retain earlier successful periods and record a failed
+attempt for the first unpaid one.

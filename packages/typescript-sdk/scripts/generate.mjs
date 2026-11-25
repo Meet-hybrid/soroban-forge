@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { xdr } from "@stellar/stellar-sdk";
 
 const sdkDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const rootDir = resolve(sdkDir, "../..");
@@ -17,6 +18,32 @@ const target = "wasm32v1-none";
 const releaseDir = join(rootDir, "target", target, "release");
 const generatedDir = join(rootDir, "target", "generated-typescript-clients");
 const sdkClientsDir = join(sdkDir, "src", "clients");
+
+const escrowPaginationHelper = `
+
+/**
+ * Automatically pages through participant escrows using a page provider function.
+ * Stops cleanly when next_cursor is null/undefined and preserves on-chain creation order.
+ */
+export async function paginateParticipantEscrows(
+  fetchPage: (cursor: u32, limit: u32) => Promise<ParticipantEscrowsPage>,
+  limit: u32 = 50,
+): Promise<Array<u64>> {
+  const ids: Array<u64> = [];
+  let cursor: u32 | undefined = 0;
+
+  while (cursor !== undefined && cursor !== null) {
+    const page = await fetchPage(cursor, limit);
+    ids.push(...page.ids);
+    if (page.next_cursor === null || page.next_cursor === undefined) {
+      break;
+    }
+    cursor = page.next_cursor;
+  }
+
+  return ids;
+}
+`;
 
 const contracts = [
   {
@@ -64,6 +91,7 @@ function run(command, args, cwd = rootDir) {
   }
 }
 
+<<<<<<< HEAD
 /**
  * Calculate SHA-256 checksum of a file
  */
@@ -122,16 +150,94 @@ function getCargoVersion(crateName) {
   }
   
   throw new Error(`Could not determine version for ${crateName}`);
+=======
+function compareEncoded(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function specEntryName(entry, path) {
+  const kind = entry.switch().name;
+  if (kind === "scSpecEntryFunctionV0") {
+    return entry.functionV0().name().toString();
+  }
+  if (kind === "scSpecEntryUdtStructV0") {
+    return entry.udtStructV0().name().toString();
+  }
+  if (kind === "scSpecEntryUdtEnumV0") {
+    return entry.udtEnumV0().name().toString();
+  }
+  if (kind === "scSpecEntryUdtUnionV0") {
+    return entry.udtUnionV0().name().toString();
+  }
+  if (kind === "scSpecEntryUdtErrorEnumV0") {
+    return entry.udtErrorEnumV0().name().toString();
+  }
+  if (kind === "scSpecEntryEventV0") {
+    return entry.eventV0().name().toString();
+  }
+  throw new Error(`Unsupported generated ContractSpec entry ${kind} in ${path}`);
+}
+
+function specEntryRank(kind, path) {
+  if (
+    kind === "scSpecEntryUdtStructV0" ||
+    kind === "scSpecEntryUdtEnumV0" ||
+    kind === "scSpecEntryUdtUnionV0"
+  ) {
+    return 0;
+  }
+  if (kind === "scSpecEntryFunctionV0") return 1;
+  if (kind === "scSpecEntryEventV0") return 2;
+  if (kind === "scSpecEntryUdtErrorEnumV0") return 3;
+  throw new Error(`Unsupported generated ContractSpec entry ${kind} in ${path}`);
+}
+
+function compareSpecEntries(left, right, path) {
+  return (
+    specEntryRank(left.kind, path) - specEntryRank(right.kind, path) ||
+    compareEncoded(left.name, right.name) ||
+    compareEncoded(left.encoded, right.encoded)
+  );
+}
+
+function canonicalizeSpec(source, path) {
+  const pattern = /new ContractSpec\(\s*\[([\s\S]*?)\]\s*\)/;
+  const match = source.match(pattern);
+  if (!match) {
+    throw new Error(`Unable to find generated ContractSpec in ${path}`);
+  }
+
+  const encodedEntries = [...match[1].matchAll(/"([A-Za-z0-9+/=]+)"/g)].map(
+    ([, encoded]) => encoded,
+  );
+  const remaining = match[1]
+    .replace(/"([A-Za-z0-9+/=]+)"/g, "")
+    .replace(/[\s,]/g, "");
+  if (encodedEntries.length === 0 || remaining.length > 0) {
+    throw new Error(`Unexpected generated ContractSpec format in ${path}`);
+  }
+
+  const entries = encodedEntries.map((encoded) => {
+    const entry = xdr.ScSpecEntry.fromXDR(encoded, "base64");
+    const kind = entry.switch().name;
+    return { encoded, kind, name: specEntryName(entry, path) };
+  });
+  const replacement = `new ContractSpec([ ${entries
+    .sort((left, right) => compareSpecEntries(left, right, path))
+    .map(({ encoded }) => `"${encoded}"`)
+    .join(",\n        ")} ])`;
+  return source.replace(pattern, () => replacement);
+>>>>>>> upstream/develop
 }
 
 console.log(`==> Building contract WASMs for target '${target}'`);
-run("cargo", [
+run("stellar", [
+  "contract",
   "build",
   "--locked",
-  "--release",
-  "--target",
-  target,
-  ...contracts.flatMap(({ crate }) => ["--package", crate]),
+  "--profile",
+  "release",
+  "--optimize=false",
 ]);
 
 mkdirSync(sdkClientsDir, { recursive: true });
@@ -167,21 +273,18 @@ for (const contract of contracts) {
     throw new Error(`Expected generated binding missing: ${generatedSource}`);
   }
 
-  const clientClass = "export class Client extends ContractClient {";
-  const generatedText = readFileSync(generatedSource, "utf8").replace(
-    /[ \t]+(?=\r?$)/gm,
-    "",
+  const generatedText = canonicalizeSpec(
+    readFileSync(generatedSource, "utf8").replace(/[ \t]+(?=\r?$)/gm, ""),
+    generatedSource,
   );
-  if (!generatedText.includes(clientClass)) {
+  if (!generatedText.includes("export class Client extends ContractClient {")) {
     throw new Error(`Expected generated Client class in ${generatedSource}`);
   }
-  writeFileSync(
-    generatedSource,
-    generatedText.replace(
-      clientClass,
-      `export interface Client {\n  readonly spec: ContractSpec;\n  txFromJSON<T = unknown>(json: string): AssembledTransaction<T>;\n}\n${clientClass}`,
-    ),
-  );
+  const finalText =
+    contract.module === "escrow"
+      ? `${generatedText}${escrowPaginationHelper}`
+      : generatedText;
+  writeFileSync(generatedSource, finalText);
   cpSync(generatedSource, join(sdkClientsDir, `${contract.module}.ts`));
 
   // Collect manifest data for this contract
@@ -199,16 +302,23 @@ for (const contract of contracts) {
   };
 
   if (contract.package) {
+<<<<<<< HEAD
     const packageDir = join(rootDir, "packages", contract.package);
     rmSync(packageDir, { recursive: true, force: true });
     mkdirSync(packageDir, { recursive: true });
     cpSync(outputDir, packageDir, { recursive: true });
     manifestEntry.standalonePackage = contract.package;
+=======
+    const packageSourceDir = join(rootDir, "packages", contract.package, "src");
+    mkdirSync(packageSourceDir, { recursive: true });
+    cpSync(generatedSource, join(packageSourceDir, "index.ts"));
+>>>>>>> upstream/develop
   }
   
   manifestContracts.push(manifestEntry);
 }
 
+<<<<<<< HEAD
 // Generate manifest
 const manifest = {
   schema: "soroban-forge-generated-clients-v1",
@@ -222,3 +332,6 @@ writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 console.log(`==> Generated manifest at ${manifestPath}`);
 
 console.log(`==> All six clients generated in ${sdkClientsDir} and standalone packages.`);
+=======
+console.log(`==> All six clients generated in ${sdkClientsDir} and standalone packages.`);
+>>>>>>> upstream/develop

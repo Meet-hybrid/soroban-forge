@@ -1,4 +1,5 @@
-use crate::cli::EventsArgs;
+use crate::cli::{EventsArgs, EventsFormat};
+use crate::commands::process::{ensure_success, CommandOutput};
 use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;

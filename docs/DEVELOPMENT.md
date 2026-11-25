@@ -22,10 +22,51 @@ cargo run -p soroban-forge-cli -- new my-token --path ./custom/path/my-token
 The generated crate is a standalone project that compiles with `cargo check`
 without depending on the workspace layout or a stale shared-utils version pin.
 
+Run the contributor preflight before opening a pull request or deploying a contract:
+
+### Reusable network profiles
+
+Network-aware commands (`deploy`, `invoke`, `events`, and `inspect`) accept a
+named profile from `~/.config/soroban-forge/networks.toml`. Set
+`SOROBAN_FORGE_NETWORK_PROFILES` to use another file. The format is TOML:
+
+```toml
+[profiles.local]
+rpc_url = "http://127.0.0.1:8000"
+network_passphrase = "Standalone Network ; February 2017"
+
+[profiles.testnet-custom]
+rpc_url = "https://rpc.testnet.example"
+network_passphrase = "Test SDF Network ; September 2015"
+```
+
+Select a profile with `--network-profile`:
+
+```bash
+cargo run -p soroban-forge-cli -- invoke \
+  --contract CAAAA \
+  --function balance \
+  --network-profile local
+
+cargo run -p soroban-forge-cli -- deploy target/contract.wasm \
+  --network-profile testnet-custom
+```
+
+Precedence is: explicit `--network`, `--rpc-url`, and `--network-passphrase` values
+override profile values; profile values override the existing defaults (normally
+`testnet` with Stellar CLI default RPC/passphrase behavior). `--network-profile`
+must name a complete profile. Missing RPC URLs or passphrases, malformed URLs,
+unknown names, unreadable files, and malformed TOML fail before command execution
+with an actionable error.
+
+Profile files are configuration only: secret material is forbidden. Do not put
+secret seeds, private keys, source-account secrets, environment substitutions,
+or similarly named credential fields in a profile; such fields are rejected.
+
 Run the local environment preflight before deploying a contract:
 
 ```bash
-# Check stellar, cargo, and the wasm32v1-none target
+# Check the expected develop base, stellar, cargo, and the wasm32v1-none target
 cargo run -p soroban-forge-cli -- doctor
 
 # Also verify that a selected artifact exists and is non-empty
@@ -33,13 +74,35 @@ cargo run -p soroban-forge-cli -- doctor \
   --wasm target/wasm32v1-none/release/soroban_forge_escrow.wasm
 ```
 
-`doctor` never installs tools or performs network checks. It runs every check in order and prints
+`doctor` identifies `develop` as the expected PR base branch and never installs tools or performs network checks. It runs every check in order and prints
 PASS/FAIL rows plus an exact remediation command for each failure. `stellar --version` and
 `cargo --version` are reported when available; if an existing binary returns a non-zero status or
 no usable version, the check remains PASS with `version unknown`. The target check only passes when
 `rustup target list --installed` succeeds and includes `wasm32v1-none`. The optional artifact check
-distinguishes a missing path, directory, empty file, and filesystem error. Any required failure
-causes the command to exit non-zero and lists the failed checks in the summary.
+distinguishes a missing path, directory, empty file, and filesystem error. The command exits `0`
+only when every required check passes; any required failure exits non-zero and lists the failed
+checks in the summary.
+
+Validate a transaction plan before signing or submitting it:
+
+```bash
+# Human-readable report
+cargo run -p soroban-forge-cli -- validate-plan \
+  --plan crates/cli/fixtures/plans/valid-create-escrow.json \
+  --expected-network testnet
+
+# Machine-readable report (schema soroban-forge/tx-plan-validation-report@1)
+cargo run -p soroban-forge-cli -- validate-plan \
+  --plan crates/cli/fixtures/plans/invalid-multi-error.json \
+  --json
+```
+
+`validate-plan` (alias `plan`) accepts JSON or TOML plans and reports all independent findings
+together. The stable JSON categories are `missing_required_field`, `network_mismatch`,
+`invalid_contract_id`, `unsupported_method`, `malformed_argument`, `sensitive_input_rejected`, and
+`schema_mismatch`. Text output includes the category, field, message, and a remediation hint.
+Secrets are never echoed; suspected secret values are reported as `[REDACTED]`. Valid plans exit
+with code `0` and invalid plans exit with code `1`.
 
 ```bash
 # Install or update Rust
@@ -52,12 +115,14 @@ rustup component add rustfmt clippy
 rustup target add wasm32v1-none
 ```
 
-### Soroban CLI (Optional)
+### Stellar CLI
 
-For deployment and contract interaction:
+Required to build contracts to WASM (soroban-sdk 29 rejects plain
+`cargo build --target wasm32v1-none`), and for deployment and contract
+interaction. Use v25.2.0 or newer:
 
 ```bash
-cargo install soroban-cli
+cargo install --locked stellar-cli
 ```
 
 ### soroban-sdk Version
@@ -106,9 +171,13 @@ cargo build --locked --release --target wasm32v1-none \
 ### Build and Check WASM with the Developer CLI
 
 The CLI can build one contract or all six contract packages for the required
-`wasm32v1-none` target. WASM builds always use the optimized release profile.
-Use `--package` to select a single package; without it, the CLI builds all
-contract packages and skips the host-only CLI and shared utility crates.
+`wasm32v1-none` target. It runs
+`stellar contract build --locked --profile release --optimize=false`, the same
+command CI and `scripts/provenance.sh` use, so its artifacts hash the same as
+theirs. This needs stellar-cli v25.2.0 or newer on `PATH`: soroban-sdk rejects
+a plain `cargo build --target wasm32v1-none`. Use `--package` to select a single
+contract; without it, the CLI builds all contract packages and skips the
+host-only CLI and shared utility crates.
 
 ```bash
 # Build all contract WASM artifacts
@@ -128,49 +197,87 @@ when `CARGO_TARGET_DIR` is set). It reports each artifact's byte and KB size,
 the 150,000-byte budget, and a `PASS` or `FAIL` status. If any artifact exceeds
 the budget, or no artifact is found for the selected package, the command exits
 with an error. If the target is missing, install it with
-`rustup target add wasm32v1-none` and rerun the build.
+`rustup target add wasm32v1-none`; if the Stellar CLI is missing, install it with
+`cargo install --locked stellar-cli`; then rerun the build.
 
 Example output:
 
 ```text
 Contract                                  Size (bytes)   Size (KB)   Budget (bytes)  Status
 ----------------------------------------  ------------  ----------  ---------------  ------
-soroban_forge_dao_governance.wasm                12309       12.02           150000  PASS
-soroban_forge_escrow.wasm                        20425       19.94           150000  PASS
-soroban_forge_marketplace_royalties.wasm         15099       14.74           150000  PASS
-soroban_forge_multi_sig_wallet.wasm              23571       23.01           150000  PASS
-soroban_forge_subscription_payments.wasm         10877       10.62           150000  PASS
-soroban_forge_vesting.wasm                       14596       14.25           150000  PASS
+soroban_forge_dao_governance.wasm                27188       26.55           150000  PASS
+soroban_forge_escrow.wasm                        45850       44.77           150000  PASS
+soroban_forge_marketplace_royalties.wasm         26330       25.71           150000  PASS
+soroban_forge_multi_sig_wallet.wasm              39651       38.72           150000  PASS
+soroban_forge_subscription_payments.wasm         36643       35.78           150000  PASS
+soroban_forge_vesting.wasm                       29836       29.13           150000  PASS
 ```
 
 ### Verify WASM Artifacts against the Provenance Manifest
 
 `provenance-manifest.json` (generated by `scripts/provenance.sh`) records the
 lowercase SHA-256 of every contract artifact built from a clean rebuild. The
-`verify` subcommand rebuilds a package deterministically and compares the
-result against a supplied hash, the manifest, or both:
+`verify` subcommand rebuilds a package with the same `stellar contract build`
+command as `scripts/provenance.sh` and compares the result against a supplied
+artifact, an expected hash, or the manifest.
 
 ```bash
-# Verify one artifact against the provenance manifest (default manifest path:
-# provenance-manifest.json in the current directory)
+# Compare a local artifact with a fresh rebuild of its inferred package
 cargo run -p soroban-forge-cli -- verify --wasm target/wasm32v1-none/release/soroban_forge_escrow.wasm
 
 # Rebuild a package and check its fresh artifact matches an expected hash
 cargo run -p soroban-forge-cli -- verify --expected <64-hex-sha256> --package soroban-forge-escrow
 
-# Check every artifact in the manifest
+# Check every artifact in the manifest (the default path is provenance-manifest.json)
 cargo run -p soroban-forge-cli -- verify --manifest provenance-manifest.json
 ```
 
-`--wasm <PATH>` hashes the given artifact on disk (SHA-256) and optionally
-compares it against `--expected` or the manifest entry for the package
-inferred from the file name (`soroban_forge_escrow.wasm` →
-`soroban-forge-escrow`). `--expected` triggers a deterministic rebuild of the
-selected package and compares the resulting artifact's hash. `--manifest`
-verifies every artifact listed in the manifest by rebuilding each package.
-All comparisons are exact; any mismatch (or a rebuild that fails) exits
-non-zero. `--package` selects a single package; without it, artifacts are
-matched by name inference.
+With `--wasm`, `--package` can override package inference from the artifact
+name, and `--expected` can require both hashes to match a known value.
+With `--expected` alone and no package, the command checks every contract.
+
+For offline release automation, run from the source checkout with the required
+Rust toolchain, WASM target, Stellar CLI, and Cargo dependencies already installed
+or cached. Use a local copy of the release manifest. No credentials are required.
+
+```bash
+CARGO_NET_OFFLINE=true soroban-forge verify --manifest provenance-manifest.json --json > verification.json
+```
+
+The command writes one JSON object to stdout with an overall boolean `ok` and an
+`artifacts` array in manifest order. Each entry has `name`, `status`,
+`expected_sha256`, `actual_sha256`, `expected_bytes`, `actual_bytes`, and
+`size_drift`. Status is `match`, `mismatch` (hash), `size_drift` (matching hash
+with different size), or `missing`. If both hash and size differ, the status is
+`mismatch` and `size_drift` is true. Unavailable hash or size fields are null.
+Artifact failures still produce the report and exit nonzero. Input or build
+errors exit nonzero with a diagnostic on stderr.
+
+### Decode Failed Invocations
+
+The `decode-failure` helper explains raw Stellar CLI/RPC errors or decodes a
+base64 `TransactionResult` receipt. Include the receipt's optional
+`DiagnosticEvents` XDR to reveal Soroban contract or host error details:
+
+```bash
+# Explain the error text printed by stellar contract invoke
+cargo run -p soroban-forge-cli -- decode-failure \
+  --error 'HostError: Error(Contract, #3)'
+# Soroban contract error #3: ForgeError::InvalidInput. Check the contract's preconditions and authorization requirements.
+
+# Decode a failed transaction result and its diagnostic events
+cargo run -p soroban-forge-cli -- decode-failure \
+  --result-xdr '<base64-transaction-result-xdr>' \
+  --diagnostic-events-xdr '<base64-diagnostic-events-xdr>'
+```
+
+Contract codes 1–15 are named using the shared `ForgeError` registry; unknown
+contract codes are reported without guessing their meaning. Host traps without
+diagnostic events are identified as host aborts, but cannot be attributed to a
+specific contract error. Recognizable connection and RPC failures are reported
+as transport issues. Unrecognized error text and malformed XDR produce a clear
+diagnostic rather than being treated as a successful decode. The helper does
+not retry the invocation or change the behavior of `invoke`.
 
 ## Test Commands
 
@@ -297,6 +404,60 @@ The mapping of contract → package directory lives in
 
 ## Contract Testing Notes
 
+Use `soroban_forge_test_utils::advance_ledger_to` to drive TTL and timestamp
+boundaries on an existing Soroban test environment. Pass an absolute ledger
+sequence and a Unix timestamp in seconds. Both may stay equal to their
+current value, and either moving backwards panics before changing the ledger.
+
+```rust
+use soroban_forge_test_utils::{advance_ledger_to, new_env};
+
+let env = new_env();
+advance_ledger_to(&env, env.ledger().sequence() + 12, env.ledger().timestamp() + 60);
+```
+
+For sequence-only tests, `advance_ledger(&env, 12)` keeps the timestamp unchanged.
+
+### Contract resource regression reports
+
+The CI resource-report workflow runs one deterministic, storage-writing
+entrypoint scenario for each contract and uploads a machine-readable report.
+For pull requests, it compares each metric with the baseline on the PR's base
+branch and lists deltas by entrypoint in the workflow summary. On the initial
+rollout, when the base branch has no report baseline, CI bootstraps from the
+current measured report; the uploaded report can then be committed as the
+checked-in baseline for future base-branch comparisons.
+
+The report includes host-estimated ledger entry accesses (read and write
+counts), CPU instructions, metered memory, and an estimated transaction fee.
+`footprint_entries` is the sum of the host-reported read and write entry
+counts; this native test-host approximation is not the exact XDR footprint.
+Soroban SDK's native test host undercounts WASM VM costs and the fee estimate
+does not model transaction size or RPC simulation. These reports are for
+relative regression detection only; they are not wall-clock benchmarks or
+mainnet cost guarantees.
+
+Any individual metric increase greater than **20%** fails comparison. Missing,
+malformed, or duplicated scenario metrics fail report generation rather than
+passing silently. To reproduce the checked-in baseline from a clean checkout,
+run:
+
+```bash
+python3 scripts/contract-resource-report.py update-baseline
+```
+
+Review the resulting `reports/contract-resource-baseline.json` diff and commit
+it only when the measured resource change is expected. To produce a report
+without changing the baseline, run:
+
+```bash
+python3 scripts/contract-resource-report.py generate --output contract-resource-report.json
+```
+
+If the local machine cannot link native Rust tests, run the
+**Contract Resource Report** workflow manually and use
+`contract-resource-report.json` from its artifact as the measured baseline.
+
 - Tests use Soroban SDK's `Env` test harness
 - Mock authentication (`mock_all_auths`) for positive tests
 - Integration tests use Stellar Asset Contract (SAC) fixtures
@@ -390,7 +551,7 @@ Soroban Forge enforces a dependency policy via [cargo-deny](https://embarkstudio
 - **Bans**: Multiple versions of the same crate are flagged; justified exceptions are documented in `deny.toml`.
 
 **Configuration:**
-The policy is defined in [deny.toml](../../deny.toml) at the workspace root. Each non-default choice is commented to explain the rationale.
+The policy is defined in [deny.toml](../deny.toml) at the workspace root. Each non-default choice is commented to explain the rationale.
 
 **Running checks locally:**
 
@@ -445,3 +606,35 @@ The project uses `-D warnings` (fail on warnings). Fix issues reported by clippy
 ## WASM Size Budget
 
 Contracts have a maximum size of 150,000 bytes. This is enforced in CI.
+
+### Deployment attestation bundles
+
+Release provenance is emitted by `scripts/provenance.sh build` as
+`provenance-manifest.json` using schema `soroban-forge/provenance@2`. The bundle
+contains the source revision, Rust/Cargo/Stellar tool versions, target and
+profile, Cargo.lock SHA-256, artifact SHA-256/size values, optional deployment
+receipt entries, and a canonical bundle SHA-256.
+
+A clean checkout is reproducible: the manifest timestamp is derived from the
+current commit rather than wall-clock time. Tampering with any field covered by
+`bundle_sha256` causes local verification to fail. The digest is integrity
+metadata, not cryptographic signing.
+
+```bash
+# Build, then verify locally without network access
+scripts/provenance.sh build
+scripts/provenance.sh verify
+scripts/provenance.sh verify --json
+
+# Optionally match deployment contract IDs from a receipt against live WASM
+DEPLOYMENT_RECEIPT=docs/testnet/testnet-deployment.json \
+STELLAR_RPC_URL=https://soroban-testnet.stellar.org \
+NETWORK_PASSPHRASE='Test SDF Network ; September 2015' \
+scripts/provenance.sh verify --network
+```
+
+Network verification is opt-in and requires an RPC endpoint. It fetches each
+configured contract ID and compares the deployed WASM SHA-256 with the matching
+artifact in the bundle. Provenance does not replace an audit, does not provide
+cryptographic signing, and does not assert that a deployment is safe or
+authorized.

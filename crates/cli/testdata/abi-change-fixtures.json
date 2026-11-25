@@ -1,0 +1,10 @@
+{
+  "identical": {"function:ping":"() -> U32"},
+  "added": {"function:new_method":"(value:U64) -> U64"},
+  "removed": {"function:old_method":"() -> U32"},
+  "renamed": {"function:fetch_value":"() -> U32"},
+  "reordered": {"function:transfer":"(recipient:Address,amount:I128) -> Void"},
+  "type_changed": {"function:balance":"(owner:Address) -> U64"},
+  "event_changed": {"event:Paid":"{amount:U128}"},
+  "type_risky": {"type:struct:Payment":"{amount:U64}"}
+}

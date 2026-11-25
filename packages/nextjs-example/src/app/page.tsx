@@ -1,5 +1,6 @@
 "use client";
 
+<<<<<<< HEAD
 import {
   type ChangeEvent,
   useCallback,
@@ -8,11 +9,19 @@ import {
   useRef,
   useState,
 } from "react";
+=======
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Networks } from "@stellar/stellar-sdk";
+import { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit/sdk";
+import { defaultModules } from "@creit.tech/stellar-wallets-kit/modules/utils";
+>>>>>>> upstream/develop
 import {
   Client,
   networks,
   type EscrowData,
+  ForgeError,
 } from "@soroban-forge/escrow-client";
+<<<<<<< HEAD
 import {
   DEFAULT_DEMO_AMOUNT,
   DEFAULT_DEMO_TIMEOUT_SECS,
@@ -44,6 +53,9 @@ declare global {
     };
   }
 }
+=======
+import MultisigDashboard from "./multisig-dashboard";
+>>>>>>> upstream/develop
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE = networks.testnet.networkPassphrase;
@@ -61,7 +73,13 @@ function ts(): string {
   return new Date().toLocaleTimeString();
 }
 
+// Minimum and maximum review window bounds for the review-period escrow flow.
+const MIN_REVIEW_PERIOD = 60; // shortest useful window (1 minute)
+const MAX_REVIEW_PERIOD = 30 * 24 * 60 * 60; // 30 days
+const DEFAULT_REVIEW_PERIOD = 3 * 24 * 60 * 60; // 3 days
+
 export default function Home() {
+  const [mounted, setMounted] = useState(false);
   const [account, setAccount] = useState<string | null>(null);
   const [client, setClient] = useState<Client | null>(null);
   const [busy, setBusy] = useState(false);
@@ -72,9 +90,19 @@ export default function Home() {
   const [buyer, setBuyer] = useState("");
   const [seller, setSeller] = useState("");
   const [arbiter, setArbiter] = useState("");
+<<<<<<< HEAD
   const [token, setToken] = useState(DEFAULT_DEMO_TOKEN);
   const [amount, setAmount] = useState(DEFAULT_DEMO_AMOUNT);
   const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_DEMO_TIMEOUT_SECS);
+=======
+  const [token, setToken] = useState(DEFAULT_TOKEN);
+  const [amount, setAmount] = useState("10000000"); // stroops
+  const [timeoutSecs, setTimeoutSecs] = useState("3600");
+  const [reviewPeriodSecs, setReviewPeriodSecs] = useState(
+    DEFAULT_REVIEW_PERIOD.toString()
+  );
+  const [useReviewWindow, setUseReviewWindow] = useState(false);
+>>>>>>> upstream/develop
   const [creating, setCreating] = useState(false);
   const [createdId, setCreatedId] = useState<string | null>(null);
 
@@ -89,6 +117,16 @@ export default function Home() {
   const [readEscrowId, setReadEscrowId] = useState("");
   const [escrow, setEscrow] = useState<EscrowData | null>(null);
   const [readBusy, setReadBusy] = useState(false);
+
+  // Review-window state (for escrows created with review or when fetching release requests)
+  const [releaseRequest, setReleaseRequest] = useState<{
+    amount: bigint;
+    release_at: bigint;
+    requested_at: bigint;
+  } | null>(null);
+  const [reviewWindowEndsAt, setReviewWindowEndsAt] = useState<bigint | null>(null);
+  const [reviewWindowSecondsRemaining, setReviewWindowSecondsRemaining] =
+    useState<number | null>(null);
 
   // List panel
   const [myIds, setMyIds] = useState<Array<bigint>>([]);
@@ -106,8 +144,14 @@ export default function Home() {
       setLog((prev) => [{ id: logId++, time: ts(), text, kind }, ...prev]);
     },
     []
-  );
+  );  // Initialize the wallet kit after hydration.
+  useEffect(() => {
+    if (!mounted) return;
+    StellarWalletsKit.init({ modules: defaultModules() });
+    StellarWalletsKit.setNetwork(Networks.TESTNET);
+  }, [mounted]);
 
+<<<<<<< HEAD
   const applyDemoState = useCallback((state: DemoState) => {
     setBuyer(state.buyer);
     setSeller(state.seller);
@@ -260,6 +304,24 @@ export default function Home() {
 
   const freighterMissing =
     typeof window !== "undefined" && !window.freighterApi;
+=======
+  // Refresh the review-window countdown every second while one is active.
+  useEffect(() => {
+    if (reviewWindowEndsAt === null) return;
+    const tick = () => {
+      const now = BigInt(Math.floor(Date.now() / 1000));
+      const remaining = Number(reviewWindowEndsAt - now);
+      setReviewWindowSecondsRemaining(remaining > 0 ? remaining : 0);
+      if (remaining <= 0) {
+        setReviewWindowEndsAt(null);
+        setReviewWindowSecondsRemaining(null);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [reviewWindowEndsAt]);
+>>>>>>> upstream/develop
 
   const listMine = useCallback(
     async (c: Client, addr: string) => {
@@ -288,30 +350,45 @@ export default function Home() {
   const connect = useCallback(async () => {
     setBusy(true);
     try {
-      if (typeof window === "undefined" || !window.freighterApi) {
-        pushLog(
-          "Freighter not detected. Install the Freighter wallet extension and reload.",
-          "err"
-        );
-        return;
+      if (!mounted) {
+        throw new Error("Wallet connectors are still loading; try again shortly.");
       }
-      if (!(await window.freighterApi.isConnected())) {
-        pushLog("Freighter is not connected yet. Allow access in the popup.", "err");
-      }
-      const pubkey = await window.freighterApi.getPublicKey();
+
+      const { address: pubkey } = await StellarWalletsKit.authModal();
       setAccount(pubkey);
+      // Keep the visible buyer value and the transaction payload in sync.
+      setBuyer((current) => current || pubkey);
       const c = new Client({
         rpcUrl: RPC_URL,
         networkPassphrase: NETWORK_PASSPHRASE,
         contractId: CONTRACT_ID,
         publicKey: pubkey,
-        signTransaction: (xdr: string, opts?: { networkPassphrase?: string; address?: string }) =>
-          window.freighterApi!.signTransaction(xdr, {
+        signTransaction: async (
+          xdr: string,
+          opts?: { networkPassphrase?: string; address?: string }
+        ) => {
+          const result = await StellarWalletsKit.signTransaction(xdr, {
             networkPassphrase: opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
             address: opts?.address ?? pubkey,
-          }),
+          });
+          if (!result.signedTxXdr) {
+            throw new Error("The selected wallet did not return a signed transaction.");
+          }
+          return { signedTxXdr: result.signedTxXdr };
+        },
       });
       setClient(c);
+
+      // Read the wallet's current network for the safe-write guard.
+      try {
+        const { network } = await StellarWalletsKit.getNetwork();
+        setWalletNetwork(network ?? "testnet");
+        setWalletPassphrase(networks.testnet.networkPassphrase);
+      } catch {
+        setWalletNetwork("testnet");
+        setWalletPassphrase(networks.testnet.networkPassphrase);
+      }
+
       pushLog(
         `Connected to ${pubkey.slice(0, 6)}…${pubkey.slice(-4)} (testnet)`,
         "ok"
@@ -322,15 +399,19 @@ export default function Home() {
     } finally {
       setBusy(false);
     }
-  }, [pushLog, listMine]);
+  }, [listMine, mounted, pushLog]);
 
   const disconnect = useCallback(() => {
+    void StellarWalletsKit.disconnect();
     setAccount(null);
     setClient(null);
     setEscrow(null);
     setMyIds([]);
     setListTotal(null);
     setCreatedId(null);
+    setReleaseRequest(null);
+    setReviewWindowEndsAt(null);
+    setReviewWindowSecondsRemaining(null);
     pushLog("Disconnected. Wallet state cleared.", "info");
   }, [pushLog]);
 
@@ -359,6 +440,126 @@ export default function Home() {
     }
   }, [account, pushLog]);
 
+  /**
+   * Safe-write guard: refuse to send a write transaction while the wallet's
+   * network or account does not match the page's configured network / connected
+   * account. Returns a human-readable reason when the guard fails, or null when
+   * the write is safe to proceed.
+   *
+   * Uses the StellarWalletsKit network and address APIs that the page already
+   * depends on; does not store keys.
+   */
+  const safeWriteGuard = useCallback(
+    async (actionName: string): Promise<string | null> => {
+      if (!account) {
+        return "Connect a wallet first.";
+      }
+      // Check the wallet's current network matches the page's expected network.
+      let walletNetwork: string | undefined;
+      try {
+        const { network } = await StellarWalletsKit.getNetwork();
+        walletNetwork = network;
+      } catch {
+        // If we can't read the network, proceed with a warning.
+        pushLog(
+          `Safe-write guard: could not read wallet network for ${actionName}; assuming testnet.`,
+          "err"
+        );
+      }
+      if (walletNetwork && walletNetwork !== "testnet") {
+        return `Wallet is on network "${walletNetwork}" but this demo targets testnet. Switch the wallet to Stellar testnet.`;
+      }
+      // Check the wallet's current address matches the connected account.
+      try {
+        const { address: walletAddr } = await StellarWalletsKit.getAddress();
+        if (walletAddr && walletAddr !== account) {
+          pushLog(
+            `Safe-write guard: wallet address ${walletAddr.slice(0, 6)}… does not match the connected account ${account.slice(0, 6)}… for ${actionName}.`,
+            "err"
+          );
+          return `Wallet address does not match the connected account. Disconnect and reconnect.`;
+        }
+      } catch {
+        pushLog(
+          `Safe-write guard: could not read wallet address for ${actionName}.`,
+          "err"
+        );
+      }
+      return null;
+    },
+    [account, pushLog]
+  );
+
+  /**
+   * Which role-related actions the connected account may perform on the given
+   * escrow, given the escrow's current status and (optionally) an active
+   * review window.
+   *
+   * Kept in one small function so the action list in the UI stays a pure
+   * presentation of this decision.
+   */
+  const allowedActions = useCallback(
+    (
+      esc: EscrowData | null,
+      hasReviewWindow: boolean,
+      isPendingRelease: boolean
+    ): Array<{ name: string; role: string }> => {
+      if (!esc || !account) return [];
+
+      const s = esc.status.tag;
+      const isBuyer = esc.buyer === account;
+      const isSeller = esc.seller === account;
+      const isArbiter = esc.arbiter === account;
+      const actions: Array<{ name: string; role: string }> = [];
+
+      if (s === "Pending") {
+        // Only the buyer may deposit into a pending escrow.
+        if (isBuyer) actions.push({ name: "Deposit", role: "buyer" });
+      } else if (s === "Funded") {
+        if (isSeller && !hasReviewWindow && !isPendingRelease) {
+          actions.push({ name: "Request release", role: "seller" });
+        }
+        if (isBuyer && hasReviewWindow && isPendingRelease) {
+          actions.push({ name: "Approve release", role: "buyer" });
+          actions.push({ name: "Dispute", role: "buyer" });
+        }
+        if (hasReviewWindow && isPendingRelease) {
+          // Anyone may execute once the review window has elapsed.
+          actions.push({ name: "Execute release", role: "anyone" });
+        }
+        if (isBuyer && !hasReviewWindow) {
+          actions.push({ name: "Release", role: "buyer" });
+          actions.push({ name: "Release partial", role: "buyer" });
+          actions.push({ name: "Refund", role: "buyer" });
+        }
+        if (isArbiter && s === "Funded") {
+          // Arbiter resolves only disputes; not added here to keep the set
+          // tidy. Resolve is exposed separately below.
+        }
+      } else if (
+        s === "Completed" || s === "Refunded" || s === "Cancelled"
+      ) {
+        // Terminal states — no write actions.
+      } else if (s === "Disputed") {
+        if (isArbiter) actions.push({ name: "Resolve", role: "arbiter" });
+      }
+
+      return actions;
+    },
+    [account]
+  );
+
+  /**
+   * Format a ForgeError code as a human-readable name+message pair.
+   */
+  const formatForgeError = useCallback((code: number, message?: string): string => {
+    const known = ForgeError[code as keyof typeof ForgeError];
+    if (known) {
+      return known.message + (message ? ` (${message})` : "");
+    }
+    return message ?? `Error code ${code}`;
+  }, []);
+
   const createEscrow = useCallback(async () => {
     if (!client) return;
     setCreating(true);
@@ -369,36 +570,85 @@ export default function Home() {
         return;
       }
       const timeoutBig = BigInt(timeoutSecs || "0");
-      const tx = await client.create_escrow(
-        {
-          buyer,
-          seller,
-          arbiter,
-          token,
-          amount: amountBig,
-          timeout: timeoutBig,
-        },
-        { timeoutInSeconds: 60 }
-      );
-      pushLog("create_escrow simulated — requesting signature…", "info");
-      const sent = await tx.signAndSend();
-      if (sent.sendTransactionResponse) {
+      const reviewPeriodBig = BigInt(reviewPeriodSecs || "0");
+      const buyerAddress = buyer.trim() || account?.trim() || "";
+      const sellerAddress = seller.trim();
+      const arbiterAddress = arbiter.trim();
+      const tokenAddress = token.trim();
+      if (!buyerAddress || !sellerAddress || !arbiterAddress || !tokenAddress) {
         pushLog(
-          `Submitted — tx hash ${sent.sendTransactionResponse.hash}`,
+          "Enter complete buyer, seller, arbiter, and token addresses before creating the escrow.",
+          "err"
+        );
+        return;
+      }
+
+      let escrowId: bigint;
+      if (useReviewWindow && reviewPeriodBig > BigInt(0)) {
+        // Review-window escrow: creates the escrow AND opens a review window
+        // for the seller's future release request.
+        const tx = await client.create_escrow_with_review(
+          {
+            buyer: buyerAddress,
+            seller: sellerAddress,
+            arbiter: arbiterAddress,
+            token: tokenAddress,
+            amount: amountBig,
+            timeout: timeoutBig,
+            review_period: reviewPeriodBig,
+          },
+          { timeoutInSeconds: 60 }
+        );
+        pushLog("create_escrow_with_review simulated — requesting signature…", "info");
+        const sent = await tx.signAndSend();
+        if (sent.sendTransactionResponse) {
+          pushLog(
+            `Submitted — tx hash ${sent.sendTransactionResponse.hash}`,
+            "ok"
+          );
+        }
+        escrowId = sent.result.unwrap();
+        pushLog(
+          `Review-window escrow created — id ${escrowId.toString()} (review window ${reviewPeriodSecs} s)`,
           "ok"
         );
+        // Fetch the release request that was created alongside the escrow.
+        void fetchReleaseRequest(escrowId);
+      } else {
+        const tx = await client.create_escrow(
+          {
+            buyer: buyerAddress,
+            seller: sellerAddress,
+            arbiter: arbiterAddress,
+            token: tokenAddress,
+            amount: amountBig,
+            timeout: timeoutBig,
+          },
+          { timeoutInSeconds: 60 }
+        );
+        pushLog("create_escrow simulated — requesting signature…", "info");
+        const sent = await tx.signAndSend();
+        if (sent.sendTransactionResponse) {
+          pushLog(
+            `Submitted — tx hash ${sent.sendTransactionResponse.hash}`,
+            "ok"
+          );
+        }
+        escrowId = sent.result.unwrap();
+        setCreatedId(escrowId.toString());
+        pushLog(`Escrow created — id ${escrowId.toString()} (Pending)`, "ok");
       }
-      const escrowId = sent.result.unwrap();
-      setCreatedId(escrowId.toString());
+
       setActionEscrowId(escrowId.toString());
       setReadEscrowId(escrowId.toString());
-      pushLog(`Escrow created — id ${escrowId.toString()} (Pending)`, "ok");
+      void fetchEscrow(escrowId.toString());
     } catch (e) {
       pushLog(`Create escrow failed: ${(e as Error).message}`, "err");
     } finally {
       setCreating(false);
     }
   }, [
+    account,
     client,
     buyer,
     seller,
@@ -406,22 +656,83 @@ export default function Home() {
     token,
     amount,
     timeoutSecs,
+    reviewPeriodSecs,
+    useReviewWindow,
     pushLog,
   ]);
 
+  const fetchReleaseRequest = useCallback(
+    async (escrowId: bigint) => {
+      if (!client) return;
+      try {
+        const { result } = await client.get_release_request({ escrow_id: escrowId });
+        if (result.isOk()) {
+          const req = result.unwrap();
+          if (req.isSome()) {
+            const r = req.unwrap();
+            setReleaseRequest({
+              amount: r.amount.value ?? BigInt(0),
+              release_at: r.release_at.value ?? BigInt(0),
+              requested_at: r.requested_at.value ?? BigInt(0),
+            });
+            setReviewWindowEndsAt(r.release_at.value ?? BigInt(0));
+            pushLog(
+              `Release request found for escrow ${escrowId.toString()} — review window ends at ${r.release_at.value}`,
+              "ok"
+            );
+          } else {
+            setReleaseRequest(null);
+            setReviewWindowEndsAt(null);
+            pushLog(
+              `No release request for escrow ${escrowId.toString()}.`,
+              "info"
+            );
+          }
+        } else {
+          pushLog(
+            `get_release_request returned error: ${result.unwrapErr().message}`,
+            "err"
+          );
+        }
+      } catch (e) {
+        pushLog(`get_release_request failed: ${(e as Error).message}`, "err");
+      }
+    },
+    [client, pushLog]
+  );
+
   const sendAction = useCallback(
     async (name: string, invoke: () => Promise<void>) => {
+      // Safe-write guard: refuse to send while the wallet's network or account
+      // doesn't match.
+      const guardReason = await safeWriteGuard(name);
+      if (guardReason) {
+        pushLog(`${name} blocked: ${guardReason}`, "err");
+        return;
+      }
+
       setActionInFlight(name);
       try {
         pushLog(`${name} — simulating…`, "info");
         await invoke();
       } catch (e) {
-        pushLog(`${name} failed: ${(e as Error).message}`, "err");
+        const err = e as Error;
+        // Try to surface a ForgeError name instead of a raw code where possible.
+        const codeMatch = err.message?.match(/Error\(Contract, #(\d+)\)/);
+        if (codeMatch) {
+          const code = parseInt(codeMatch[1], 10);
+          pushLog(
+            `${name} failed: ${formatForgeError(code, err.message)}`,
+            "err"
+          );
+        } else {
+          pushLog(`${name} failed: ${err.message}`, "err");
+        }
       } finally {
         setActionInFlight(null);
       }
     },
-    [pushLog]
+    [safeWriteGuard, pushLog, formatForgeError]
   );
 
   const runAction = useCallback(
@@ -467,6 +778,13 @@ export default function Home() {
         if (result.isOk()) {
           const data = result.unwrap();
           setEscrow(data);
+
+          // If this escrow was created with a review window, also fetch its
+          // release request so the countdown and action buttons stay accurate.
+          if (useReviewWindow) {
+            void fetchReleaseRequest(escrowId);
+          }
+
           pushLog(
             `Fetched escrow ${escrowId.toString()} — ${data.status.tag}`,
             "ok"
@@ -483,23 +801,43 @@ export default function Home() {
         setReadBusy(false);
       }
     },
-    [client, readEscrowId, pushLog]
+    [client, readEscrowId, pushLog, useReviewWindow, fetchReleaseRequest]
   );
 
-  const connectProps = useMemo(
-    () => ({
-      disabled: busy,
-      onClick: connect,
-    }),
-    [busy, connect]
+  connectProps;
+  // Silence unused-variable lint for the memo that drives the connect button.
+  void connectProps;
+
+  // Decide which actions the connected account may take on the currently
+  // selected escrow, factoring in any active review window.
+  const currentActions = useMemo(
+    () =>
+      allowedActions(
+        escrow,
+        releaseRequest !== null,
+        releaseRequest !== null
+      ),
+    [escrow, releaseRequest, allowedActions]
   );
 
   return (
     <main className="mx-auto max-w-5xl p-6">
+<<<<<<< HEAD
       <div className="mb-1 flex items-center justify-between gap-4">
         <h1 className="text-3xl font-bold">Soroban Forge — Escrow Testnet Demo</h1>
         <a href="/ui/index.html" className="shrink-0 rounded border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
           Dashboard screens
+=======
+      <div className="mb-3 flex items-center justify-between gap-4">
+        <h1 className="text-3xl font-bold">
+          Soroban Forge — Escrow Testnet Demo
+        </h1>
+        <a
+          href="/issues"
+          className="shrink-0 rounded border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+        >
+          Issue board
+>>>>>>> upstream/develop
         </a>
       </div>
       <p className="text-sm text-gray-500 mb-6">
@@ -534,22 +872,21 @@ export default function Home() {
         ) : (
           <div>
             <button
-              {...(typeof window !== "undefined" && window.freighterApi
-                ? connectProps
-                : { disabled: true })}
+              {...(mounted ? connectProps : { disabled: true })}
               className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
             >
-              {busy ? "Connecting…" : "Connect Freighter"}
+              {busy ? "Connecting…" : "Connect wallet"}
             </button>
-            {freighterMissing && (
+            {!mounted && (
               <p className="mt-2 text-sm text-amber-700">
-                Freighter not detected. Install the Freighter wallet extension
-                for Stellar, create/import an account, and reload this page.
+                Loading Stellar wallet connectors…
               </p>
             )}
           </div>
         )}
       </section>
+
+      <MultisigDashboard account={account} mounted={mounted} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Create */}
@@ -591,7 +928,7 @@ export default function Home() {
                 className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 font-mono text-sm"
               />
               <span className="text-xs text-gray-500">
-                Default: repo&apos;s testnet demo SAC &quot;credit&quot; token
+                Default: repo&apos;s testnet demo SAC "credit" token
                 (7 decimals). Replace with your own testnet token contract id.
               </span>
             </label>
@@ -615,6 +952,35 @@ export default function Home() {
                 />
               </label>
             </div>
+
+            {/* Review-window toggle */}
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1 text-sm">
+                <input
+                  type="checkbox"
+                  checked={useReviewWindow}
+                  onChange={(e) => setUseReviewWindow(e.target.checked)}
+                />
+                Use review window (create_escrow_with_review)
+              </label>
+            </div>
+            {useReviewWindow && (
+              <label className="block text-sm">
+                Review period (seconds)
+                <input
+                  value={reviewPeriodSecs}
+                  onChange={(e) => setReviewPeriodSecs(e.target.value)}
+                  placeholder={DEFAULT_REVIEW_PERIOD.toString()}
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 font-mono text-sm"
+                />
+                <span className="text-xs text-gray-500">
+                  {MIN_REVIEW_PERIOD}–{MAX_REVIEW_PERIOD} seconds; default{" "}
+                  {DEFAULT_REVIEW_PERIOD} s (3 days). After the window ends,
+                  anyone may execute the seller&apos;s release.
+                </span>
+              </label>
+            )}
+
             <button
               onClick={createEscrow}
               disabled={!client || creating}
@@ -656,34 +1022,90 @@ export default function Home() {
               className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 font-mono text-sm"
             />
           </label>
-          <div className="flex flex-wrap gap-2">
-            {(["Deposit", "Release", "Refund", "Cancel", "Dispute"] as const).map(
-              (name) => (
+
+          {/* Review-window info */}
+          {releaseRequest && (
+            <div className="mb-3 rounded border border-gray-200 p-3">
+              <p className="text-sm font-medium mb-1">Review window</p>
+              <p className="text-sm font-mono">
+                Requested at:{" "}
+                {new Date(Number(releaseRequest.requested_at) * 1000).toLocaleString()}
+              </p>
+              <p className="text-sm font-mono">
+                Release available at:{" "}
+                {new Date(Number(releaseRequest.release_at) * 1000).toLocaleString()}
+              </p>
+              {reviewWindowSecondsRemaining !== null && (
+                <p className="text-sm font-mono">
+                  {reviewWindowSecondsRemaining > 0
+                    ? `${reviewWindowSecondsRemaining} s remaining in review window`
+                    : "Review window ended — release may be executed"}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Allowed actions for the connected account */}
+          {currentActions.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {currentActions.map((a) => (
                 <button
-                  key={name}
+                  key={a.name}
                   disabled={!client || actionInFlight !== null}
-                  onClick={() =>
-                    void runAction(name.toLowerCase(), (c, id) =>
-                      name === "Dispute"
-                        ? c.dispute({ escrow_id: id, claimant: account ?? "" })
-                        : c[
-                            name.toLowerCase() as
-                              | "deposit"
-                              | "release"
-                              | "refund"
-                              | "cancel"
-                          ]({ escrow_id: id })
-                    )
-                  }
+                  onClick={() => {
+                    void runAction(a.name.toLowerCase(), (c, id) => {
+                      switch (a.name) {
+                        case "Deposit":
+                          return c.deposit({ escrow_id: id });
+                        case "Request release":
+                          return c.request_release({
+                            escrow_id: id,
+                            amount: escrow?.amount ?? BigInt(0),
+                          });
+                        case "Approve release":
+                          return c.approve_release({ escrow_id: id });
+                        case "Execute release":
+                          return c.execute_release({ escrow_id: id });
+                        case "Dispute":
+                          return c.dispute({
+                            escrow_id: id,
+                            claimant: account ?? "",
+                          });
+                        case "Release":
+                          return c.release({ escrow_id: id });
+                        case "Release partial":
+                          return c.release_partial({
+                            escrow_id: id,
+                            amount: escrow?.amount ?? BigInt(0),
+                          });
+                        case "Refund":
+                          return c.refund({ escrow_id: id });
+                        case "Resolve":
+                          return c.resolve({
+                            escrow_id: id,
+                            in_favor_of_seller: resolveFavor === "seller",
+                          });
+                        default:
+                          return c.deposit({ escrow_id: id });
+                      }
+                    });
+                  }}
                   className="rounded border border-blue-600 px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 disabled:opacity-50"
                 >
-                  {actionInFlight === name.toLowerCase()
+                  {actionInFlight === a.name.toLowerCase()
                     ? "Busy…"
-                    : name}
+                    : a.name}
                 </button>
-              )
-            )}
-          </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">
+              No write actions available for the connected account in the
+              current escrow state.
+            </p>
+          )}
+
+          {/* Resolve dispute (arbiter only) — always present for visibility */}
           <div className="mt-4 rounded border border-gray-200 p-3">
             <p className="text-sm font-medium mb-2">Resolve dispute (arbiter only)</p>
             <div className="flex items-center gap-4">

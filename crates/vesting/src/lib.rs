@@ -72,7 +72,7 @@
 //!   recorded on the linear schedule without authorizing (mirroring escrow's
 //!   non-consenting parties). `create_tranche_schedule` also requires its
 //!   beneficiary.
-//! - `revoke` requires the funder recorded at creation.
+//! - `revoke` and `refund_revoked` require the funder recorded at creation.
 //! - `reassign_beneficiary` requires the funder recorded at creation.
 //! - `claim` requires the current beneficiary; `claim_for` requires the
 //!   explicitly named beneficiary and can pay frozen balances from prior
@@ -110,12 +110,22 @@
 //!
 //! Revocation is pure state-machine logic: it writes the frozen amount and
 //! the status and moves no tokens. The frozen remainder is settled through
-//! the same SEP-41 transfer path as any other claim (issue #50), and the
-//! unvested remainder stays custodied by the contract — refunding it to the
-//! funder is settlement logic out of scope here. Revocation itself adds no
-//! storage tier (issue #55). There is no tranche `revoke`: a tranche table
-//! is immutable and fully pre-funded by construction, and an unmet future
-//! tranche already never unlocks.
+//! the same SEP-41 transfer path as any other claim (issue #50). Revocation
+//! itself adds no storage tier (issue #55). There is no tranche `revoke`: a
+//! tranche table is immutable and fully pre-funded by construction, and an
+//! unmet future tranche already never unlocks.
+//!
+//! ## Revoked refund
+//!
+//! The unvested remainder of a revoked linear schedule —
+//! `total_amount - revoked_vested` — is returned to the funder by
+//! `refund_revoked`, which requires the funder recorded at creation. The
+//! amount already refunded is tracked under its own
+//! `DataKey::RevokedRefund(u64)` key rather than a new `VestingSchedule`
+//! field, so stored schedule records keep their exact shape. The refund
+//! transfers before that key is written, and once the remainder has been
+//! returned a repeat call returns `0` without issuing a transfer. A schedule
+//! revoked after it had fully vested has nothing to refund and returns `0`.
 //!
 //! ## Upgrade compatibility
 //!
@@ -135,7 +145,9 @@
 //!   `DataKey::TrancheSchedule(u64)`, and `DataKey::Count` keys retain their
 //!   meaning. `FormerBeneficiaryClaim(u64, Address)` is additive; all remain
 //!   in instance storage pending the persistent-storage migration (issue
-//!   #55). The SEP-41 settlement path (issue #50) is unchanged.
+//!   #55). `RevokedRefund(u64)` is likewise additive and leaves the stored
+//!   `VestingSchedule` shape unchanged. The SEP-41 settlement path (issue
+//!   #50) is unchanged.
 //! - `claimable`, `claimable_for`, `get_status`, `get_schedule`, and
 //!   `get_tranche_schedule` are read-only views.
 //!
@@ -194,6 +206,37 @@ pub trait SorobanForgeVesting {
         duration: u64,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
 
+    /// Create multiple linear vesting schedules in one atomic call.
+    ///
+    /// `schedules` is a batch of [`CreateScheduleArgs`]; every entry must
+    /// specify the same token contract. The funder authorizes the batch and
+    /// funds the aggregate token amount in a single SEP-41 transfer before any
+    /// schedule record is written, so a failed transfer rolls the whole batch
+    /// back.
+    ///
+    /// Batches are limited to at most 10 schedules. Each schedule is validated
+    /// individually (`total_amount > 0`, `duration > 0`, `cliff <= duration`),
+    /// and any invalid entry rejects the entire batch.
+    ///
+    /// Sequential ids are allocated from the shared counter, and each creation
+    /// emits a [`ScheduleCreated`] event.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidInput`] — the batch is empty or longer than 10,
+    ///   the entries specify different tokens, or any entry has
+    ///   `total_amount <= 0`, `duration == 0`, `cliff > duration`, or a
+    ///   beneficiary equal to the funder.
+    /// * [`ForgeError::ArithmeticOverflow`] — the aggregate token amount across
+    ///   all schedules would overflow `i128`.
+    /// * [`ForgeError::TokenTransferFailed`] — the aggregate transfer from the
+    ///   funder to the contract failed.
+    fn create_schedules_batch(
+        env: Env,
+        funder: Address,
+        schedules: Vec<CreateScheduleArgs>,
+    ) -> Result<Vec<u64>, ForgeError>;
+
     /// Create a new tranche (discrete unlock) vesting schedule for
     /// `beneficiary`.
     ///
@@ -240,6 +283,29 @@ pub trait SorobanForgeVesting {
     ///   or invalid (a non-funder caller is rejected at the host).
     fn revoke(env: Env, schedule_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
+    /// Return the unvested remainder of a revoked linear schedule to its
+    /// funder, and return the amount transferred.
+    ///
+    /// Refunds `total_amount - revoked_vested - already_refunded`. The SEP-41
+    /// transfer runs before the refunded amount is recorded. Returns `0`
+    /// without a transfer when nothing is left to refund (fully vested at
+    /// revocation, or already refunded). Requires the `funder` recorded at
+    /// creation.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no linear schedule with this id (a
+    ///   tranche id is `NotFound` here).
+    /// * [`ForgeError::InvalidInput`] — the schedule is not `Revoked`.
+    /// * [`ForgeError::ArithmeticOverflow`] — the refundable amount does not
+    ///   fit the recorded totals.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the refund; nothing is recorded.
+    fn refund_revoked(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
+
     /// Reassign a linear schedule's unvested balance to a new beneficiary.
     /// Vested-but-unclaimed tokens at the reassignment timestamp stay with
     /// the old beneficiary; the new beneficiary accrues only from that point.
@@ -249,6 +315,22 @@ pub trait SorobanForgeVesting {
         schedule_id: u64,
         new_beneficiary: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// List schedule IDs in creation order for the current beneficiary.
+    fn schedules_for_beneficiary(
+        env: Env,
+        beneficiary: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<u64>, ForgeError>;
+
+    /// List schedule IDs in creation order for the recorded funder.
+    fn schedules_for_funder(
+        env: Env,
+        funder: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<u64>, ForgeError>;
 
     /// Read the full linear schedule record (read-only view).
     ///
@@ -401,6 +483,27 @@ pub struct Tranche {
     pub amount: i128,
 }
 
+/// Arguments for creating a single linear vesting schedule via
+/// [`create_schedules_batch`](Self::create_schedules_batch).
+///
+/// Mirrors the scalar arguments of [`create_schedule`](Self::create_schedule)
+/// so a batch of identical-shaped grants can be validated and funded in one
+/// atomic call.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateScheduleArgs {
+    /// Recipient of the vested tokens.
+    pub beneficiary: Address,
+    /// Token contract whose balance is drawn down.
+    pub token: Address,
+    /// Total amount to vest linearly between `cliff` and `duration`.
+    pub total_amount: i128,
+    /// Seconds after `start` at which claims become possible.
+    pub cliff: u64,
+    /// Seconds after `start` at which the schedule is fully vested.
+    pub duration: u64,
+}
+
 /// A vesting schedule whose unlock table is an explicit list of tranches
 /// instead of a cliff-plus-ramp.
 ///
@@ -459,6 +562,9 @@ enum Stored {
     /// A tranche (discrete unlock table) schedule.
     Tranche(TrancheSchedule),
 }
+
+/// Maximum number of IDs returned by an index query.
+pub const MAX_SCHEDULE_PAGE_SIZE: u32 = 100;
 
 /// The deployable vesting contract.
 #[contract]
@@ -557,6 +663,88 @@ impl Vesting {
         Ok(id)
     }
 
+    /// Create multiple linear vesting schedules in one atomic call.
+    ///
+    /// See the trait documentation for the validation, funding, and event
+    /// semantics.
+    pub fn create_schedules_batch(
+        env: Env,
+        funder: Address,
+        schedules: Vec<CreateScheduleArgs>,
+    ) -> Result<Vec<u64>, ForgeError> {
+        // ---- validation (no state written yet) -------------------------------
+        if schedules.is_empty() || schedules.len() > 10 {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let token = &schedules.get(0).unwrap().token;
+        for args in &schedules {
+            if &args.token != token {
+                return Err(ForgeError::InvalidInput);
+            }
+            if args.total_amount <= 0 {
+                return Err(ForgeError::InvalidInput);
+            }
+            if args.duration == 0 {
+                return Err(ForgeError::InvalidInput);
+            }
+            if args.cliff > args.duration {
+                return Err(ForgeError::InvalidInput);
+            }
+            if funder == args.beneficiary {
+                return Err(ForgeError::InvalidInput);
+            }
+        }
+
+        // Aggregate token amount across the whole batch (checked arithmetic).
+        let total_amount: i128 = schedules.iter().try_fold(0i128, |acc, args| {
+            acc.checked_add(args.total_amount)
+                .ok_or(ForgeError::ArithmeticOverflow)
+        })?;
+
+        // ---- funding (transfer-before-state) --------------------------------
+        funder.require_auth();
+        transfer_to_contract(&env, token, &funder, total_amount)?;
+
+        // ---- record each schedule -----------------------------------------
+        let mut ids = Vec::new(&env);
+        let start = env.ledger().timestamp();
+        for args in &schedules {
+            let id = Self::next_id(&env)?;
+            let mut schedule = VestingSchedule {
+                funder: funder.clone(),
+                beneficiary: args.beneficiary.clone(),
+                token: args.token.clone(),
+                total_amount: args.total_amount,
+                start,
+                cliff: args.cliff,
+                duration: args.duration,
+                claimed: 0,
+                reassignment_vested: 0,
+                beneficiary_claimed: 0,
+                reassignment_count: 0,
+                revoked_vested: None,
+                status: VestingStatus::Locked,
+            };
+            schedule.status = Self::current_status(&schedule, start)?;
+            env.storage()
+                .instance()
+                .set(&DataKey::Schedule(id), &schedule);
+            Self::index_schedule(&env, id, &schedule.beneficiary, &schedule.funder);
+            events::schedule_created(
+                &env,
+                id,
+                &args.beneficiary,
+                args.total_amount,
+                args.cliff,
+                args.duration,
+            );
+            ids.push_back(id);
+        }
+
+        Ok(ids)
+    }
+
     /// Revoke a linear schedule before completion and permanently stop
     /// further vesting.
     ///
@@ -589,6 +777,56 @@ impl Vesting {
                 Ok(())
             }
         }
+    }
+
+    /// Refund the unvested remainder of a revoked linear schedule to its
+    /// funder and return the amount transferred.
+    ///
+    /// The refundable amount is `total_amount - revoked_vested -
+    /// already_refunded`, computed with checked arithmetic. The SEP-41
+    /// transfer runs before the refunded total is written, so a failed
+    /// transfer records nothing. When nothing is refundable the call returns
+    /// `0` without a transfer, a write, or an event, so repeating it can never
+    /// pay twice.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no linear schedule with this id.
+    /// * [`ForgeError::InvalidInput`] — the schedule is not `Revoked`.
+    /// * [`ForgeError::ArithmeticOverflow`] — the refundable amount does not
+    ///   fit the recorded totals.
+    /// * [`ForgeError::TokenTransferFailed`] — the token rejected the refund.
+    pub fn refund_revoked(env: Env, schedule_id: u64) -> Result<i128, ForgeError> {
+        let schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(ForgeError::NotFound)?;
+        let revoked_vested = match (&schedule.status, schedule.revoked_vested) {
+            (VestingStatus::Revoked, Some(frozen)) => frozen,
+            _ => return Err(ForgeError::InvalidInput),
+        };
+        schedule.funder.require_auth();
+
+        let key = DataKey::RevokedRefund(schedule_id);
+        let refunded: i128 = env.storage().instance().get(&key).unwrap_or(0);
+        let amount = schedule
+            .total_amount
+            .checked_sub(revoked_vested)
+            .and_then(|unvested| unvested.checked_sub(refunded))
+            .filter(|amount| *amount >= 0)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        if amount == 0 {
+            return Ok(0);
+        }
+
+        transfer_from_contract(&env, &schedule.token, &schedule.funder, amount)?;
+        let total_refunded = refunded
+            .checked_add(amount)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        env.storage().instance().set(&key, &total_refunded);
+        events::revoked_refunded(&env, schedule_id, &schedule.funder, amount);
+        Ok(amount)
     }
 
     /// Reassign only a linear schedule's unvested balance.
@@ -650,6 +888,26 @@ impl Vesting {
         schedule.reassignment_count = reassignment_count;
         Self::save_linear(&env, schedule_id, &schedule);
         Ok(())
+    }
+
+    /// List schedule IDs in creation order for the current beneficiary.
+    pub fn schedules_for_beneficiary(
+        env: Env,
+        beneficiary: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<u64>, ForgeError> {
+        Self::index_page(&env, DataKey::BeneficiaryIndex(beneficiary), offset, limit)
+    }
+
+    /// List schedule IDs in creation order for the recorded funder.
+    pub fn schedules_for_funder(
+        env: Env,
+        funder: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<u64>, ForgeError> {
+        Self::index_page(&env, DataKey::FunderIndex(funder), offset, limit)
     }
 
     /// Read the full linear schedule record (read-only view; no state
@@ -989,11 +1247,91 @@ impl Vesting {
         Ok(total)
     }
 
+    fn index_schedule(env: &Env, id: u64, beneficiary: &Address, funder: &Address) {
+        Self::insert_index(env, DataKey::BeneficiaryIndex(beneficiary.clone()), id);
+        Self::insert_index(env, DataKey::FunderIndex(funder.clone()), id);
+    }
+
+    fn read_index(env: &Env, key: &DataKey) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(key)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    fn write_index(env: &Env, key: &DataKey, ids: &Vec<u64>) {
+        env.storage().persistent().set(key, ids);
+        soroban_forge_shared_utils::bump_entry(env, key);
+    }
+
+    fn insert_index(env: &Env, key: DataKey, id: u64) {
+        let mut ids = Self::read_index(env, &key);
+        if let Err(position) = ids.binary_search(id) {
+            ids.insert(position, id);
+            Self::write_index(env, &key, &ids);
+        }
+    }
+
+    fn index_page(
+        env: &Env,
+        key: DataKey,
+        mut offset: u32,
+        limit: u32,
+    ) -> Result<Vec<u64>, ForgeError> {
+        if !(1..=MAX_SCHEDULE_PAGE_SIZE).contains(&limit) {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let instance = env.storage().instance();
+        let legacy_end = instance
+            .get(&DataKey::LegacyIndexEnd)
+            .unwrap_or_else(|| instance.get(&DataKey::Count).unwrap_or(0u64));
+        let mut page = Vec::new(env);
+        // Upgraded contracts read pre-index schedules from their original keys.
+        for id in 1..=legacy_end {
+            let matches = match Self::load(env, id) {
+                Ok(Stored::Linear(schedule)) => match &key {
+                    DataKey::BeneficiaryIndex(owner) => schedule.beneficiary == *owner,
+                    DataKey::FunderIndex(owner) => schedule.funder == *owner,
+                    _ => false,
+                },
+                Ok(Stored::Tranche(schedule)) => match &key {
+                    DataKey::BeneficiaryIndex(owner) | DataKey::FunderIndex(owner) => {
+                        schedule.beneficiary == *owner
+                    }
+                    _ => false,
+                },
+                Err(_) => false,
+            };
+            if matches {
+                if offset > 0 {
+                    offset -= 1;
+                } else {
+                    page.push_back(id);
+                    if page.len() == limit {
+                        return Ok(page);
+                    }
+                }
+            }
+        }
+
+        let ids = Self::read_index(env, &key);
+        if offset < ids.len() {
+            let end = offset.saturating_add(limit - page.len()).min(ids.len());
+            page.append(&ids.slice(offset..end));
+        }
+        Ok(page)
+    }
+
     /// Allocate the next monotonic schedule id.
     fn next_id(env: &Env) -> Result<u64, ForgeError> {
         let count: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
         let id = count.checked_add(1).ok_or(ForgeError::ArithmeticOverflow)?;
-        env.storage().instance().set(&DataKey::Count, &id);
+        let storage = env.storage().instance();
+        if !storage.has(&DataKey::LegacyIndexEnd) {
+            storage.set(&DataKey::LegacyIndexEnd, &count);
+        }
+        storage.set(&DataKey::Count, &id);
         Ok(id)
     }
 
@@ -1051,12 +1389,16 @@ impl Vesting {
             return Ok(schedule.total_amount);
         }
         let elapsed = now - cliff_time;
-        let vested = schedule
+        // Preserve the overflow error exposed by existing linear schedules.
+        schedule
             .total_amount
-            .checked_mul(elapsed as i128)
-            .ok_or(ForgeError::ArithmeticOverflow)?
-            / period as i128;
-        Ok(vested)
+            .checked_mul(i128::from(elapsed))
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        soroban_forge_shared_utils::math::mul_div_floor(
+            schedule.total_amount,
+            i128::from(elapsed),
+            i128::from(period),
+        )
     }
 
     /// Claimable amount belonging to a beneficiary for one linear schedule.
@@ -1156,7 +1498,8 @@ impl Vesting {
     }
 }
 
-/// Events emitted to both beneficiaries when a linear schedule is reassigned.
+/// Events emitted when a linear schedule is reassigned (to both
+/// beneficiaries) or when a revoked schedule's unvested remainder is refunded.
 pub mod events {
     use soroban_sdk::{contractevent, Address, Env};
 
@@ -1180,6 +1523,54 @@ pub mod events {
         pub old_beneficiary: Address,
         pub vested_unclaimed: i128,
         pub reassignment_count: u32,
+    }
+
+    /// The unvested remainder of a revoked schedule was returned to its
+    /// funder.
+    #[contractevent]
+    pub struct RevokedRefunded {
+        #[topic]
+        pub schedule_id: u64,
+        #[topic]
+        pub funder: Address,
+        pub amount: i128,
+    }
+
+    pub fn revoked_refunded(env: &Env, schedule_id: u64, funder: &Address, amount: i128) {
+        RevokedRefunded {
+            schedule_id,
+            funder: funder.clone(),
+            amount,
+        }
+        .publish(env);
+    }
+
+    #[contractevent]
+    pub struct ScheduleCreated {
+        #[topic]
+        pub schedule_id: u64,
+        pub beneficiary: Address,
+        pub total_amount: i128,
+        pub cliff: u64,
+        pub duration: u64,
+    }
+
+    pub fn schedule_created(
+        env: &Env,
+        schedule_id: u64,
+        beneficiary: &Address,
+        total_amount: i128,
+        cliff: u64,
+        duration: u64,
+    ) {
+        ScheduleCreated {
+            schedule_id,
+            beneficiary: beneficiary.clone(),
+            total_amount,
+            cliff,
+            duration,
+        }
+        .publish(env);
     }
 
     pub fn beneficiary_reassigned(
@@ -1239,7 +1630,19 @@ fn transfer_from_contract(
 mod tests;
 
 #[cfg(test)]
+mod resource_report;
+
+#[cfg(test)]
 mod authz;
 
 #[cfg(test)]
 mod props;
+
+#[cfg(test)]
+mod indexer_fixtures;
+
+#[cfg(test)]
+mod model_check;
+
+#[cfg(test)]
+mod index_props;

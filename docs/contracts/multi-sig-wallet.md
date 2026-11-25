@@ -16,6 +16,7 @@ fn confirm(tx_id: u64, signer: Address) -> Result<(), ForgeError>
 fn reject(tx_id: u64, signer: Address) -> Result<(), ForgeError>
 fn execute(tx_id: u64) -> Result<(), ForgeError>
 fn get_tx(tx_id: u64) -> Result<WalletTx, ForgeError>
+fn get_tx_preview(tx_id: u64) -> Result<TxPreview, ForgeError>
 fn is_live(tx_id: u64) -> bool
 fn is_tx_live(tx_id: u64) -> bool
 fn add_owner(proposer: Address, new_owner: Address) -> Result<u64, ForgeError>
@@ -67,6 +68,7 @@ fn get_transactions_by_status(
     offset: u32,
     limit: u32,
 ) -> Result<Vec<WalletTx>, ForgeError>
+fn get_tx_preview(tx_id: u64) -> Result<TxPreview, ForgeError>
 ```
 
 Both return transactions in ascending `tx_id` order. For
@@ -78,6 +80,12 @@ past the end return an empty vector or the remaining records. A `limit` of
 zero returns `ForgeError::InvalidInput`. An uninitialized or empty wallet
 returns an empty vector for a positive limit. These views do not require
 authorization and do not modify contract state.
+
+`get_tx_preview` returns a `TxPreview` with the transaction `status`, current
+wallet `threshold`, number of recorded distinct `approvals`, and
+`approvals_remaining` (zero once the threshold is met). Its status follows the
+same lazy expiry evaluation as `get_tx`; an unknown transaction ID returns
+`ForgeError::NotFound`. This view is read-only and requires no authorization.
 
 Additional views: `get_threshold`, `get_owners`, `is_owner`,
 `get_confirmations`, `get_rejections`, `get_tx_count`, `get_tx`, and the
@@ -111,8 +119,8 @@ still used if a limit is configured again.
 positive amount, the same rolling-limit arithmetic as submission, then the
 wallet's recorded custody balance. This is a snapshot at the current ledger
 timestamp, not a promise about later execution: submission reserves window
-capacity, while custody funding is rechecked when the approved transaction
-executes. The generated TypeScript client has not been regenerated for these
+capacity, and both the rolling limit and custody funding are rechecked when
+the approved transaction executes (see below). The generated TypeScript client has not been regenerated for these
 new views; future client regeneration will include them.
 
 Example: with a 1,000-unit limit per 600 seconds, a 700-unit withdrawal
@@ -121,6 +129,27 @@ and `reset_at = 10,600`. A check for 400 at 10,599 returns
 `CheckResult::LimitExceeded`, matching submission enforcement. At 10,600 the
 700-unit entry is expired; the same check is allowed if the wallet has enough
 recorded balance.
+
+### Execution-time limit re-check
+
+`execute` re-checks a withdrawal against the token's limit **in force at
+execution**, before custody funding, so a proposal approved under an older,
+higher limit cannot settle past a lowered one. A withdrawal is never counted
+twice:
+
+- Admitted at submission and still inside the current window — it is
+  already in the window total, so execution requires `total <= limit`.
+- Not counted — submitted while the token had no limit, or more than one
+  window ago — it is checked like a new submission (`total + amount <=
+  limit`) and recorded in the window when it executes.
+- No limit configured at execution — no limit check.
+
+A failed re-check returns `WithdrawalLimitExceeded` and leaves the
+transaction `Pending` with nothing moved; owners can raise the limit, wait
+for the window to clear, or `reject` it. Which withdrawals were admitted is
+tracked per transaction under the persistent `WithdrawalAdmission(tx_id)` key
+(removed on execution), so the `WalletTx` and `WindowEntry` shapes are
+unchanged.
 
 ## States
 
@@ -165,3 +194,16 @@ an unknown `tx_id` returns `ForgeError::NotFound`. A separate
 `touch_ttl(token)` keeper extends the persistent balance entries' TTL.
 
 <div id="task-247"></div>
+
+### Confirm several transactions
+
+Call `confirm_batch(tx_ids, signer)` with 1–16 distinct transaction IDs. One
+current owner authorizes the entire list. The wallet validates every ID before
+recording approvals, then emits one ordinary `TxConfirmed` per transaction in
+input order. An empty list, duplicate ID or oversized list returns
+`InvalidInput`. For each entry the same eligibility rules apply as for
+`confirm`. An invalid entry leaves every approval and event untouched.
+
+Owners can confirm during a pause. Execution is a separate call and checks
+the current threshold, pause, withdrawal limit and available balance. Removing
+an owner clears their pending approvals, including those made in a batch.

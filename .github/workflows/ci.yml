@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, integration]
+    branches: [develop, main, integration]
   pull_request:
     branches: [main, integration]
 
@@ -77,6 +77,8 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # See .cargo/audit.toml for why this advisory is ignored.
+          ignore: RUSTSEC-2026-0387
           # See .cargo/audit.toml for why this advisory is ignored.
           ignore: RUSTSEC-2026-0387
 
@@ -164,11 +166,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "18"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: packages/typescript-sdk/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install stellar-cli
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            https://github.com/stellar/stellar-cli/releases/download/v28.0.0/stellar-cli-28.0.0-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/stellar" --version
       - name: Install dependencies
         run: npm ci --ignore-scripts
         working-directory: packages/typescript-sdk

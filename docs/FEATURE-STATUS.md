@@ -13,15 +13,9 @@ to the proposer or forfeited to the treasury at a terminal transition.
 Multi-sig wallet transactions live in persistent storage with a
 permissionless TTL keeper, alongside its threshold-and-confirmation state
 machine.
-its splits the same way via `settle_sale`; vesting settles its claims via
-`claim`; subscriptions bill each due period with a real subscriber →
-provider transfer in pull mode or prepaid contract-balance debit, with retry
-and refund behavior; DAO governance now
-dispatches approved opaque actions on-chain and settles a SEP-41 proposal
-bond — pulled at `propose`, refunded to the proposer or forfeited to the
-treasury at a terminal transition.
 
-**Last verified against:** the SDK 27 migration (workspace v0.2.0).
+**Last verified against:** the current workspace pins (`soroban-sdk 28.0.0`,
+`soroban-sdk-macros 27.0.6`, workspace v0.2.0).
 
 ---
 
@@ -31,12 +25,14 @@ treasury at a terminal transition.
 | :--- | :---: | :--- |
 | `create_escrow` | ✅ Implemented | Validates amount/timeout, buyer+seller auth, takes the SEP-41 token address |
 | `deposit` | ✅ Implemented | **Real token transfer** buyer → contract, before any state write |
-| `release` | ✅ Implemented | Seller-authorized; **real token transfer** contract → seller |
-| `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** |
-| `refund_expired` | ✅ Implemented | Permissionless strictly after timeout; `Funded` only, disputed escrows frozen |
-| `release` | ✅ Implemented | Seller-authorized; **real token transfer** contract → seller (full remaining balance) |
-| `release_partial` | ✅ Implemented | Seller-authorized; **real token transfer** of a partial amount contract → seller; `released` accounting tracked; final partial transitions to `Completed`; `refund`/`resolve` operate on remaining balance |
-| `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** of remaining balance |
+| `create_escrow_with_review` | ✅ Implemented | As `create_escrow`, with the review window (60 s to 30 days); `create_escrow` uses 3 days |
+| `request_release` | ✅ Implemented | Seller-authorized; starts the review window for all or part of the remaining balance; before the deadline only; one at a time |
+| `approve_release` | ✅ Implemented | Buyer-authorized; pays the pending request now via **real token transfer** |
+| `execute_release` | ✅ Implemented | Permissionless once the review window ends with no dispute; **real token transfer** contract → seller |
+| `release` | ✅ Implemented | **Buyer**-authorized direct payment; **real token transfer** contract → seller (full remaining balance) |
+| `release_partial` | ✅ Implemented | **Buyer**-authorized direct payment of a partial amount; `released` accounting tracked; final partial transitions to `Completed`; `refund`/`resolve` operate on remaining balance |
+| `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** of remaining balance; buyer's refund blocked by a pending release request (`ReleasePending`) |
+| `refund_expired` | ✅ Implemented | Permissionless strictly after timeout; pays the **remaining** balance; `Funded` only, disputed escrows frozen, blocked by a pending release request |
 | `dispute` | ✅ Implemented | Claimant (buyer or seller) authorized, `Funded` only — see [design notes](KNOWN-LIMITATIONS.md#design-notes-not-limitations-but-worth-knowing) |
 | `resolve` | ✅ Implemented | Arbiter-only, final; pays **remaining balance** either direction via **real token transfer** |
 | `cancel` | ✅ Implemented | Buyer, `Pending` only; removes id from each distinct participant index after validation/auth |
@@ -96,11 +92,11 @@ treasury at a terminal transition.
 | `vote` | ✅ Implemented | One-vote-per-voter; adds the voter's current governance-token balance to the selected tally; zero-balance votes rejected |
 | `execute` | ✅ Implemented | Permissionless majority finalisation and dependency-gated dispatch; unmet requirements return `DeadlineReached`, executed conflicts return `InvalidInput`, and cancelled/defeated requirements permanently strand dependents in `Succeeded`; target failure remains retryable; terminal transitions decrement proposer active count |
 | `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; bond refund; decrements proposer active count |
-| `get_proposal` / `get_dependencies` / `get_proposal_count` / `get_proposals` / `has_voted` / `get_active_proposal_count` | ✅ Implemented | Read-only proposal and dependency-edge views; pagination with bounds clamping and proposer active count |
+| `get_proposal` / `get_dependencies` / `get_proposal_count` / `get_proposals` / `has_voted` / `get_vote_receipt` / `get_active_proposal_count` | ✅ Implemented | Read-only proposal, dependency-edge and vote-receipt views; pagination with bounds clamping and proposer active count |
 | `get_bond_config` | ✅ Implemented | Read-only; `NotInitialized` when no bond is configured |
 | `touch_ttl` | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a proposal; `NotFound` for unknown ids |
 | Events | ✅ Implemented | `Proposed` data includes dependency edges; event names/topics otherwise stable; `VoteCast`, `Finalised`, `BondPosted`, `BondReleased` |
-| Storage | ✅ Persistent + TTL | Dependencies live on persistent proposal records; no new top-level keys; count, config, custody, vote markers, and proposer active counts remain in instance storage |
+| Storage | ✅ Persistent + TTL | Dependencies live on persistent proposal records; count, config, custody, vote markers, proposer active counts, and vote receipts remain in instance storage. `DataKey::VoteReceipt` was appended last so existing key discriminants are unchanged |
 | Tests | ✅ 85+ | Bond custody, weighted voting and cooldown coverage; dependency ordering/conflicts/cancellation, malformed graph validation, dependency view/events, randomized execution-order mirror property; negative-auth suite retained |
 | Weighted voting | ✅ Implemented | Balance-weighted voting powered by immutable SEP-41 governance token configured at `initialize` |
 
@@ -146,25 +142,16 @@ treasury at a terminal transition.
 | Concern | Status | Notes |
 |---|---|---|
 | Checked arithmetic | ✅ Workspace-wide | Overflow-safe; vesting guards documented |
-| `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, DAO governance, and marketplace royalties proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other two: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
-| Events | ✅ Escrow + Multi-Sig + DAO + Marketplace + Vesting | Full lifecycle events on escrow, multi-sig wallet, DAO governance, marketplace royalties, and vesting beneficiary reassignment |
-| Persistent storage + TTL | ✅ Escrow + Royalties + Multi-Sig + DAO | Per-record persistent entries with `touch_ttl`/`touch_tx_ttl` keepers on escrow, marketplace royalties (royalty + summary), multi-sig (transactions), and DAO (proposals); vesting and subscriptions remain instance-only. TTL policy constants + `bump_entry` helper consolidated in shared-utils (issue #127) and consumed by all four |
-| SEP-41 token settlement | ✅ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Transfers use transfer-before-state ordering; subscription pull-mode charges pay subscriber → provider, while opt-in prepaid subscriptions custody deposits and pay exact debits/refunds |
-| Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
-| Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
-| TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
-| Provenance + verification | ✅ CLI | `soroban-forge verify` checks a WASM artifact / expected hash against a deterministic rebuild using `provenance-manifest.json` | 
-| `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, and DAO governance proven against wrong signers via their negative-auth suites (`authz.rs`) + authorization-tree assertions; other three: call-graph level only (see [Known Limitations §4](KNOWN-LIMITATIONS.md)) |
-| Events | ✅ Escrow + Multi-Sig + DAO + Marketplace + Vesting | Full lifecycle events on escrow, multi-sig wallet, DAO governance, marketplace royalties, and vesting beneficiary reassignment |
-| Persistent storage + TTL | ⚠️ Escrow only | Per-id persistent entries + `touch_ttl` keeper; others instance-only |
-| SEP-41 token settlement | ⚠️ Escrow + royalties + multi-sig + vesting + DAO + subscriptions | Real transfers with transfer-before-state ordering on escrow, vesting, marketplace, DAO, and subscriptions; prepaid subscriptions add contract custody, exact balance debits, and cancellation refunds |
-| Testnet deployment | ✅ Escrow deployed | Contract ID, WASM sha256, and receipt rounds in the README "Proof at a glance" table; the other five are not deployed |
-| Mainnet deployment | ⚠️ Partial | Smoke SAC live (`CBBCLWWU…DN4CW`, Horizon-confirmed); escrow WASM upload measured at **17.57 XLM rent** via simulation and deferred pending funding — see [Known Limitations §6](KNOWN-LIMITATIONS.md) |
-| TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` generated from the deployed escrow ABI (no own test suite yet) |
-| CLI | ✅ Implemented | Developer CLI with `build`, `test`, `lint`, `deploy`, `invoke`, and `events` commands |
-| ForgeError registry | ✅ Generated | Machine-readable error registry from Rust source; generates `errors.json` and TypeScript module |
-| TypeScript SDK | ✅ Generated | `@soroban-forge/escrow-client` from the deployed escrow ABI + five generated clients (`vesting`, `multi-sig-wallet`, `subscription-payments`, `marketplace-royalties`, `dao-governance`) via `scripts/generate-clients.sh`; all six build with `npm run build` (no own test suites yet) |
-| Next.js demo | ✅ Example | `packages/nextjs-example` — testnet escrow demo UI (Freighter connect, friendbot funding, create/deposit/release/refund/dispute/resolve, read, participant list) |
-| CI (fmt/clippy/test/audit/WASM size/provenance) | ✅ Enforced | `--locked`, `-D warnings`, stable toolchain, `wasm32v1-none`, size budget, **provenance manifest job** (SHA-256 of all six WASM artifacts from a clean rebuild) |
-| External audit | ❌ Not performed | Planned as a grant-funded tranche deliverable before any mainnet value custody |
-| Soroban SDK version | ✅ 27.0.6 | Stable Rust; `wasm32v1-none` target |
+| `require_auth` on every state change | ✅ Workspace-wide | Escrow, vesting, DAO governance, and marketplace royalties have dedicated negative-auth suites; the remaining contracts are covered at call-graph level (see [Known Limitations](KNOWN-LIMITATIONS.md)) |
+| Events | ✅ Implemented | Escrow, multi-sig, DAO, marketplace, subscription, and vesting lifecycle events are covered |
+| Persistent storage + TTL | ✅ Most records | Escrow, royalties, multi-sig, DAO, and subscriptions use persistent records with keeper entrypoints; vesting schedules remain instance-backed |
+| SEP-41 token settlement | ✅ All six contracts | Transfers use transfer-before-state ordering; prepaid subscriptions custody deposits and issue exact debits/refunds |
+| Testnet deployment | ✅ Escrow deployed | Contract ID, WASM hash, and receipt rounds are in the README proof table; the other five contracts are not deployed |
+| Mainnet deployment | ⚠️ Not deployed | Mainnet smoke SAC is live; escrow deployment remains deferred pending funding; no production contract is claimed |
+| TypeScript SDK | ✅ Generated | Six generated clients build from the contract ABIs; dedicated SDK test suites remain follow-up work |
+| CLI | ✅ Implemented | Developer CLI includes `build`, `test`, `lint`, `deploy`, `invoke`, and `events` commands |
+| ForgeError registry | ✅ Generated | Machine-readable error registry and TypeScript module are generated from Rust sources |
+| Next.js demo | ✅ Example | `packages/nextjs-example` provides a testnet escrow UI with demo/local simulation, live testnet transaction state indicators, and Freighter connection (testnet-only, unaudited) |
+| CI | ✅ Enforced | fmt, clippy, workspace tests, audit, WASM size, and provenance checks run with locked dependencies |
+| External audit | ❌ Not performed | Planned before any mainnet value custody |
+| Soroban SDK version | ✅ 28.0.0 | Stable Rust, `wasm32v1-none`; macros package remains pinned to 27.0.6 |

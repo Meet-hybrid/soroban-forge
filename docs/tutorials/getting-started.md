@@ -4,9 +4,9 @@ This tutorial will walk you through building and testing a Soroban Forge contrac
 
 ## Prerequisites
 
-- Rust **stable** (pinned via `rust-toolchain.toml` to the stable channel)
-- `rustup target add wasm32v1-none`
-- `cargo install soroban-cli`
+- Rust **1.96.0** (pinned in `rust-toolchain.toml`; rustup installs it and the
+  `wasm32v1-none` target on first use)
+- Stellar CLI v25.2.0 or newer: `cargo install --locked stellar-cli`
 
 ## Step 1: Build
 
@@ -39,6 +39,6 @@ stellar contract deploy \
 
 ## Next Steps
 
-- Explore the [Architecture](architecture/architecture.md)
-- Review [Security Best Practices](best-practices/smart-contract-security.md)
-- Read the [Contracts Overview](contracts/index.md)
+- Explore the [Architecture](../architecture/architecture.md)
+- Review [Security Best Practices](../best-practices/smart-contract-security.md)
+- Read the [Contracts Overview](../contracts/index.md)

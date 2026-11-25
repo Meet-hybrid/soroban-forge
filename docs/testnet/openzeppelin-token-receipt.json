@@ -1,0 +1,108 @@
+{
+  "network": "testnet",
+  "date": "2026-11-13",
+  "escrow": "CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB",
+  "openzeppelin": {
+    "library": "OpenZeppelin/stellar-contracts v0.8.0",
+    "example": "fungible-pausable",
+    "token": "CBPDG57HYK5NQM3P5KISW4MG7SWQ7OJ4VO44PBOP6ERONOJJXYAVJTEY",
+    "wasm_sha256": "3e221ebd9dd294279ad76534676fbe5d05ee18a8ec63f2c75112213575141e7f"
+  },
+  "roles": {
+    "issuer": "GCRB7KX3FNORLONCFXQ35I5PFW3WT3JUS4H4WM65QIIMA6GIGLZTHFMJ",
+    "buyer": "GARSTUL54RN6DUOVYX6RUOR5ROTB5BHVIDKC32JZTERQ6PPN743WQLNC",
+    "seller": "GBR5AGHIIBJEY2DDOADPKIF4UKQFNQCZ55QGI55OSYGRMCACU3WXCQMI",
+    "arbiter": "GDA77WEHTWDL4HJWLA5CZM4SVOHQCV4G2QPC267LD6UYPCDYKIR35W4F"
+  },
+  "steps": [
+    {
+      "what": "deploy OpenZeppelin fungible-pausable token",
+      "hash": "cefcaf19b46c336ba3064dad1c3aa7c36e3ad217b652a4f875e53116c0b970d8",
+      "token": "CBPDG57HYK5NQM3P5KISW4MG7SWQ7OJ4VO44PBOP6ERONOJJXYAVJTEY",
+      "supply": 1000000,
+      "tx": "https://stellar.expert/explorer/testnet/tx/cefcaf19b46c336ba3064dad1c3aa7c36e3ad217b652a4f875e53116c0b970d8"
+    },
+    {
+      "what": "deploy Forge vesting",
+      "hash": "f19d9bbad7b7e4b345828d5302aaf3c1033e26ece8134d72fe4733c3dab533df",
+      "contract": "CCSBFC3YMSGREWJ65RWR6TT3YPH3AJ7UDTJBMWUJCOLUEBELUJBXH2ZT",
+      "tx": "https://stellar.expert/explorer/testnet/tx/f19d9bbad7b7e4b345828d5302aaf3c1033e26ece8134d72fe4733c3dab533df"
+    },
+    {
+      "what": "issuer funds the buyer with 10,000 FDT",
+      "hash": "388ae4316ad6d5b9b7b2eb9472b139d17cc7e6aa542d841f19a54be6ecb57fb7",
+      "tx": "https://stellar.expert/explorer/testnet/tx/388ae4316ad6d5b9b7b2eb9472b139d17cc7e6aa542d841f19a54be6ecb57fb7"
+    },
+    {
+      "what": "A. escrow: create, deposit 1,000, seller releases",
+      "escrow_id": "4",
+      "create": "cc8b6af539776fa4877e919dc9ebaf224534e439fe4b70fa7b93f7c2da579cb7",
+      "deposit": "a2c56bbf3f22ca3c37430dd021ac6e841651db44820f816d43ef0b6dc18dd137",
+      "hash": "206ce554e393fda7f5e06de2df7b1dc0d26d7831b77c660659bdc0784315576f",
+      "held_in_escrow_after_deposit": 1000,
+      "ok": true,
+      "tx": "https://stellar.expert/explorer/testnet/tx/206ce554e393fda7f5e06de2df7b1dc0d26d7831b77c660659bdc0784315576f"
+    },
+    {
+      "what": "B. token paused by its owner: release is refused, funds stay in escrow; after unpause it succeeds",
+      "escrow_id": "5",
+      "create": "f4990e10417fe93fd5b9a16e4b765bf8afa8a6bd8b2735642be417c56667cf66",
+      "deposit": "07c784d1c1858125c71059c2065d1d2a4afd2a93190ebec6051d5fb6c570605d",
+      "pause": "9b861cf701a75c7d54ef91c34c7a46ee1af9dd588ee74d19a7439dc18d8ce33c",
+      "unpause": "ce8403d756b1b5c5afe21b00c2e49a80a78756cf714ecdf2942dcdaa4f90f734",
+      "hash": "42908cbb51034855ab8f680b3caa9b4cf38a18c80c5df2b8dc6741e398e2028b",
+      "release_while_paused_refused": true,
+      "error": "Error(Contract, #11)",
+      "escrow_status_while_paused": "Funded",
+      "held_while_paused": 500,
+      "seller_unchanged_while_paused": true,
+      "ok": true,
+      "tx": "https://stellar.expert/explorer/testnet/tx/42908cbb51034855ab8f680b3caa9b4cf38a18c80c5df2b8dc6741e398e2028b"
+    },
+    {
+      "what": "C. dispute: buyer disputes, arbiter rules for the buyer, buyer refunded",
+      "escrow_id": "6",
+      "create": "bb92c6c8ccbad553c82be8e24f587570bc7fccc529aa523d1391baa3c7b2a2a6",
+      "deposit": "64108e5f6abc735fd6c5ce3d2cf66347bd4225923d60edfbfd2f97f426ae8b98",
+      "dispute": "014e7762909e97d2dd625edf45e76bd95c28ed1e7ec0bd37e6e412416fab83cb",
+      "hash": "7b7bfea8e8931d461a6af43572a486084a10930b70ef0c559f3c4239df7592c7",
+      "refunded": 300,
+      "ok": true,
+      "tx": "https://stellar.expert/explorer/testnet/tx/7b7bfea8e8931d461a6af43572a486084a10930b70ef0c559f3c4239df7592c7"
+    },
+    {
+      "what": "D. vesting: funder pays the contract 1,200, schedule of 30 s, beneficiary claims",
+      "schedule_id": "1",
+      "fund": "238129b1fc9e050aff8eae6c7887b4b2d11ddfe65c714610f27750d9dbfae079",
+      "schedule": "5679bbaaac94a310deb0dd19e0c6b355f61ccb3480c41c8c67784dd922b214b6",
+      "hash": "6a64eb75125f821be0b36d3280f372e21251390db2ab7b4d90fe7e10ee32165d",
+      "claimed": 1200,
+      "ok": true,
+      "tx": "https://stellar.expert/explorer/testnet/tx/6a64eb75125f821be0b36d3280f372e21251390db2ab7b4d90fe7e10ee32165d"
+    },
+    {
+      "what": "every token accounted for",
+      "balances": {
+        "issuer": 988800,
+        "buyer": 8500,
+        "seller": 2700,
+        "escrow_contract_change": 0,
+        "vesting_contract": 0
+      },
+      "expected": {
+        "issuer": 988800,
+        "buyer": 8500,
+        "seller": 2700,
+        "escrow_contract_change": 0,
+        "vesting_contract": 0
+      },
+      "total": 1000000,
+      "ok": true
+    }
+  ],
+  "vesting": {
+    "contract": "CCSBFC3YMSGREWJ65RWR6TT3YPH3AJ7UDTJBMWUJCOLUEBELUJBXH2ZT",
+    "wasm_sha256": "10d24a8fa800803aafcf2b92ff46ccc5a9d2f201f03736f7012a6e1c81f00ece"
+  },
+  "all_ok": true
+}

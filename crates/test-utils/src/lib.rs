@@ -7,20 +7,37 @@
 //! - [`TestAccounts`] to obtain deterministic, distinct mock addresses
 //! - [`ttl`] for ledger-sequence manipulation, entry-liveness introspection,
 //!   and the deterministic TTL chaos harness ([`chaos_drive`])
+//! - [`events`] for decoded event inspection and declarative event assertions
 //!
 //! This crate is intended to be used as a `dev-dependency` by contract crates.
+
+extern crate std;
 
 use soroban_sdk::Env;
 
 pub mod mocks;
+pub mod model;
 pub mod ttl;
 
+/// Structured event introspection. Test-only, so it stays behind the same
+/// `cfg` the rest of this crate's test helpers use.
+#[cfg(any(test, feature = "testutils"))]
+pub mod events;
+
+#[cfg(any(test, feature = "testutils"))]
+pub use events::{assert_contract_event, filter_contract_events, DecodedEvent, MockEventSink};
+
 pub use mocks::{
+    failure_step_for_seed, FailureBoundary, FailureSchedule, FailureToken, FailureTokenClient,
     MockTarget, MockTargetClient, RevertingTarget, RevertingTargetClient, TestAccounts,
 };
+pub use model::{
+    assert_model_check, replay_ops, run_model_check, LifecycleModel, ModelDriver, ModelRng,
+    ModelStepRecord, ModelTrace, ModelTraceFor, OpGenerator,
+};
 pub use ttl::{
-    advance_ledger, assert_no_violations, chaos_drive, entry_is_live, entry_ttl, ChaosStep,
-    ChaosTarget, ChaosTrace, StepOutcome, BUMP_AMOUNT, BUMP_THRESHOLD, DAY_IN_LEDGERS,
+    advance_ledger, advance_ledger_to, assert_no_violations, chaos_drive, entry_is_live, entry_ttl,
+    ChaosStep, ChaosTarget, ChaosTrace, StepOutcome, BUMP_AMOUNT, BUMP_THRESHOLD, DAY_IN_LEDGERS,
 };
 
 /// Create a [`Env`] configured for contract testing.
@@ -33,4 +50,30 @@ pub fn new_env() -> Env {
     let env = Env::default();
     env.mock_all_auths();
     env
+}
+
+/// Emit one machine-readable resource record for the most recent invocation.
+///
+/// Entry counts are the SDK host's invocation-resource estimates; they are
+/// intended for regression comparison, not as an RPC transaction footprint.
+pub fn emit_resource_report(env: &Env, scenario: &str) {
+    let estimate = env.cost_estimate();
+    let resources = estimate.resources();
+    let read_entries = resources.disk_read_entries + resources.memory_read_entries;
+    let footprint_entries = read_entries + resources.write_entries;
+    let budget = estimate.budget();
+    let instructions = budget.cpu_instruction_cost();
+    let memory_bytes = budget.memory_bytes_cost();
+    let transaction_fee_stroops = estimate.fee().total;
+
+    std::println!(
+        "CONTRACT_RESOURCE_REPORT:{{\"scenario\":\"{}\",\"metrics\":{{\"footprint_entries\":{},\"read_entries\":{},\"write_entries\":{},\"instructions\":{},\"memory_bytes\":{},\"transaction_fee_stroops\":{}}}}}",
+        scenario,
+        footprint_entries,
+        read_entries,
+        resources.write_entries,
+        instructions,
+        memory_bytes,
+        transaction_fee_stroops,
+    );
 }

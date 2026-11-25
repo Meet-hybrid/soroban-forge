@@ -2,25 +2,41 @@
   "name": "soroban-forge-nextjs-example",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+<<<<<<< HEAD
     "lint": "eslint . --max-warnings=0",
     "test": "tsc --project tsconfig.test.json && node --test dist-test/tests/*.test.js"
+=======
+    "lint": "eslint .",
+    "test": "node --experimental-strip-types --test src/app/state-transitions.test.ts src/app/diagnostics.test.ts src/tests/demo-state.test.ts"
+>>>>>>> upstream/develop
   },
   "dependencies": {
+    "@creit.tech/stellar-wallets-kit": "^2.8.0",
     "@soroban-forge/escrow-client": "file:../typescript-sdk",
-    "next": "^16.3.5",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "@stellar/stellar-sdk": "^16.0.1",
+    "next": "^16.4.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/node": "^26",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+<<<<<<< HEAD
     "eslint": "^9.39.5",
     "eslint-config-next": "16.3.5",
+=======
+    "autoprefixer": "^10.6.2",
+    "eslint": "^10.15.0",
+    "eslint-config-next": "16.4.6",
+    "tailwindcss": "^4.3.5",
+>>>>>>> upstream/develop
     "typescript": "^5.8.3"
   }
 }
