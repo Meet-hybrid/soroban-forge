@@ -174,6 +174,15 @@ export const VESTING_EVENT_SPECS = {
       duration: "u64",
     },
   },
+  TrancheRevoked: {
+    topics: 2,
+    fields: {
+      schedule_id: "u64",
+      funder: "address",
+      unlocked_at_revocation: "i128",
+      refunded_to_funder: "i128",
+    },
+  },
 } as const;
 
 export const MULTISIG_EVENT_SPECS = {
@@ -230,6 +239,14 @@ export const SUBSCRIPTION_EVENT_SPECS = {
   QuotasSet: {
     topics: 1,
     fields: { subscription_id: "u64", quotas: "vec<udt:MetricQuota>" },
+  },
+  TrialConverted: {
+    topics: 1,
+    fields: { subscription_id: "u64", trial_end: "u64" },
+  },
+  TrialStarted: {
+    topics: 1,
+    fields: { subscription_id: "u64", trial_end: "u64" },
   },
   UsageRecorded: {
     topics: 2,

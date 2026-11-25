@@ -110,6 +110,10 @@
       "name": "create_tranche_schedule",
       "inputs": [
         {
+          "name": "funder",
+          "type": "address"
+        },
+        {
           "name": "beneficiary",
           "type": "address"
         },
@@ -200,6 +204,18 @@
       ],
       "outputs": [
         "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "revoke_tranche_schedule",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
       ]
     },
     {
@@ -339,6 +355,28 @@
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "TrancheRevoked",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "unlocked_at_revocation",
+          "type": "i128"
+        },
+        {
+          "name": "refunded_to_funder",
+          "type": "i128"
+        }
+      ]
     }
   ],
   "types": [
@@ -467,6 +505,18 @@
         {
           "name": "claimed",
           "type": "i128"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "refunded_amount",
+          "type": "i128"
+        },
+        {
+          "name": "revoked_unlocked",
+          "type": "option<i128>"
         },
         {
           "name": "start",

@@ -64,15 +64,18 @@
 //! Both kinds derive status from the same two inputs — ledger time and the
 //! claimed amount: `Locked` before the first unlock, `Vesting` from the first
 //! unlock until the final amount is claimed, `Completed` once `claimed ==
-//! total_amount`. `Revoked` is reachable only through `revoke`, which
-//! freezes the schedule (see *Revocation* below).
+//! total_amount`. `Revoked` is reachable through `revoke` (linear) or
+//! `revoke_tranche_schedule` (tranche), which freeze the schedule (see
+//! *Revocation* and *Tranche revocation* below).
 //!
 //! Authorization model:
 //! - `create_schedule` requires the beneficiary; its `funder` argument is
 //!   recorded on the linear schedule without authorizing (mirroring escrow's
-//!   non-consenting parties). `create_tranche_schedule` also requires its
-//!   beneficiary.
-//! - `revoke` and `refund_revoked` require the funder recorded at creation.
+//!   non-consenting parties). `create_tranche_schedule` follows the same
+//!   convention: it requires its beneficiary and records `funder` without
+//!   authorizing.
+//! - `revoke`, `refund_revoked`, and `revoke_tranche_schedule` require the
+//!   funder recorded at creation.
 //! - `reassign_beneficiary` requires the funder recorded at creation.
 //! - `claim` requires the current beneficiary; `claim_for` requires the
 //!   explicitly named beneficiary and can pay frozen balances from prior
@@ -108,12 +111,38 @@
 //! [`ForgeError::InvalidInput`], so double-revoke is impossible; a caller
 //! other than the funder is rejected by host authorization.
 //!
-//! Revocation is pure state-machine logic: it writes the frozen amount and
-//! the status and moves no tokens. The frozen remainder is settled through
-//! the same SEP-41 transfer path as any other claim (issue #50). Revocation
-//! itself adds no storage tier (issue #55). There is no tranche `revoke`: a
-//! tranche table is immutable and fully pre-funded by construction, and an
-//! unmet future tranche already never unlocks.
+//! Revocation of a linear schedule is pure state-machine logic: it writes the
+//! frozen amount and the status and moves no tokens. The frozen remainder is
+//! settled through the same SEP-41 transfer path as any other claim (issue
+//! #50), and the unvested remainder is returned through `refund_revoked`.
+//! Revocation itself adds no storage tier (issue #55).
+//!
+//! ## Tranche revocation
+//!
+//! `revoke_tranche_schedule(schedule_id)` terminates a tranche schedule before
+//! all tranches have unlocked: `Locked | Vesting -> Revoked`, permanently
+//! stopping further unlocks. Only the **funder** recorded at creation may
+//! revoke (`require_auth` on it); the beneficiary cannot.
+//!
+//! At revocation, the cumulative amount unlocked at the current ledger
+//! timestamp is frozen in `revoked_unlocked`, and the locked remainder
+//! (`total_amount - revoked_unlocked`) is **refunded atomically to the funder
+//! in the same call** and recorded in `refunded_amount`. The SEP-41 transfer
+//! runs **before** the schedule write (transfer-before-state), so a failed
+//! transfer returns [`ForgeError::TokenTransferFailed`] with the schedule left
+//! unchanged.
+//!
+//! Tranches unlocked at or before the revocation timestamp stay claimable by
+//! the beneficiary via `claim` / `claim_for`. `claimable` after revocation
+//! returns `revoked_unlocked - claimed` (`0` once drained). Attempting to
+//! `claim` or `claim_for` locked tranches after revocation (once no unlocked
+//! balance remains) is rejected with [`ForgeError::InvalidInput`].
+//!
+//! Double-revoke, revoking a `Completed` schedule, and revoking once every
+//! tranche has already unlocked (`unlocked_at_revocation >= total_amount`) are
+//! all rejected with [`ForgeError::InvalidInput`]. `get_tranche_schedule`
+//! reports `status == VestingStatus::Revoked`, `revoked_unlocked`, and
+//! `refunded_amount`; `get_status` reports `VestingStatus::Revoked`.
 //!
 //! ## Revoked refund
 //!
@@ -141,6 +170,10 @@
 //!   deserialize into the new type: a deployed contract must migrate or
 //!   reset its instance storage when upgrading. The new
 //!   `FormerBeneficiaryClaim` key stores frozen historical balances.
+//! - `TrancheSchedule` similarly adds `funder: Address`,
+//!   `revoked_unlocked: Option<i128>`, and `refunded_amount: i128` to support
+//!   tranche revocation; existing tranche records likewise require migration
+//!   or storage reset on upgrade.
 //! - The existing `DataKey::Schedule(u64)`,
 //!   `DataKey::TrancheSchedule(u64)`, and `DataKey::Count` keys retain their
 //!   meaning. `FormerBeneficiaryClaim(u64, Address)` is additive; all remain
@@ -240,6 +273,11 @@ pub trait SorobanForgeVesting {
     /// Create a new tranche (discrete unlock) vesting schedule for
     /// `beneficiary`.
     ///
+    /// `funder` is the party that funded the grant; it is recorded without
+    /// authorizing (mirroring the linear `create_schedule` convention) and
+    /// is the only address that may later call
+    /// [`revoke_tranche_schedule`](Self::revoke_tranche_schedule).
+    ///
     /// `tranches` is the unlock table: an ordered list of [`Tranche`]s, each
     /// an offset in seconds from creation plus the amount that unlocks at it.
     /// It must be non-empty, hold at most [`MAX_TRANCHES`] entries with
@@ -252,16 +290,55 @@ pub trait SorobanForgeVesting {
     /// # Errors
     ///
     /// * [`ForgeError::InvalidInput`] — the table is empty, longer than
-    ///   [`MAX_TRANCHES`], holds a non-positive amount, or an offset that does
-    ///   not strictly increase.
+    ///   [`MAX_TRANCHES`], holds a non-positive amount, an offset that does
+    ///   not strictly increase, or `funder == beneficiary`.
     /// * [`ForgeError::ArithmeticOverflow`] — the table's amounts sum past
     ///   `i128::MAX`.
     fn create_tranche_schedule(
         env: Env,
+        funder: Address,
         beneficiary: Address,
         token: Address,
         tranches: Vec<Tranche>,
     ) -> Result<u64, soroban_forge_shared_utils::ForgeError>;
+
+    /// Revoke a tranche schedule before all tranches have unlocked, refund
+    /// the locked remainder to the funder, and permanently stop further
+    /// unlocks.
+    ///
+    /// Transitions `Locked | Vesting -> Revoked`, freezes the cumulative
+    /// unlocked amount at the revocation ledger timestamp in
+    /// `revoked_unlocked`, transfers `total_amount - revoked_unlocked` (the
+    /// locked remainder) from the contract to the funder in the same call,
+    /// and records that refunded amount in `refunded_amount`. The refund
+    /// transfer runs **before** the schedule write (transfer-before-state),
+    /// so a failed transfer returns [`ForgeError::TokenTransferFailed`] with
+    /// the schedule unchanged.
+    ///
+    /// Tranches that have already unlocked at the revocation timestamp remain
+    /// claimable by the beneficiary via `claim` / `claim_for`. Once those
+    /// unlocked tranches are claimed (or if none had unlocked), `claimable`
+    /// returns `0` and any subsequent `claim` / `claim_for` attempting to
+    /// claim locked tranches is rejected with [`ForgeError::InvalidInput`].
+    ///
+    /// Requires the `funder` recorded at creation; the beneficiary cannot
+    /// revoke.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no tranche schedule with this id (a
+    ///   linear id is `NotFound` here).
+    /// * [`ForgeError::InvalidInput`] — the schedule is `Completed`, already
+    ///   `Revoked`, or every tranche has already unlocked (nothing left
+    ///   locked to revoke).
+    /// * [`ForgeError::ArithmeticOverflow`] — the locked remainder or
+    ///   unlocked-vs-claimed balance fails checked arithmetic.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the refund transfer; the schedule is left unchanged.
+    fn revoke_tranche_schedule(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 
     /// Revoke a linear schedule before completion and permanently stop
     /// further vesting.
@@ -367,11 +444,17 @@ pub trait SorobanForgeVesting {
     /// transfers that beneficiary's exact vested-but-unclaimed amount. Use
     /// `claim_for` to claim a frozen balance belonging to a former
     /// beneficiary. Returns `0` without issuing a transfer when nothing is
-    /// claimable.
+    /// claimable on an active or completed schedule (or a drained linear
+    /// revoked schedule). On a `Revoked` tranche schedule, tranches unlocked
+    /// at revocation remain claimable; once drained (or when zero tranches
+    /// had unlocked), further claims against locked tranches are rejected
+    /// with [`ForgeError::InvalidInput`].
     ///
     /// # Errors
     ///
     /// * [`ForgeError::NotFound`] — no schedule with this id.
+    /// * [`ForgeError::InvalidInput`] — the schedule is a `Revoked` tranche
+    ///   schedule with no remaining unlocked balance to claim.
     /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
     ///   the payout (insufficient contract balance, undeployed token).
     /// * [`ForgeError::ArithmeticOverflow`] — the claimed total overflowed.
@@ -500,9 +583,22 @@ pub struct CreateScheduleArgs {
 /// A separate record from [`VestingSchedule`] on purpose: the linear record's
 /// wire shape stays untouched, and the two kinds sit under distinct
 /// `DataKey` variants while sharing one monotonic id counter.
+///
+/// ## Revocation
+///
+/// `revoke_tranche_schedule` freezes the cumulative unlocked amount at the
+/// revocation ledger timestamp in `revoked_unlocked`, refunds the locked
+/// remainder to `funder` in the same call, and records that refunded total in
+/// `refunded_amount`. Tranches already unlocked remain claimable by
+/// `beneficiary`; no further tranches unlock, and claiming once the unlocked
+/// balance is drained is rejected with [`ForgeError::InvalidInput`].
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct TrancheSchedule {
+    /// Party that funded the grant; the only address that may call
+    /// `revoke_tranche_schedule`. Recorded at creation without authorizing,
+    /// mirroring the linear `funder` convention.
+    pub funder: Address,
     /// Recipient of the unlocked tokens.
     pub beneficiary: Address,
     /// Token contract whose balance is drawn down.
@@ -517,6 +613,13 @@ pub struct TrancheSchedule {
     pub tranches: Vec<Tranche>,
     /// Amount already claimed by the beneficiary.
     pub claimed: i128,
+    /// Unlocked amount frozen at the revocation ledger timestamp (`Some`
+    /// exactly when `status` is `Revoked`). `claimable` after revocation
+    /// returns `revoked_unlocked - claimed`; nothing further unlocks.
+    pub revoked_unlocked: Option<i128>,
+    /// Locked remainder refunded to the funder upon revocation (`0` until
+    /// revoked).
+    pub refunded_amount: i128,
     /// Current lifecycle state.
     pub status: VestingStatus,
 }
@@ -621,33 +724,43 @@ impl Vesting {
 
     /// Create a new tranche vesting schedule and return its stable id.
     ///
+    /// `funder` is recorded without authorizing (mirroring `create_schedule`)
+    /// and is the only address that may later revoke the schedule.
     /// `tranches` is the unlock table, ordered by strictly increasing
     /// `unlock_at` offsets in seconds from the creation timestamp. Requires a
     /// non-empty table of at most [`MAX_TRANCHES`] entries, every
-    /// `amount > 0`, and a cumulative sum that fits in `i128`; the table is
-    /// then stored once and treated as immutable. The beneficiary is
-    /// authorized at creation time, mirroring `create_schedule`.
+    /// `amount > 0`, a cumulative sum that fits in `i128`, and
+    /// `funder != beneficiary`; the table is then stored once and treated as
+    /// immutable. The beneficiary is authorized at creation time, mirroring
+    /// `create_schedule`.
     ///
     /// A first tranche at `unlock_at == 0` is allowed: it unlocks at the
     /// creation timestamp, the "TGE tranche" of a typical grant agreement.
     pub fn create_tranche_schedule(
         env: Env,
+        funder: Address,
         beneficiary: Address,
         token: Address,
         tranches: Vec<Tranche>,
     ) -> Result<u64, ForgeError> {
+        if funder == beneficiary {
+            return Err(ForgeError::InvalidInput);
+        }
         let total_amount = Self::validate_tranches(&tranches)?;
         beneficiary.require_auth();
 
         let id = Self::next_id(&env)?;
         let start = env.ledger().timestamp();
         let mut schedule = TrancheSchedule {
+            funder,
             beneficiary,
             token,
             total_amount,
             start,
             tranches,
             claimed: 0,
+            revoked_unlocked: None,
+            refunded_amount: 0,
             status: VestingStatus::Locked,
         };
         // Derive the initial status from time (a table starting at 0 begins
@@ -656,7 +769,7 @@ impl Vesting {
         env.storage()
             .instance()
             .set(&DataKey::TrancheSchedule(id), &schedule);
-        Self::index_schedule(&env, id, &schedule.beneficiary, &schedule.beneficiary);
+        Self::index_schedule(&env, id, &schedule.beneficiary, &schedule.funder);
         Ok(id)
     }
 
@@ -829,6 +942,78 @@ impl Vesting {
         env.storage().instance().set(&key, &total_refunded);
         events::revoked_refunded(&env, schedule_id, &schedule.funder, amount);
         Ok(amount)
+    }
+
+    /// Revoke a tranche schedule before all tranches have unlocked, refund
+    /// the locked remainder to the funder, and permanently stop further
+    /// unlocks.
+    ///
+    /// Transitions `Locked | Vesting -> Revoked`, freezes the cumulative
+    /// unlocked amount at the revocation ledger timestamp in
+    /// `revoked_unlocked`, transfers `total_amount - revoked_unlocked` to the
+    /// funder before writing storage (transfer-before-state), and records the
+    /// refunded amount in `refunded_amount`.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no tranche schedule with this id.
+    /// * [`ForgeError::InvalidInput`] — the schedule is `Completed`, already
+    ///   `Revoked`, or every tranche has already unlocked.
+    /// * [`ForgeError::ArithmeticOverflow`] — checked balance subtraction
+    ///   failed.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the refund; the schedule is left unchanged.
+    pub fn revoke_tranche_schedule(env: Env, schedule_id: u64) -> Result<i128, ForgeError> {
+        let mut schedule: TrancheSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::TrancheSchedule(schedule_id))
+            .ok_or(ForgeError::NotFound)?;
+        schedule.funder.require_auth();
+
+        if schedule.revoked_unlocked.is_some()
+            || matches!(
+                schedule.status,
+                VestingStatus::Completed | VestingStatus::Revoked
+            )
+        {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let now = env.ledger().timestamp();
+        let unlocked_at_revocation = Self::tranche_unlocked(&schedule, now)?;
+        if unlocked_at_revocation >= schedule.total_amount {
+            return Err(ForgeError::InvalidInput);
+        }
+        unlocked_at_revocation
+            .checked_sub(schedule.claimed)
+            .filter(|remaining| *remaining >= 0)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let locked_remainder = schedule
+            .total_amount
+            .checked_sub(unlocked_at_revocation)
+            .filter(|amount| *amount > 0)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+
+        // Transfer the locked remainder to the funder before writing state
+        // (transfer-before-state: a failed transfer leaves the schedule unchanged).
+        transfer_from_contract(&env, &schedule.token, &schedule.funder, locked_remainder)?;
+
+        schedule.revoked_unlocked = Some(unlocked_at_revocation);
+        schedule.refunded_amount = locked_remainder;
+        schedule.status = VestingStatus::Revoked;
+        env.storage()
+            .instance()
+            .set(&DataKey::TrancheSchedule(schedule_id), &schedule);
+
+        events::tranche_revoked(
+            &env,
+            schedule_id,
+            &schedule.funder,
+            unlocked_at_revocation,
+            locked_remainder,
+        );
+        Ok(locked_remainder)
     }
 
     /// Reassign only a linear schedule's unvested balance.
@@ -1106,6 +1291,10 @@ impl Vesting {
     /// Settle a claim against a tranche schedule: the same
     /// transfer-before-state discipline as [`Self::settle_linear`], over the
     /// unlock table's step function.
+    ///
+    /// On a revoked tranche schedule, tranches unlocked at revocation remain
+    /// claimable; once no unlocked remainder is left, claiming locked tranches
+    /// is rejected with [`ForgeError::InvalidInput`].
     fn settle_tranche(
         env: &Env,
         schedule_id: u64,
@@ -1118,6 +1307,10 @@ impl Vesting {
         } else {
             0
         };
+        if schedule.revoked_unlocked.is_some() && amount == 0 {
+            beneficiary.require_auth();
+            return Err(ForgeError::InvalidInput);
+        }
         if !Self::authorize_and_pay(env, &beneficiary, &schedule.token, amount)? {
             return Ok(0);
         }
@@ -1234,9 +1427,8 @@ impl Vesting {
                     _ => false,
                 },
                 Ok(Stored::Tranche(schedule)) => match &key {
-                    DataKey::BeneficiaryIndex(owner) | DataKey::FunderIndex(owner) => {
-                        schedule.beneficiary == *owner
-                    }
+                    DataKey::BeneficiaryIndex(owner) => schedule.beneficiary == *owner,
+                    DataKey::FunderIndex(owner) => schedule.funder == *owner,
                     _ => false,
                 },
                 Err(_) => false,
@@ -1386,8 +1578,13 @@ impl Vesting {
     /// Same two inputs as the linear kind — ledger time and claimed amount —
     /// with the first unlock standing in for the cliff: `Locked` before it,
     /// `Vesting` from it until the final amount is claimed, `Completed` once
-    /// `claimed == total_amount`.
+    /// `claimed == total_amount`. `Revoked` overrides both: a frozen schedule
+    /// stays `Revoked` even while its frozen remainder is unclaimed or after
+    /// it is drained.
     fn tranche_status(schedule: &TrancheSchedule, now: u64) -> Result<VestingStatus, ForgeError> {
+        if schedule.revoked_unlocked.is_some() {
+            return Ok(VestingStatus::Revoked);
+        }
         if schedule.claimed >= schedule.total_amount {
             return Ok(VestingStatus::Completed);
         }
@@ -1426,13 +1623,22 @@ impl Vesting {
 
     /// Claimable amount of a tranche schedule at ledger time `now` (unlocked
     /// minus claimed).
+    ///
+    /// On a `Revoked` tranche schedule the unlocked amount is capped at the
+    /// frozen `revoked_unlocked` value: the beneficiary can claim only the
+    /// portion that had unlocked at the revocation timestamp, and `0` once
+    /// that is fully claimed. Nothing unlocks after revocation.
     fn tranche_claimable(schedule: &TrancheSchedule, now: u64) -> Result<i128, ForgeError> {
-        let unlocked = Self::tranche_unlocked(schedule, now)?;
+        let unlocked = match schedule.revoked_unlocked {
+            Some(frozen) => frozen,
+            None => Self::tranche_unlocked(schedule, now)?,
+        };
         // `unlocked` is monotonic in `now` and `claimed` only ever rises to a
         // previously unlocked value, so the subtraction cannot underflow; use
         // checked arithmetic to fail loudly if the invariant is ever broken.
         unlocked
             .checked_sub(schedule.claimed)
+            .filter(|amount| *amount >= 0)
             .ok_or(ForgeError::ArithmeticOverflow)
     }
 }
@@ -1537,6 +1743,37 @@ pub mod events {
         }
         .publish(env);
     }
+
+    /// A tranche schedule was revoked: the locked remainder was refunded to
+    /// the funder, and any tranches already unlocked remain claimable by the
+    /// beneficiary.
+    #[contractevent]
+    pub struct TrancheRevoked {
+        #[topic]
+        pub schedule_id: u64,
+        #[topic]
+        pub funder: Address,
+        /// Cumulative amount unlocked at the revocation timestamp.
+        pub unlocked_at_revocation: i128,
+        /// Locked remainder refunded to the funder.
+        pub refunded_to_funder: i128,
+    }
+
+    pub fn tranche_revoked(
+        env: &Env,
+        schedule_id: u64,
+        funder: &Address,
+        unlocked_at_revocation: i128,
+        refunded_to_funder: i128,
+    ) {
+        TrancheRevoked {
+            schedule_id,
+            funder: funder.clone(),
+            unlocked_at_revocation,
+            refunded_to_funder,
+        }
+        .publish(env);
+    }
 }
 
 /// Move `amount` of `token` from this contract to `to`.
@@ -1576,6 +1813,9 @@ mod authz;
 
 #[cfg(test)]
 mod props;
+
+#[cfg(test)]
+mod tranche_revoke_props;
 
 #[cfg(test)]
 mod indexer_fixtures;
