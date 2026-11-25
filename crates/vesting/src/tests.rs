@@ -1,11 +1,15 @@
 use super::*;
+use soroban_forge_shared_utils::{
+    jump_after, jump_before, jump_to, jump_to_timestamp, BalanceSnapshot, TestSac,
+    TEST_START_TIMESTAMP,
+};
 use soroban_forge_test_utils::TestAccounts;
 use soroban_sdk::events::Event as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
-use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+use soroban_sdk::token::StellarAssetClient;
 use soroban_sdk::{Env, Vec as SorobanVec};
 
-const START: u64 = 1_000_000;
+const START: u64 = TEST_START_TIMESTAMP;
 const CLIFF: u64 = 1_000;
 const DURATION: u64 = 4_000;
 const TOTAL: i128 = 10_000;
@@ -17,20 +21,18 @@ macro_rules! setup {
     () => {{
         let env = Env::default();
         env.mock_all_auths();
-        env.ledger().set_timestamp(START);
+        jump_to_timestamp(&env, TEST_START_TIMESTAMP);
 
-        // Real Stellar Asset Contract — the same fixture escrow uses.
-        let admin = Address::generate(&env);
-        let sac = env.register_stellar_asset_contract_v2(admin);
-        let token = sac.address();
-        let token_admin = StellarAssetClient::new(&env, &token);
-        let token_client = TokenClient::new(&env, &token);
+        // Real Stellar Asset Contract, registered by the shared fixture.
+        let sac = TestSac::new(&env);
+        let token = sac.token.clone();
+        let token_client = sac.client();
         let contract_id = env.register(Vesting, ());
         let client = SorobanForgeVestingClient::new(&env, &contract_id);
         let accounts = TestAccounts::generate(&env);
         // Fund the schedule contract up front with the full allocation,
         // the way a deployment is topped up before schedules run.
-        token_admin.mint(&contract_id, &TOTAL);
+        sac.mint(&contract_id, TOTAL);
         (env, token, token_client, contract_id, client, accounts)
     }};
 }
@@ -251,9 +253,9 @@ fn cliff_equals_duration_vests_at_once() {
         &DURATION,
         &DURATION,
     );
-    env.ledger().set_timestamp(START + DURATION - 1);
+    jump_before(&env, START + DURATION, 1);
     assert_eq!(client.claimable(&id), 0);
-    env.ledger().set_timestamp(START + DURATION);
+    jump_to(&env, START + DURATION);
     assert_eq!(client.claimable(&id), TOTAL);
 }
 
@@ -302,8 +304,11 @@ fn claimable_overflow_is_reported() {
 
 #[test]
 fn claim_transfers_vested_tokens_to_beneficiary() {
-    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
     let id = create(&client, &token, &accounts);
+    let holders = [contract_id.clone(), accounts.user1.clone()];
+    let before = BalanceSnapshot::new(&env, &token, &holders);
+    before.assert_balances(&[TOTAL, 0]);
 
     // Halfway through the vesting window: 5_000 claimable.
     env.ledger()
@@ -311,8 +316,9 @@ fn claim_transfers_vested_tokens_to_beneficiary() {
     assert_eq!(client.claim(&id), TOTAL / 2);
 
     // Tokens actually moved, and the schedule recorded the claim.
-    assert_eq!(tc.balance(&accounts.user1), TOTAL / 2);
-    assert_eq!(tc.balance(&contract_id), TOTAL - TOTAL / 2);
+    let after = BalanceSnapshot::new(&env, &token, &holders);
+    before.assert_delta(&after, &[-TOTAL / 2, TOTAL / 2]);
+    assert_eq!(before.total(), after.total());
     assert_eq!(client.claimable(&id), 0);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
 }
@@ -437,37 +443,37 @@ fn boundary_cliff_and_duration_step_progression() {
     let id = create(&client, &token, &accounts);
 
     // At creation start:
-    env.ledger().set_timestamp(START);
+    jump_to(&env, START);
     assert_eq!(client.get_status(&id), VestingStatus::Locked);
     assert_eq!(client.claimable(&id), 0);
 
     // 1 second before cliff:
-    env.ledger().set_timestamp(START + CLIFF - 1);
+    jump_before(&env, START + CLIFF, 1);
     assert_eq!(client.get_status(&id), VestingStatus::Locked);
     assert_eq!(client.claimable(&id), 0);
 
     // At cliff boundary:
-    env.ledger().set_timestamp(START + CLIFF);
+    jump_to(&env, START + CLIFF);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     assert_eq!(client.claimable(&id), 0);
 
     // 1 second after cliff: floor(10_000 * 1 / 3_000) = 3
-    env.ledger().set_timestamp(START + CLIFF + 1);
+    jump_after(&env, START + CLIFF, 1);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     assert_eq!(client.claimable(&id), 3);
 
     // 1 second before full duration: floor(10_000 * 2_999 / 3_000) = 9_996
-    env.ledger().set_timestamp(START + DURATION - 1);
+    jump_before(&env, START + DURATION, 1);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     assert_eq!(client.claimable(&id), 9_996);
 
     // Exactly at duration:
-    env.ledger().set_timestamp(START + DURATION);
+    jump_to(&env, START + DURATION);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     assert_eq!(client.claimable(&id), TOTAL);
 
     // After duration:
-    env.ledger().set_timestamp(START + DURATION + 10_000);
+    jump_after(&env, START + DURATION, 10_000);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     assert_eq!(client.claimable(&id), TOTAL);
 }
