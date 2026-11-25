@@ -110,7 +110,9 @@ proptest! {
                 5 => { let _ = client.try_claim(&id); }
                 _ => {
                     count = client.create_tranche_schedule(
-                        &world.accounts[beneficiary], &world.token,
+                        &world.accounts[funder],
+                        &world.accounts[beneficiary],
+                        &world.token,
                         &Vec::from_array(&world.env, [Tranche { amount: 100, unlock_at: 10 }]),
                     );
                 }
@@ -128,7 +130,7 @@ proptest! {
                     Ok(Ok(schedule)) => (schedule.beneficiary, schedule.funder),
                     _ => {
                         let schedule = client.get_tranche_schedule(&id);
-                        (schedule.beneficiary.clone(), schedule.beneficiary)
+                        (schedule.beneficiary, schedule.funder)
                     }
                 };
                 for (index, owner) in [(&mut beneficiaries, beneficiary), (&mut funders, funder)] {
