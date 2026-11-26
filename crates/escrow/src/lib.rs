@@ -3687,6 +3687,9 @@ mod action_summary_tests;
 mod deadline_tests;
 
 #[cfg(test)]
+mod auth_matrix;
+
+#[cfg(test)]
 mod props;
 
 #[cfg(test)]
