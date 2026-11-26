@@ -101,6 +101,10 @@ export const ESCROW_EVENT_SPECS = {
   },
   Disputed: { topics: 1, fields: ESCROW_DATA },
   EscrowCreated: { topics: 1, fields: ESCROW_DATA },
+  MilestoneReleased: {
+    topics: 1,
+    fields: { escrow_id: "u64", index: "u32", amount: "i128" },
+  },
   PartiallyReleased: {
     topics: 1,
     fields: {
