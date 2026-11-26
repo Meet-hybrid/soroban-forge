@@ -48,6 +48,17 @@ fn get_basket(escrow_id) -> Result<BasketEscrowData, ForgeError> // basket recor
 fn get_basket_action_summary(escrow_id, caller) -> Result<EscrowActionSummary, ForgeError>
 ```
 
+## Participant Escrow Pagination
+
+`escrows_for_participant(participant, cursor, limit)` provides bounded,
+deterministic pagination over all escrow IDs involving a given participant (as buyer, seller, or arbiter).
+
+- **Cursor and limit**: `cursor` is the zero-based offset in the participant's list; `limit` is the requested page size.
+- **Maximum page size**: The maximum allowed page size is `MAX_PARTICIPANT_PAGE_SIZE = 100`. Any requested `limit` greater than 100 is automatically clamped to 100.
+- **Stable results**: Pages are stable, non-overlapping, and return `ParticipantEscrowsPage { ids, total, next_cursor }`.
+- **Exhaustion**: When the current page reaches the end of the records, `next_cursor` is `None`.
+- **Zero limit / unknown participant**: Passing `limit: 0` returns an empty page (`ids: []`) with `next_cursor: None`. An unknown participant or an address with no escrows also returns an empty page with `total: 0` and `next_cursor: None` without error.
+
 ## Action Eligibility Summary
 
 `get_action_summary(escrow_id, caller)` returns a read-only, caller-specific

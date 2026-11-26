@@ -299,6 +299,11 @@ pub const MIN_REVIEW_PERIOD: u64 = 60;
 /// Longest review window a buyer may set: 30 days.
 pub const MAX_REVIEW_PERIOD: u64 = 30 * 24 * 60 * 60;
 
+/// Maximum page size allowed when paginating participant escrows.
+///
+/// Any requested limit exceeding this constant is clamped to `MAX_PARTICIPANT_PAGE_SIZE`.
+pub const MAX_PARTICIPANT_PAGE_SIZE: u32 = 100;
+
 /// Highest arbiter fee an escrow may declare: 1000 basis points (10%).
 ///
 /// The fee is deducted from the disputed balance before it is divided, so the
@@ -836,7 +841,8 @@ pub trait SorobanForgeEscrow {
     /// escrows" views without an off-chain indexer.
     ///
     /// Pagination is a live offset/limit scheme. `cursor` is the offset in
-    /// the current index when this call runs and `limit` caps the page size.
+    /// the current index when this call runs and `limit` caps the page size
+    /// (clamped to [`MAX_PARTICIPANT_PAGE_SIZE`]).
     /// The returned [`ParticipantEscrowsPage::next_cursor`] continues from
     /// that offset; `None` means the current list is exhausted. A `limit` of
     /// `0` returns an empty page with no next cursor. If cancellation removes
@@ -2531,7 +2537,8 @@ impl Escrow {
     /// pages, later ids may shift before the cursor. Restart at zero after
     /// mutations to enumerate the current list completely. This view itself
     /// never mutates storage and never errors — an unknown address or one with
-    /// no escrows simply yields an empty page.
+    /// no escrows simply yields an empty page. Requested `limit` values
+    /// exceeding [`MAX_PARTICIPANT_PAGE_SIZE`] are clamped to [`MAX_PARTICIPANT_PAGE_SIZE`].
     pub fn escrows_for_participant(
         env: Env,
         participant: Address,
@@ -2544,13 +2551,17 @@ impl Escrow {
             .get(&DataKey::ParticipantIndex(participant))
             .unwrap_or_else(|| Vec::new(&env));
         let total = ids.len();
+        let effective_limit = limit.min(MAX_PARTICIPANT_PAGE_SIZE);
         // `cursor` may exceed `total`; clamp so an over-run returns an
         // empty page rather than panicking on a missing index.
-        let (mut at, end) = match limit {
+        let (mut at, end) = match effective_limit {
             // A zero limit must not report a next cursor that points at
             // itself forever; treat it as "list not requested".
             0 => (total, total),
-            _ => (cursor.min(total), cursor.saturating_add(limit).min(total)),
+            _ => (
+                cursor.min(total),
+                cursor.saturating_add(effective_limit).min(total),
+            ),
         };
         let mut page = Vec::new(&env);
         while at < end {
@@ -3989,6 +4000,9 @@ mod props;
 
 #[cfg(test)]
 mod basket_props;
+
+#[cfg(test)]
+mod basket_state_machine;
 
 #[cfg(test)]
 mod lifecycle_props;
