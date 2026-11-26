@@ -740,3 +740,102 @@ fn blank_envelope_aborts_vote_and_preserves_tally() {
     assert_eq!(proposal.for_votes, 0);
     assert_eq!(proposal.against_votes, 0);
 }
+
+// -----------------------------------------------------------------------
+//  Issues #736 and #738 Authorization Tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn set_governance_policy_rejects_unauthorized_callers() {
+    let (env, _token, _tc, contract_id, client, accounts, _target_id) = setup!();
+
+    // Set an explicit governance address
+    client.set_governance_address(&accounts.deployer);
+
+    // Outsider tries to call set_governance_policy
+    let outsider = &accounts.user1;
+    env.mock_auths(&[MockAuth {
+        address: outsider,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_governance_policy",
+            args: (6_000u32, 100i128, DURATION).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_set_governance_policy(&6_000, &100, &DURATION);
+    assert_auth_abort!(res);
+}
+
+#[test]
+fn set_governance_policy_accepts_authorized_governance() {
+    let (env, _token, _tc, contract_id, client, accounts, _target_id) = setup!();
+
+    // Set explicit governance address
+    let governance = &accounts.deployer;
+    client.set_governance_address(governance);
+
+    env.mock_auths(&[MockAuth {
+        address: governance,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_governance_policy",
+            args: (6_000u32, 100i128, DURATION).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_set_governance_policy(&6_000, &100, &DURATION)
+        .expect("outer ok")
+        .expect("policy update ok");
+    let policy = client.get_governance_policy();
+    assert_eq!(policy.quorum_bps, 6_000);
+}
+
+#[test]
+fn cancel_proposal_accepts_proposer_and_rejects_non_proposer() {
+    let (env, _token, _tc, contract_id, client, accounts, target_id) = setup!();
+    let proposer = &accounts.user1;
+    let delay = 10_000u64;
+    let id = client.propose_with_delay(
+        proposer,
+        &target_id,
+        &payload(&env),
+        &delay,
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
+
+    // Non-proposer fails authorization
+    let non_proposer = &accounts.user2;
+    env.mock_auths(&[MockAuth {
+        address: non_proposer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel_proposal",
+            args: (id, non_proposer).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let res = client.try_cancel_proposal(&id, non_proposer);
+    // Returns Unauthorized error before checking auth or fails auth
+    assert!(res.is_err());
+
+    // Proposer succeeds before voting start
+    env.mock_auths(&[MockAuth {
+        address: proposer,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "cancel_proposal",
+            args: (id, proposer).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client
+        .try_cancel_proposal(&id, proposer)
+        .expect("outer ok")
+        .expect("cancel ok");
+}

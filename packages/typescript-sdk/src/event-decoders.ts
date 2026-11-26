@@ -164,6 +164,23 @@ export const VESTING_EVENT_SPECS = {
       reassignment_count: "u32",
     },
   },
+  ReassignmentCancelled: {
+    topics: 2,
+    fields: {
+      schedule_id: "u64",
+      funder: "address",
+      pending_beneficiary: "address",
+    },
+  },
+  ReassignmentProposed: {
+    topics: 2,
+    fields: {
+      schedule_id: "u64",
+      funder: "address",
+      current_beneficiary: "address",
+      pending_beneficiary: "address",
+    },
+  },
   RevokedRefunded: {
     topics: 2,
     fields: { schedule_id: "u64", funder: "address", amount: "i128" },
@@ -265,6 +282,18 @@ export const SUBSCRIPTION_EVENT_SPECS = {
 } as const;
 
 export const MARKETPLACE_EVENT_SPECS = {
+  RecipientRotationAccepted: {
+    topics: 1,
+    fields: { collection: "address", previous: "address", new_recipient: "address" },
+  },
+  RecipientRotationCancelled: {
+    topics: 1,
+    fields: { collection: "address", current: "address", new_recipient: "address" },
+  },
+  RecipientRotationProposed: {
+    topics: 1,
+    fields: { collection: "address", current: "address", new_recipient: "address" },
+  },
   RoyaltyConfigured: {
     topics: 1,
     fields: { collection: "address", recipient: "address", bps: "u32" },
@@ -306,6 +335,14 @@ export const DAO_EVENT_SPECS = {
       state: "udt:ProposalState",
       for_votes: "i128",
       against_votes: "i128",
+    },
+  },
+  PolicyUpdated: {
+    topics: 0,
+    fields: {
+      quorum_bps: "u32",
+      min_participation: "i128",
+      voting_period: "u64",
     },
   },
   Proposed: {
