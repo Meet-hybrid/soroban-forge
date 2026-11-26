@@ -18,6 +18,7 @@ fn get_category_rules(category) -> Result<CategoryRules, ForgeError>
 fn propose(proposer, target, action, duration) -> Result<u64, ForgeError>
 fn propose_with_category(proposer, target, action, category) -> Result<u64, ForgeError>
 fn vote(proposal_id, voter, support) -> Result<(), ForgeError>
+fn revise_vote(proposal_id, voter, support) -> Result<(), ForgeError>
 fn execute(proposal_id) -> Result<(), ForgeError>
 fn cancel_proposal(proposal_id, proposer) -> Result<(), ForgeError>
 fn get_proposal(proposal_id) -> Result<Proposal, ForgeError>
@@ -25,6 +26,7 @@ fn get_proposal_count() -> u64
 fn get_proposals(offset, limit) -> Result<Vec<Proposal>, ForgeError>
 fn has_voted(proposal_id, voter) -> Result<bool, ForgeError>
 fn get_vote_receipt(proposal_id, voter) -> Result<VoteReceipt, ForgeError>
+fn get_vote_revision_count(proposal_id, voter) -> Result<u32, ForgeError>
 fn get_active_proposal_count(proposer) -> u32
 fn touch_ttl(proposal_id) -> Result<(), ForgeError>
 ```
@@ -111,6 +113,18 @@ Transition rules enforced by the contract:
   authorize, reads their SEP-41 balance, and adds that weight; one vote per
   voter regardless of balance. Voting before `initialize` returns
   `ForgeError::NotInitialized`.
+- `revise_vote` lets a voter who has already cast a vote change its direction
+  (for → against, or against → for) while the proposal is still `Active` and
+  strictly before `voting_ends`. The originally recorded weight is moved
+  between tally sides using checked arithmetic — the token balance is never
+  re-read, so token transfers after voting do not affect voting power. Returns
+  `ForgeError::InvalidState` if the proposal is not `Active`
+  (expired, cancelled, executed, or defeated), `ForgeError::DeadlineReached`
+  once the deadline passes, and `ForgeError::InvalidInput` if the voter has
+  not cast a vote yet or if the requested direction matches the existing one.
+  Each successful revision increments the voter's revision count (readable
+  via `get_vote_revision_count`) and emits a `VoteRevised` event. Failed revisions leave all
+  state unchanged.
 - `execute` before the deadline is `ForgeError::InvalidInput`.
 - On `Active` past deadline, `execute` finalises: quorum and the category's
   approval threshold must both be met for `Succeeded` (bond stays in custody);
@@ -304,7 +318,10 @@ A full lifecycle, from deployment to on-chain effect:
    The contract reads the voter's current governance-token balance and adds
    it to `for_votes` or `against_votes`, emits `VoteCast` with that weight,
    and rejects zero-balance voters, duplicate votes, votes after the deadline,
-   and votes on non-`Active` proposals.
+   and votes on non-`Active` proposals. A voter may subsequently change
+   direction by calling `revise_vote(&proposal_id, &voter, &new_support)`
+   before the deadline; the original weight is moved between tally sides and
+   a `VoteRevised` event is emitted.
 
 4. **Finalise.** After `voting_ends`, anyone (not just voters — the
   proposal creator or an observer) calls `execute(&proposal_id)`. Meeting
@@ -343,6 +360,9 @@ monitoring, each keyed by the standard `proposal_id` topic:
 - **`VoteCast`** — emitted by `vote` for each accepted vote.
   - Topics: `proposal_id: u64`
   - Data: `voter: Address`, `support: bool`, `weight: i128`
+- **`VoteRevised`** — emitted by `revise_vote` for each accepted revision.
+  - Topics: `proposal_id: u64`
+  - Data: `voter: Address`, `new_support: bool`, `weight: i128`
 - **`Finalised`** — emitted by `execute` on every state transition
   (`Active` → `Succeeded`, `Active` → `Defeated`, `Succeeded` → `Executed`).
   - Topics: `proposal_id: u64`

@@ -26,6 +26,12 @@ fn get_settlement_summary(collection) -> Result<SettlementSummary, ForgeError>
 fn quote_sale(collection, amount) -> Result<SaleQuote, ForgeError>
 fn preview_settlement(collection, amount) -> Result<SettlementPreview, ForgeError>
 fn touch_ttl(collection) -> Result<(), ForgeError>
+
+// Recipient rotation
+fn propose_recipient_rotation(collection, current, new_recipient) -> Result<(), ForgeError>
+fn accept_recipient_rotation(collection, current) -> Result<(), ForgeError>
+fn cancel_recipient_rotation(collection, current) -> Result<(), ForgeError>
+fn get_pending_rotation(collection, current) -> Option<Address>
 ```
 
 ## Concepts
@@ -81,6 +87,193 @@ Collections can configure sale-size brackets via `set_royalty_tiers(collection, 
 - **Multi-recipient split application**: once the active tier rate `tier_bps` is selected, each registered recipient receives `floor(amount * tier_bps * recipient_bps / (10_000 * total_configured_bps))` using overflow-safe quotient/remainder arithmetic (or equal shares across configured recipients if all configured weights are zero). Each share is floored independently and any rounding dust stays with the seller, preserving `sum(recipient_shares) + seller_net == amount` exactly at every bracket edge (`min - 1`, `min`, `min + 1`) and up to `i128::MAX`. `Disabled` collections continue settling in full to the seller at 0 bps.
 - **Unchanged default**: collections without tiers behave identically to flat-rate settlement.
 - **Query and clearing**: `get_royalty_tiers(collection)` is a pure read-only view returning the stored `Vec<(i128, u32)>` (or an empty vector when unset) with no authorization, events, storage writes, or TTL bumps. Clearing tiers is supported via either `set_royalty_tiers(collection, vec![])` or `clear_royalty_tiers(collection)` (both require `collection` authorization) and immediately restores flat-rate behavior.
+
+### Sale quotes
+
+`quote_sale(collection, amount)` is a read-only view returning the exact
+split a settlement of `amount` would apply, as a `SaleQuote { gross,
+royalty_bps, royalty_amount, seller_net }`. Settle-parity guarantee: the
+quote runs the same validation order and the same derivation as the
+settlement entrypoints — configuration load (`NotFound` for an unregistered
+collection), `amount > 0` (`InvalidInput`, mirroring `distribute` and
+`settle_sale`), then the same `effective_bps` + `split` resolution — so the
+returned numbers are the settlement's own, floor rounding included, and
+`royalty_amount + seller_net == gross` exactly. A `Disabled` configuration
+quotes at zero bps, matching `settle_sale`'s settle-in-full behavior. The
+quote never mutates storage, requires no authorization, and emits no events.
+
+### Batch settlement
+
+`settle_sales` settles a batch of sales of one collection in one invocation
+against one payer authorization, with per-sale semantics identical to
+`settle_sale`:
+
+1. Load the configuration (`NotFound` if unregistered), then validate the
+   whole batch before any token moves: `sales` must be non-empty and at
+   most `MAX_SETTLE_SALES` (20) long, and every `amount` must be positive
+   (`InvalidInput` for either).
+2. Require the collection's and the payer's authorization once — the
+   payer's single `require_auth` covers every nested token transfer in the
+   batch.
+3. Compute each sale's split and the batch aggregate with checked
+   arithmetic, then stage the updated settlement totals.
+4. Transfer each sale in order, seller first and royalty recipient last,
+   skipping the recipient transfer when the share floors to zero.
+5. Only after every transfer succeeds, commit the summary once with the
+   batch's aggregate deltas and return the per-sale `Settlement`s in sale
+   order.
+
+Atomicity is all-or-nothing for the batch: a failure in any sale rolls the
+whole invocation back.
+
+## Recipient Rotation
+
+A royalty recipient can propose to transfer their payout address to a new
+address without changing the royalty rate or split ordering. The new address
+must explicitly accept the rotation before it takes effect.
+
+### Rotation lifecycle
+
+```
+propose_recipient_rotation(collection, current, new_recipient)
+  └─ requires: current.require_auth()
+  └─ stored as PendingRotation(collection, current) = new_recipient
+
+accept_recipient_rotation(collection, current)
+  └─ requires: new_recipient.require_auth()   (loaded from pending record)
+  └─ replaces current → new_recipient in every split entry
+  └─ removes the pending record
+
+cancel_recipient_rotation(collection, current)
+  └─ requires: current.require_auth()
+  └─ removes the pending record
+
+get_pending_rotation(collection, current) -> Option<Address>
+  └─ no authorization required
+```
+
+### Authorization requirements
+
+| Entrypoint                      | Required auth        |
+|---------------------------------|----------------------|
+| `propose_recipient_rotation`    | `current`            |
+| `accept_recipient_rotation`     | proposed `new_recipient` (resolved from storage) |
+| `cancel_recipient_rotation`     | `current`            |
+| `get_pending_rotation`          | none (read-only)     |
+
+### Settlement behaviour
+
+**Before acceptance:** `settle_sale` and `settle_sales` continue paying the
+existing `current` recipient. A pending rotation has zero effect on
+settlement.
+
+**After acceptance:** all subsequent settlements pay `new_recipient` at the
+same basis points. The total payout for any given gross amount is unchanged —
+only the destination address changes.
+
+**Reconfiguration:** calling `set_royalty` or `set_royalty_splits` on a
+collection immediately clears all pending rotations for every previously
+configured recipient. The collection contract's reconfiguration authority
+supersedes any in-flight rotation.
+
+### Error conditions
+
+| Error              | Trigger                                                        |
+|--------------------|----------------------------------------------------------------|
+| `NotFound`         | Collection not configured in `propose_recipient_rotation`     |
+| `NotFound`         | `current` is not an existing recipient in `propose_recipient_rotation` |
+| `NotFound`         | No pending rotation in `accept_recipient_rotation` or `cancel_recipient_rotation` |
+| `NotFound`         | Collection not configured in `accept_recipient_rotation` (after rotation cleared by reconfiguration) |
+| `InvalidInput`     | `new_recipient == current` in `propose_recipient_rotation`    |
+| `InvalidInput`     | Proposed `new_recipient` is already a configured recipient in `accept_recipient_rotation` |
+
+### Invariants
+
+- Rotation never changes `bps` values or recipient ordering.
+- Rotation never creates or destroys royalty value — the gross payout for
+  any sale amount is identical before and after rotation.
+- Multiple split entries belonging to the same recipient are all updated.
+- A pending rotation is a point-in-time intent — it does not affect any
+  settlement until accepted.
+- No intermediate state is observable where some split entries have been
+  updated but others have not: acceptance is atomic.
+
+## Compatibility
+
+`set_royalty` and `get_royalty` are unchanged. `distribute` now takes the
+full settlement context `(collection, token, payer, seller, amount)` — the
+same parameter order as `settle_sale` — and pays the royalty share instead
+of computing it. `settle_sale`, `settle_sales`, and
+`get_settlement_summary` are additive; the generated
+`SorobanForgeMarketplaceRoyaltiesClient` gains all entrypoints automatically,
+and `Settlement`/`SettlementSummary` are shared by both settlement
+entrypoints.
+
+## Storage & TTL Maintenance
+
+Persistent storage keys:
+- `Royalty(Address)` — royalty configuration record.
+- `Summary(Address)` — cumulative settlement totals.
+- `Splits(Address)` — multi-recipient split vector.
+- `PendingRotation(Address, Address)` — `(collection, current_recipient)` → `new_recipient`.
+
+`set_royalty`, `distribute`, `settle_sale`, and `settle_sales` extend
+persistent storage TTL on every write to a 30-day horizon.
+
+A permissionless public keeper entrypoint `touch_ttl(collection)` allows
+anyone to bump persistent storage TTL for a collection's `Royalty` and
+`Summary` records.
+
+## Events
+
+- `RoyaltyConfigured` (topic: `collection`) — emitted on `set_royalty` / `set_royalty_splits`. Contains `recipient` and `bps`.
+- `SaleSettled` (topic: `collection`) — emitted on `settle_sale` / `settle_sales` / `distribute`. Contains `token`, `payer`, `seller`, `royalty_recipient`, `gross_amount`, `seller_net`, `royalty_share`.
+- `RecipientRotationProposed` (topic: `collection`) — emitted on `propose_recipient_rotation`. Contains `current` and `new_recipient`.
+- `RecipientRotationAccepted` (topic: `collection`) — emitted on `accept_recipient_rotation`. Contains `previous` and `new_recipient`.
+- `RecipientRotationCancelled` (topic: `collection`) — emitted on `cancel_recipient_rotation`. Contains `current` and `new_recipient`.
+
+## Concepts
+
+- **Creators** receive a split of every sale, paid to the configured
+  `recipient` on settlement.
+- **Sellers** receive the net of every sale.
+- **Payers** fund both transfers from their `token` balance in a single
+  authorized call.
+
+## Settlement
+
+`settle_sale` moves one sale's proceeds with escrow's transfer-before-state
+ordering:
+
+1. Load the collection's configuration (`NotFound` if unregistered), validate
+   `amount > 0` (`InvalidInput`), and require the collection's and the payer's
+   authorization.
+2. Compute `royalty_share = amount * bps / 10_000` (floored) and
+   `seller_net = amount - royalty_share` with checked arithmetic
+   (`ArithmeticOverflow`), and stage the updated settlement totals. The two
+   parts always sum exactly to `amount` — rounding dust stays with the
+   seller.
+3. Transfer `seller_net` from `payer` to `seller`, then `royalty_share` from
+   `payer` to the configured `recipient` — the recipient is paid last.
+4. Only after both transfers succeed, commit the collection's cumulative
+   settlement totals and return the `Settlement`.
+
+A `Disabled` or zero-bps configuration skips the recipient transfer and
+settles the full amount to the seller. Token failures (insufficient balance,
+missing trustline, undeployed token) surface as
+`ForgeError::TokenTransferFailed`, and any returned error rolls back the
+whole invocation — a failed settlement can never leave the recipient
+partially paid and never commits totals.
+
+`distribute` is a standalone royalty settlement: it transfers the royalty
+share of `amount` (`amount * bps / 10_000`, floored) from `payer` to the
+configured recipient in `token`, records the settlement totals, and returns
+the seller's net after royalties — the seller is **not** paid here. It is
+for callers that handle the underlying sale/payment outside `settle_sale`
+and only need the royalty leg settled; a `Disabled` or zero-bps
+configuration transfers nothing and returns the full `amount`. It requires
+the collection's and the payer's authorization, and emits the same
+`SaleSettled` event as the settlement entrypoints.
 
 ### Sale quotes
 

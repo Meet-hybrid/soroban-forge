@@ -3,6 +3,38 @@
   "contract": "soroban-forge-marketplace-royalties",
   "functions": [
     {
+      "name": "accept_recipient_rotation",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "cancel_recipient_rotation",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "clear_royalty_tiers",
       "inputs": [
         {
@@ -52,6 +84,22 @@
       ],
       "outputs": [
         "u32"
+      ]
+    },
+    {
+      "name": "get_pending_rotation",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "option<address>"
       ]
     },
     {
@@ -116,6 +164,26 @@
       ],
       "outputs": [
         "result<udt:SettlementPreview,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "propose_recipient_rotation",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        },
+        {
+          "name": "new_recipient",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -268,6 +336,60 @@
     }
   ],
   "events": [
+    {
+      "name": "RecipientRotationAccepted",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "previous",
+          "type": "address"
+        },
+        {
+          "name": "new_recipient",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "name": "RecipientRotationCancelled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        },
+        {
+          "name": "new_recipient",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "name": "RecipientRotationProposed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        },
+        {
+          "name": "new_recipient",
+          "type": "address"
+        }
+      ]
+    },
     {
       "name": "RoyaltyConfigured",
       "dataFormat": "scSpecEventDataFormatMap",
