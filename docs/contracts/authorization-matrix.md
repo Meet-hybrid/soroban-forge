@@ -130,6 +130,8 @@ funder who does not sign creation; only the batch path pulls tokens at creation.
 | `get_status` | none | `NotFound` for an unknown id |
 | `get_schedule_status` | none | Derived status summary of a linear schedule (cliff, claimable, claimed); `NotFound` for an unknown or tranche id; `ArithmeticOverflow` |
 | `pending_beneficiary` | none | Proposed beneficiary, if any; `NotFound` for an unknown id |
+| `preview_claimable` | none | Claimable amount, evaluation timestamp and next unlock boundary at the current ledger time; `NotFound` for an unknown id |
+| `preview_tranche` | none | Alias of `preview_claimable` |
 
 ## Multi-Sig Wallet
 
