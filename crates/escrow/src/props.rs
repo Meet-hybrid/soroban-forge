@@ -1175,8 +1175,15 @@ impl MultiPartyWorld {
     }
 
     fn create_escrow(&self, buyer: &Address, seller: &Address) -> u64 {
-        self.client()
-            .create_escrow(buyer, seller, &self.arbiter, &self.token, &1_i128, &1_u64, &None)
+        self.client().create_escrow(
+            buyer,
+            seller,
+            &self.arbiter,
+            &self.token,
+            &1_i128,
+            &1_u64,
+            &None,
+        )
     }
 
     fn deposit(&self, id: u64, buyer: &Address) {

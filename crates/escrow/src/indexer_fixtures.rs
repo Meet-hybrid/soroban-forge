@@ -434,7 +434,14 @@ fn generate() -> serde_json::Value {
             StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
         });
         let id = b.step(&env, &escrow, 10001, "0000000000010001", || {
-            client.create_basket(&buyer, &seller, &arbiter, &assets, &TIMEOUT, &Some(START + 500))
+            client.create_basket(
+                &buyer,
+                &seller,
+                &arbiter,
+                &assets,
+                &TIMEOUT,
+                &Some(START + 500),
+            )
         });
         b.step(&env, &escrow, 10002, "0000000000010002", || {
             client.deposit_basket(&id);

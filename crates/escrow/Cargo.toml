@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Escrow smart contract for Soroban Forge"
 
+[lints.clippy]
+too_many_arguments = "allow"
+
 [lib]
 crate-type = ["cdylib"]
 

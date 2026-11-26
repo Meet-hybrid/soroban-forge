@@ -288,8 +288,8 @@ compile_error!(
 );
 
 use soroban_sdk::{
-    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Bytes, Env,
-    TryFromVal, Val, Vec,
+    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Bytes,
+    Env, TryFromVal, Val, Vec,
 };
 
 use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ttl::TTLHelper, ForgeError};
@@ -331,6 +331,7 @@ pub const MAX_RELEASE_WINDOW: u64 = 10 * 365 * 24 * 3600;
 
 /// Public interface for the Soroban Forge escrow contract.
 #[contractclient(name = "SorobanForgeEscrowClient")]
+#[allow(clippy::too_many_arguments)]
 pub trait SorobanForgeEscrow {
     /// Minimum TTL (in ledgers) below which a persistent entry is bumped.
     ///
@@ -1252,6 +1253,7 @@ pub enum DataKey {
 pub struct Escrow;
 
 #[contractimpl]
+#[allow(clippy::too_many_arguments)]
 impl Escrow {
     // -------------------------------------------------------------------
     // Lifecycle
@@ -1262,6 +1264,7 @@ impl Escrow {
     /// Only the buyer authorizes at creation. The arbiter does not
     /// authorize either: they must be able to `resolve` later even if
     /// they never participated in creation.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_escrow(
         env: Env,
         buyer: Address,
@@ -1501,7 +1504,12 @@ impl Escrow {
         if escrow.status != EscrowStatus::Funded {
             return Err(ForgeError::InvalidInput);
         }
-        deadline_reached(env, escrow.acceptance_deadline, escrow.created_at, escrow.timeout)?;
+        deadline_reached(
+            env,
+            escrow.acceptance_deadline,
+            escrow.created_at,
+            escrow.timeout,
+        )?;
         let refunded_amount = escrow.remaining();
         transfer_from_contract(env, &escrow.token, &escrow.buyer, refunded_amount)?;
         let mut refunded = escrow.clone();
@@ -1593,8 +1601,8 @@ impl Escrow {
         if escrow.status != EscrowStatus::Funded {
             return Err(ForgeError::InvalidInput);
         }
-        let mut request = Self::load_release_request(&env, escrow_id)?
-            .ok_or(ForgeError::InvalidInput)?;
+        let mut request =
+            Self::load_release_request(&env, escrow_id)?.ok_or(ForgeError::InvalidInput)?;
         if request.state != ReleaseRequestState::Pending {
             return Err(ForgeError::InvalidInput);
         }
@@ -1630,8 +1638,8 @@ impl Escrow {
         if escrow.status != EscrowStatus::Funded {
             return Err(ForgeError::InvalidInput);
         }
-        let mut request = Self::load_release_request(&env, escrow_id)?
-            .ok_or(ForgeError::InvalidInput)?;
+        let mut request =
+            Self::load_release_request(&env, escrow_id)?.ok_or(ForgeError::InvalidInput)?;
         if request.state != ReleaseRequestState::Pending {
             return Err(ForgeError::InvalidInput);
         }
@@ -2291,13 +2299,13 @@ impl Escrow {
         let Some(val) = env.storage().persistent().get::<DataKey, Val>(&key) else {
             return Err(ForgeError::NotFound);
         };
-        if let Some(data) = EscrowData::try_from_val(env, &val).ok() {
+        if let Ok(data) = EscrowData::try_from_val(env, &val) {
             return Ok(data);
         }
-        if let Some(v2) = EscrowDataV2::try_from_val(env, &val).ok() {
+        if let Ok(v2) = EscrowDataV2::try_from_val(env, &val) {
             return Ok(EscrowData::from(v2));
         }
-        if let Some(v1) = EscrowDataV1::try_from_val(env, &val).ok() {
+        if let Ok(v1) = EscrowDataV1::try_from_val(env, &val) {
             return Ok(EscrowData::from(v1));
         }
         Err(ForgeError::NotFound)
@@ -3024,7 +3032,11 @@ mod events {
     }
 
     pub fn release_request_expired(env: &Env, escrow_id: u64, timestamp: u64) {
-        ReleaseRequestExpired { escrow_id, timestamp }.publish(env);
+        ReleaseRequestExpired {
+            escrow_id,
+            timestamp,
+        }
+        .publish(env);
     }
 
     pub fn basket_created(env: &Env, basket: &BasketEscrowData) {

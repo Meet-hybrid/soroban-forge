@@ -25,8 +25,8 @@ extern crate std;
 
 use crate::{
     BasketEscrowData, Bytes, DataKey, Escrow, EscrowAsset, EscrowData, EscrowDataV1, EscrowDataV2,
-    EscrowStatus, MAX_ACCEPTANCE_DEADLINE, MAX_RELEASE_WINDOW, ReleaseRequest, ReleaseRequestState,
-    SorobanForgeEscrowClient,
+    EscrowStatus, ReleaseRequest, ReleaseRequestState, SorobanForgeEscrowClient,
+    MAX_ACCEPTANCE_DEADLINE, MAX_RELEASE_WINDOW,
 };
 use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
@@ -610,7 +610,10 @@ fn operations_on_missing_escrow_are_not_found() {
         ForgeError::NotFound
     );
     assert_eq!(
-        client.try_dispute(&999, outsider, &None).unwrap_err().unwrap(),
+        client
+            .try_dispute(&999, outsider, &None)
+            .unwrap_err()
+            .unwrap(),
         ForgeError::NotFound
     );
     assert_eq!(
@@ -1323,8 +1326,7 @@ fn basket_summary_on_mixed_terminal_states() {
     assert_eq!(summary.refunded, AMOUNT + 2 * AMOUNT);
 
     // 3. Completed via `resolve_basket(in_favor_of_seller)`.
-    let id_resolved_seller =
-        basket_fund(&env, &client, &token_a, &token_b, buyer, seller, arbiter);
+    let id_resolved_seller = basket_fund(&env, &client, &token_a, &token_b, buyer, seller, arbiter);
     client.dispute_basket(&id_resolved_seller, buyer, &None);
     client.resolve_basket(&id_resolved_seller, &true);
     let summary = client.get_basket_summary(&id_resolved_seller);
@@ -1333,8 +1335,7 @@ fn basket_summary_on_mixed_terminal_states() {
     assert_eq!(summary.refunded, 0);
 
     // 4. Refunded via `resolve_basket(in_favor_of_buyer)`.
-    let id_resolved_buyer =
-        basket_fund(&env, &client, &token_a, &token_b, buyer, seller, arbiter);
+    let id_resolved_buyer = basket_fund(&env, &client, &token_a, &token_b, buyer, seller, arbiter);
     client.dispute_basket(&id_resolved_buyer, seller, &None);
     client.resolve_basket(&id_resolved_buyer, &false);
     let summary = client.get_basket_summary(&id_resolved_buyer);
@@ -1395,7 +1396,9 @@ fn basket_summary_rejects_corrupt_or_missing_components() {
             });
         }
         basket.assets = legs;
-        env.storage().persistent().set(&DataKey::Basket(id), &basket);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Basket(id), &basket);
     });
     assert_eq!(
         client.try_get_basket_summary(&id).unwrap_err().unwrap(),
@@ -1458,13 +1461,29 @@ fn create_escrow_rejects_deadline_exceeding_cap() {
     // One second past the documented cap is rejected.
     let too_far = START + MAX_ACCEPTANCE_DEADLINE + 1;
     let err = client
-        .try_create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(too_far))
+        .try_create_escrow(
+            buyer,
+            seller,
+            arbiter,
+            &token,
+            &AMOUNT,
+            &TIMEOUT,
+            &Some(too_far),
+        )
         .unwrap_err()
         .unwrap();
     assert_eq!(err, ForgeError::InvalidInput);
     // At exactly the cap it is valid: deadline <= created_at + MAX.
     let at_cap = START + MAX_ACCEPTANCE_DEADLINE;
-    client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(at_cap));
+    client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(at_cap),
+    );
 }
 
 #[test]
@@ -1472,7 +1491,15 @@ fn create_escrow_records_valid_acceptance_deadline() {
     let (_env, token, _tc, _id, client, accounts) = setup!();
     let (buyer, seller, arbiter) = parties(&accounts);
     let deadline = START + 1_000;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(deadline));
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(deadline),
+    );
     let record: EscrowData = client.get_escrow(&id);
     assert_eq!(record.acceptance_deadline, Some(deadline));
 }
@@ -1482,7 +1509,15 @@ fn refund_expired_rejected_before_acceptance_deadline() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let (buyer, seller, arbiter) = parties(&accounts);
     let deadline = START + 100;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(deadline));
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(deadline),
+    );
     client.deposit(&id);
 
     // One second before the deadline the buyer cannot reclaim yet.
@@ -1500,7 +1535,15 @@ fn refund_expired_at_deadline_succeeds() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let (buyer, seller, arbiter) = parties(&accounts);
     let deadline = START + 100;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(deadline));
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(deadline),
+    );
     client.deposit(&id);
 
     // Boundary: "at and after the deadline" — `now >= acceptance_deadline`.
@@ -1517,7 +1560,15 @@ fn refund_expired_after_deadline_succeeds() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let (buyer, seller, arbiter) = parties(&accounts);
     let deadline = START + 100;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(deadline));
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(deadline),
+    );
     client.deposit(&id);
 
     env.ledger().set_timestamp(deadline + 1);
@@ -1533,7 +1584,15 @@ fn refund_expired_cannot_run_twice() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let (buyer, seller, arbiter) = parties(&accounts);
     let deadline = START + 100;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(deadline));
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(deadline),
+    );
     client.deposit(&id);
 
     env.ledger().set_timestamp(deadline);
@@ -1552,7 +1611,15 @@ fn deadline_refunds_pay_only_the_still_held_amount() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let (buyer, seller, arbiter) = parties(&accounts);
     let deadline = START + 100;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(deadline));
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(deadline),
+    );
     client.deposit(&id);
     // A partial release moves 300 to the seller before the deadline.
     client.release_partial(&id, &300);
@@ -1935,7 +2002,7 @@ fn dispute_commitment_is_included_in_the_dispute_event() {
             body.topics.iter().next().is_some_and(|topic| {
                 matches!(
                     topic,
-                    ScVal::Symbol(sym) if sym.to_utf8_string().map_or(false, |name| name == "Disputed")
+                    ScVal::Symbol(sym) if sym.to_utf8_string().is_ok_and(|name| name == "Disputed")
                 )
             })
         })
@@ -1953,9 +2020,7 @@ fn dispute_commitment_is_included_in_the_dispute_event() {
 /// Read the stored release request for `id`, or `None` if none is stored.
 fn stored_release_request(env: &Env, contract_id: &Address, id: u64) -> Option<ReleaseRequest> {
     env.as_contract(contract_id, || {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ReleaseRequest(id))
+        env.storage().persistent().get(&DataKey::ReleaseRequest(id))
     })
 }
 
@@ -2153,10 +2218,7 @@ fn expire_release_request_requires_expiry() {
 
     client.request_release(&id, &100);
     env.ledger().set_timestamp(START + 50); // before expiry
-    let err = client
-        .try_expire_release_request(&id)
-        .unwrap_err()
-        .unwrap();
+    let err = client.try_expire_release_request(&id).unwrap_err().unwrap();
     assert_eq!(err, ForgeError::InvalidInput);
     assert_eq!(client.get_status(&id), EscrowStatus::Funded);
 }
@@ -2172,10 +2234,7 @@ fn expire_release_request_repeated_is_rejected() {
     env.ledger().set_timestamp(START + 100);
     client.expire_release_request(&id);
     assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
-    let err = client
-        .try_expire_release_request(&id)
-        .unwrap_err()
-        .unwrap();
+    let err = client.try_expire_release_request(&id).unwrap_err().unwrap();
     assert_eq!(err, ForgeError::InvalidInput);
 }
 
@@ -2193,7 +2252,10 @@ fn expiry_settlement_blocks_further_settlement() {
     // No other path may now settle the escrow: the terminal status blocks
     // every lifecycle operation.
     assert_eq!(
-        client.try_approve_release_request(&id).unwrap_err().unwrap(),
+        client
+            .try_approve_release_request(&id)
+            .unwrap_err()
+            .unwrap(),
         ForgeError::InvalidInput
     );
     assert_eq!(
@@ -2205,10 +2267,7 @@ fn expiry_settlement_blocks_further_settlement() {
         ForgeError::InvalidInput
     );
     assert_eq!(
-        client
-            .try_request_release(&id, &100)
-            .unwrap_err()
-            .unwrap(),
+        client.try_request_release(&id, &100).unwrap_err().unwrap(),
         ForgeError::InvalidInput
     );
 }
@@ -2226,10 +2285,7 @@ fn approve_settlement_blocks_expiry_and_vice_versa() {
     client.request_release(&id, &1000);
     client.approve_release_request(&id);
     assert_eq!(
-        client
-            .try_expire_release_request(&id)
-            .unwrap_err()
-            .unwrap(),
+        client.try_expire_release_request(&id).unwrap_err().unwrap(),
         ForgeError::InvalidInput
     );
     assert_eq!(client.get_status(&id), EscrowStatus::Completed);
@@ -2257,7 +2313,15 @@ fn expiry_and_deadline_refunds_settle_once() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let (buyer, seller, arbiter) = parties(&accounts);
     let deadline = START + 100;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(deadline));
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(deadline),
+    );
     client.deposit(&id);
 
     client.request_release(&id, &1000);
@@ -2273,7 +2337,15 @@ fn expiry_and_deadline_refunds_settle_once() {
     assert_eq!(tc.balance(buyer), AMOUNT);
 
     // Same, but expiry settles first.
-    let id2 = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(deadline));
+    let id2 = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(deadline),
+    );
     client.deposit(&id2);
     client.request_release(&id2, &100);
     env.ledger().set_timestamp(deadline + 100);

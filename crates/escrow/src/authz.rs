@@ -171,7 +171,16 @@ fn create_accepts_buyer_signature_with_matching_args() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_escrow",
-            args: (buyer, seller, arbiter, &token, AMOUNT, TIMEOUT, &None::<u64>).into_val(&env),
+            args: (
+                buyer,
+                seller,
+                arbiter,
+                &token,
+                AMOUNT,
+                TIMEOUT,
+                &None::<u64>,
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
@@ -197,7 +206,16 @@ fn create_rejects_signature_from_non_buyer() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_escrow",
-            args: (buyer, seller, arbiter, &token, AMOUNT, TIMEOUT, &None::<u64>).into_val(&env),
+            args: (
+                buyer,
+                seller,
+                arbiter,
+                &token,
+                AMOUNT,
+                TIMEOUT,
+                &None::<u64>,
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
@@ -221,7 +239,16 @@ fn create_rejects_signature_over_different_args() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_escrow",
-            args: (buyer, seller, arbiter, &token, AMOUNT + 500, TIMEOUT, &None::<u64>).into_val(&env),
+            args: (
+                buyer,
+                seller,
+                arbiter,
+                &token,
+                AMOUNT + 500,
+                TIMEOUT,
+                &None::<u64>,
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
@@ -516,7 +543,10 @@ fn dispute_accepts_claimant_signature() {
         },
     }]);
 
-    client.try_dispute(&id, buyer, &None).expect("outer ok").unwrap();
+    client
+        .try_dispute(&id, buyer, &None)
+        .expect("outer ok")
+        .unwrap();
     assert_eq!(client.get_status(&id), EscrowStatus::Disputed);
 }
 
@@ -1414,7 +1444,15 @@ fn refund_post_deadline_rejects_seller_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(START + 50));
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(START + 50),
+    );
     client.deposit(&id);
     env.ledger().set_timestamp(START + 50);
 
@@ -1442,7 +1480,15 @@ fn refund_post_deadline_accepts_buyer_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(START + 50));
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(START + 50),
+    );
     client.deposit(&id);
     env.ledger().set_timestamp(START + 50);
 
@@ -1468,7 +1514,15 @@ fn refund_expired_post_deadline_requires_no_authorization() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &Some(START + 50));
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &Some(START + 50),
+    );
     client.deposit(&id);
     env.ledger().set_timestamp(START + 50);
 
@@ -1491,7 +1545,15 @@ fn request_release_rejects_non_buyer_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None::<u64>);
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &None::<u64>,
+    );
     client.deposit(&id);
 
     // Only the buyer may open a release request.
@@ -1516,7 +1578,15 @@ fn approve_release_request_rejects_seller_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None::<u64>);
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &None::<u64>,
+    );
     client.deposit(&id);
     client.request_release(&id, &1000);
 
@@ -1542,7 +1612,15 @@ fn approve_release_request_accepts_buyer_signature() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None::<u64>);
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &None::<u64>,
+    );
     client.deposit(&id);
     client.request_release(&id, &1000);
 
@@ -1556,7 +1634,10 @@ fn approve_release_request_accepts_buyer_signature() {
         },
     }]);
 
-    client.try_approve_release_request(&id).expect("outer ok").unwrap();
+    client
+        .try_approve_release_request(&id)
+        .expect("outer ok")
+        .unwrap();
     assert_eq!(tc.balance(seller), AMOUNT);
     assert_eq!(client.get_status(&id), EscrowStatus::Completed);
 }
@@ -1567,7 +1648,15 @@ fn expire_release_request_is_permissionless() {
     let buyer = &accounts.user1;
     let seller = &accounts.user2;
     let arbiter = &accounts.arbiter;
-    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT, &None::<u64>);
+    let id = client.create_escrow(
+        buyer,
+        seller,
+        arbiter,
+        &token,
+        &AMOUNT,
+        &TIMEOUT,
+        &None::<u64>,
+    );
     client.deposit(&id);
     client.request_release(&id, &100);
     env.ledger().set_timestamp(START + 100);
