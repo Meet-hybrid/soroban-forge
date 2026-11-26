@@ -324,6 +324,10 @@ export const DAO_EVENT_SPECS = {
       forfeited: "bool",
     },
   },
+  Delegated: {
+    topics: 1,
+    fields: { from: "address", to: "address" },
+  },
   Finalised: {
     topics: 1,
     fields: {
@@ -344,6 +348,10 @@ export const DAO_EVENT_SPECS = {
   Proposed: {
     topics: 1,
     fields: { proposal_id: "u64", data: "udt:Proposal" },
+  },
+  Undelegated: {
+    topics: 1,
+    fields: { from: "address" },
   },
   VoteCast: {
     topics: 1,
