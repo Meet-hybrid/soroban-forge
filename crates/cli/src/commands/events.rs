@@ -2,7 +2,455 @@ use crate::cli::{EventsArgs, EventsFormat};
 use crate::commands::process::{ensure_success, CommandOutput};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::{collections::HashSet, io, process::Command, thread, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    io,
+    process::Command,
+    thread,
+    time::Duration,
+};
+
+/// Known event types from Soroban Forge contracts
+#[derive(Debug, Clone)]
+struct EventDefinition {
+    contract_type: &'static str,
+    event_name: &'static str,
+    topics: Vec<&'static str>,
+    data_fields: Vec<&'static str>,
+}
+
+/// Get event definitions for all supported Soroban Forge contracts
+fn get_event_definitions() -> HashMap<&'static str, EventDefinition> {
+    let mut defs = HashMap::new();
+
+    // Escrow events
+    defs.insert(
+        "escrow_created",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "EscrowCreated",
+            topics: vec!["escrow_id"],
+            data_fields: vec!["depositor", "beneficiary", "token", "amount", "arbiter"],
+        },
+    );
+
+    defs.insert(
+        "deposited",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "Deposited",
+            topics: vec!["escrow_id"],
+            data_fields: vec!["amount"],
+        },
+    );
+
+    defs.insert(
+        "released",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "Released",
+            topics: vec!["escrow_id"],
+            data_fields: vec!["amount"],
+        },
+    );
+
+    defs.insert(
+        "partially_released",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "PartiallyReleased",
+            topics: vec!["escrow_id"],
+            data_fields: vec!["amount", "data"],
+        },
+    );
+
+    defs.insert(
+        "refunded",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "Refunded",
+            topics: vec!["escrow_id"],
+            data_fields: vec!["amount"],
+        },
+    );
+
+    defs.insert(
+        "refund_expired",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "RefundExpired",
+            topics: vec!["escrow_id"],
+            data_fields: vec![],
+        },
+    );
+
+    defs.insert(
+        "disputed",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "Disputed",
+            topics: vec!["escrow_id"],
+            data_fields: vec![],
+        },
+    );
+
+    defs.insert(
+        "resolved",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "Resolved",
+            topics: vec!["escrow_id"],
+            data_fields: vec!["to_beneficiary"],
+        },
+    );
+
+    defs.insert(
+        "resolved_split",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "ResolvedSplit",
+            topics: vec!["escrow_id"],
+            data_fields: vec!["to_depositor", "to_beneficiary"],
+        },
+    );
+
+    defs.insert(
+        "cancelled",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "Cancelled",
+            topics: vec!["escrow_id"],
+            data_fields: vec![],
+        },
+    );
+
+    // Basket escrow events
+    defs.insert(
+        "basket_created",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "BasketCreated",
+            topics: vec!["escrow_id"],
+            data_fields: vec![],
+        },
+    );
+
+    defs.insert(
+        "basket_deposited",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "BasketDeposited",
+            topics: vec!["escrow_id"],
+            data_fields: vec![],
+        },
+    );
+
+    defs.insert(
+        "basket_released",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "BasketReleased",
+            topics: vec!["escrow_id"],
+            data_fields: vec![],
+        },
+    );
+
+    defs.insert(
+        "basket_partially_released",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "BasketPartiallyReleased",
+            topics: vec!["escrow_id"],
+            data_fields: vec!["leg", "amount", "data"],
+        },
+    );
+
+    defs.insert(
+        "basket_refunded",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "BasketRefunded",
+            topics: vec!["escrow_id"],
+            data_fields: vec![],
+        },
+    );
+
+    defs.insert(
+        "basket_disputed",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "BasketDisputed",
+            topics: vec!["escrow_id"],
+            data_fields: vec![],
+        },
+    );
+
+    defs.insert(
+        "basket_resolved",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "BasketResolved",
+            topics: vec!["escrow_id"],
+            data_fields: vec!["to_beneficiary"],
+        },
+    );
+
+    defs.insert(
+        "basket_cancelled",
+        EventDefinition {
+            contract_type: "escrow",
+            event_name: "BasketCancelled",
+            topics: vec!["escrow_id"],
+            data_fields: vec![],
+        },
+    );
+
+    // Marketplace royalties events
+    defs.insert(
+        "royalty_configured",
+        EventDefinition {
+            contract_type: "marketplace-royalties",
+            event_name: "RoyaltyConfigured",
+            topics: vec!["collection"],
+            data_fields: vec!["recipient", "bps"],
+        },
+    );
+
+    defs.insert(
+        "sale_settled",
+        EventDefinition {
+            contract_type: "marketplace-royalties",
+            event_name: "SaleSettled",
+            topics: vec!["collection"],
+            data_fields: vec![
+                "token",
+                "payer",
+                "seller",
+                "royalty_recipient",
+                "gross_amount",
+                "seller_net",
+                "royalty_share",
+            ],
+        },
+    );
+
+    // DAO governance events
+    defs.insert(
+        "proposed",
+        EventDefinition {
+            contract_type: "dao-governance",
+            event_name: "Proposed",
+            topics: vec!["proposal_id"],
+            data_fields: vec!["proposer"],
+        },
+    );
+
+    defs.insert(
+        "vote_cast",
+        EventDefinition {
+            contract_type: "dao-governance",
+            event_name: "VoteCast",
+            topics: vec!["proposal_id"],
+            data_fields: vec!["voter", "vote"],
+        },
+    );
+
+    defs.insert(
+        "finalised",
+        EventDefinition {
+            contract_type: "dao-governance",
+            event_name: "Finalised",
+            topics: vec!["proposal_id"],
+            data_fields: vec!["outcome"],
+        },
+    );
+
+    defs.insert(
+        "bond_posted",
+        EventDefinition {
+            contract_type: "dao-governance",
+            event_name: "BondPosted",
+            topics: vec!["proposal_id"],
+            data_fields: vec!["proposer", "token", "amount"],
+        },
+    );
+
+    defs.insert(
+        "bond_released",
+        EventDefinition {
+            contract_type: "dao-governance",
+            event_name: "BondReleased",
+            topics: vec!["proposal_id"],
+            data_fields: vec!["to", "token", "amount", "forfeited"],
+        },
+    );
+
+    defs.insert(
+        "quorum_updated",
+        EventDefinition {
+            contract_type: "dao-governance",
+            event_name: "QuorumUpdated",
+            topics: vec![],
+            data_fields: vec!["old_quorum_bps", "new_quorum_bps"],
+        },
+    );
+
+    // Vesting events
+    defs.insert(
+        "beneficiary_reassigned_from",
+        EventDefinition {
+            contract_type: "vesting",
+            event_name: "BeneficiaryReassignedFrom",
+            topics: vec!["schedule_id"],
+            data_fields: vec!["from_beneficiary", "to_beneficiary"],
+        },
+    );
+
+    defs.insert(
+        "beneficiary_reassigned_to",
+        EventDefinition {
+            contract_type: "vesting",
+            event_name: "BeneficiaryReassignedTo",
+            topics: vec!["schedule_id"],
+            data_fields: vec!["from_beneficiary", "to_beneficiary"],
+        },
+    );
+
+    // Multi-sig wallet events (commonly includes transaction events)
+    defs.insert(
+        "transaction_proposed",
+        EventDefinition {
+            contract_type: "multi-sig-wallet",
+            event_name: "TransactionProposed",
+            topics: vec!["transaction_id"],
+            data_fields: vec!["proposer"],
+        },
+    );
+
+    defs.insert(
+        "transaction_approved",
+        EventDefinition {
+            contract_type: "multi-sig-wallet",
+            event_name: "TransactionApproved",
+            topics: vec!["transaction_id"],
+            data_fields: vec!["approver"],
+        },
+    );
+
+    defs.insert(
+        "transaction_executed",
+        EventDefinition {
+            contract_type: "multi-sig-wallet",
+            event_name: "TransactionExecuted",
+            topics: vec!["transaction_id"],
+            data_fields: vec![],
+        },
+    );
+
+    // Subscription payments events (commonly includes subscription lifecycle)
+    defs.insert(
+        "subscription_created",
+        EventDefinition {
+            contract_type: "subscription-payments",
+            event_name: "SubscriptionCreated",
+            topics: vec!["subscription_id"],
+            data_fields: vec!["subscriber", "amount", "interval"],
+        },
+    );
+
+    defs.insert(
+        "payment_collected",
+        EventDefinition {
+            contract_type: "subscription-payments",
+            event_name: "PaymentCollected",
+            topics: vec!["subscription_id"],
+            data_fields: vec!["amount"],
+        },
+    );
+
+    defs.insert(
+        "subscription_cancelled",
+        EventDefinition {
+            contract_type: "subscription-payments",
+            event_name: "SubscriptionCancelled",
+            topics: vec!["subscription_id"],
+            data_fields: vec![],
+        },
+    );
+
+    defs
+}
+
+/// Decode a known event from JSON
+fn decode_event(
+    event_json: &Value,
+    definitions: &HashMap<&'static str, EventDefinition>,
+) -> Result<Option<DecodedEvent>> {
+    // Try to extract event name from topics
+    let topics = event_json.get("topics").and_then(|t| t.as_array());
+    if topics.is_none() {
+        return Ok(None);
+    }
+
+    let topics = topics.unwrap();
+    if topics.is_empty() {
+        return Ok(None);
+    }
+
+    // First topic is typically the event name symbol
+    let event_name_str = topics[0]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase()
+        .replace("\"", "");
+
+    if let Some(def) = definitions.get(event_name_str.as_str()) {
+        let mut fields = BTreeMap::new();
+
+        // Extract topic fields
+        for (i, topic_name) in def.topics.iter().enumerate() {
+            if let Some(value) = topics.get(i + 1) {
+                fields.insert(topic_name.to_string(), format_value(value));
+            }
+        }
+
+        // Extract data fields
+        if let Some(data) = event_json.get("data") {
+            if let Some(data_obj) = data.as_object() {
+                for field_name in &def.data_fields {
+                    if let Some(value) = data_obj.get(*field_name) {
+                        fields.insert(field_name.to_string(), format_value(value));
+                    }
+                }
+            }
+        }
+
+        Ok(Some(DecodedEvent {
+            contract_type: def.contract_type.to_string(),
+            event_name: def.event_name.to_string(),
+            fields,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+#[derive(Debug)]
+struct DecodedEvent {
+    contract_type: String,
+    event_name: String,
+    fields: BTreeMap<String, String>,
+}
+
+fn format_value(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "null".to_string(),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "?".to_string()),
+    }
+}
 
 const POLL_EVENT_COUNT: &str = "100";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -156,8 +604,20 @@ fn format_event(event: &Value, format: EventsFormat) -> Result<String> {
     match format {
         EventsFormat::Jsonl => Ok(serde_json::to_string(event)?),
         EventsFormat::Pretty => {
-            let label = event_label(event).unwrap_or("event");
             let body = serde_json::to_string_pretty(event)?;
+            // Known Soroban Forge events get a decoded, human-readable header;
+            // unknown events fall back to their raw label.
+            if let Some(decoded) = decode_event(event, &get_event_definitions())? {
+                let mut header = format!(
+                    "\x1b[1;36m[{} / {}]\x1b[0m",
+                    decoded.contract_type, decoded.event_name
+                );
+                for (key, value) in &decoded.fields {
+                    header.push_str(&format!("\n  {key}: {value}"));
+                }
+                return Ok(format!("{header}\n{body}"));
+            }
+            let label = event_label(event).unwrap_or("event");
             Ok(format!("\x1b[1;36m[{label}]\x1b[0m\n{body}"))
         }
     }
@@ -357,5 +817,48 @@ mod tests {
         .unwrap_err();
 
         assert!(format!("{error:#}").contains("failed to run stellar events"));
+    }
+
+    #[test]
+    fn event_definitions_cover_all_contracts() {
+        let defs = get_event_definitions();
+
+        // Verify we have definitions for each contract type
+        let contract_types: Vec<&str> = defs.values().map(|d| d.contract_type).collect();
+
+        assert!(contract_types.contains(&"escrow"));
+        assert!(contract_types.contains(&"marketplace-royalties"));
+        assert!(contract_types.contains(&"dao-governance"));
+        assert!(contract_types.contains(&"vesting"));
+        assert!(contract_types.contains(&"multi-sig-wallet"));
+        assert!(contract_types.contains(&"subscription-payments"));
+    }
+
+    #[test]
+    fn format_value_handles_types() {
+        assert_eq!(format_value(&Value::String("test".to_string())), "test");
+        assert_eq!(
+            format_value(&Value::Number(serde_json::Number::from(42))),
+            "42"
+        );
+        assert_eq!(format_value(&Value::Bool(true)), "true");
+        assert_eq!(format_value(&Value::Null), "null");
+    }
+
+    #[test]
+    fn pretty_format_decodes_known_events_and_keeps_unknown_raw() {
+        let known = serde_json::json!({
+            "topics": ["escrow_created", 7],
+            "data": { "depositor": "GDEPOSITOR", "amount": 500 }
+        });
+        let pretty = format_event(&known, EventsFormat::Pretty).unwrap();
+        assert!(pretty.contains("[escrow / EscrowCreated]"));
+        assert!(pretty.contains("escrow_id: 7"));
+        assert!(pretty.contains("depositor: GDEPOSITOR"));
+        assert!(pretty.contains("amount: 500"));
+
+        let unknown = serde_json::json!({ "topics": ["not_a_forge_event"] });
+        let pretty = format_event(&unknown, EventsFormat::Pretty).unwrap();
+        assert!(pretty.contains("[not_a_forge_event]"));
     }
 }
