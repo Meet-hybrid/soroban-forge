@@ -13,6 +13,7 @@ pub mod plan;
 mod process;
 pub mod profile;
 pub mod scaffold_validate;
+pub mod simulate;
 pub mod storage_diff;
 pub mod test;
 pub mod ttl_audit;
