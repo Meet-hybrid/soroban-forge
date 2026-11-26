@@ -215,6 +215,30 @@
       ]
     },
     {
+      "name": "preview_claimable",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:TranchePreview,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "preview_tranche",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:TranchePreview,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "propose_reassignment",
       "inputs": [
         {
@@ -633,6 +657,24 @@
         {
           "name": "unlock_at",
           "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "TranchePreview",
+      "fields": [
+        {
+          "name": "claimable",
+          "type": "i128"
+        },
+        {
+          "name": "evaluated_timestamp",
+          "type": "u64"
+        },
+        {
+          "name": "next_unlock_timestamp",
+          "type": "option<u64>"
         }
       ]
     },
