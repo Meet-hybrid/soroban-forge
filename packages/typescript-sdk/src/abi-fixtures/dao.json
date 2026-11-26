@@ -101,6 +101,18 @@
       ]
     },
     {
+      "name": "get_proposal_snapshot",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:ProposalSnapshot,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_proposal_status",
       "inputs": [
         {
@@ -142,6 +154,38 @@
       ],
       "outputs": [
         "result<udt:VoteReceipt,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_vote_snapshot",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<udt:VoteSnapshot,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_voter_weight",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
       ]
     },
     {
@@ -525,6 +569,24 @@
       ]
     },
     {
+      "kind": "struct",
+      "name": "ProposalSnapshot",
+      "fields": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "snapshot_ledger",
+          "type": "u32"
+        },
+        {
+          "name": "snapshot_timestamp",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "kind": "union",
       "name": "ProposalState",
       "variants": [
@@ -595,6 +657,36 @@
         {
           "name": "has_voted",
           "type": "bool"
+        },
+        {
+          "name": "support",
+          "type": "option<bool>"
+        },
+        {
+          "name": "weight",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "VoteSnapshot",
+      "fields": [
+        {
+          "name": "has_voted",
+          "type": "bool"
+        },
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "snapshot_ledger",
+          "type": "u32"
+        },
+        {
+          "name": "snapshot_timestamp",
+          "type": "u64"
         },
         {
           "name": "support",
