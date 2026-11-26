@@ -1,14 +1,14 @@
 {
   "schema": "soroban-forge-generated-clients-v1",
-  "generatedAt": "2026-11-26T10:36:31.989Z",
-  "generationCommit": "b75333f1d30776f6301e139d6d6d84411b26421e",
+  "generatedAt": "2026-11-26T10:26:10.609Z",
+  "generationCommit": "aab2494e30a59afa0d13530f1f7b61dcfdae2c43",
   "contracts": [
     {
       "crateName": "soroban-forge-escrow",
       "clientModule": "escrow",
       "contractVersion": "0.2.0",
       "generatedFiles": {
-        "src/clients/escrow.ts": "377a5a392a71be8740044904e8804243b31dc1d549f16efbfc5d85f0ceb9cd8e"
+        "src/clients/escrow.ts": "2821208b4e864625cf87dd270bfd03c5e9621e8ec45bb34deba14d991da7d7fc"
       }
     },
     {
@@ -16,7 +16,7 @@
       "clientModule": "vesting",
       "contractVersion": "0.2.0",
       "generatedFiles": {
-        "src/clients/vesting.ts": "19096cde8d8e0c0f056f08db692cbd212dab217c87de0d87a139fb5773ab84e2"
+        "src/clients/vesting.ts": "28674bfa8225b3fcbef2d54b9abd7bfae255bbf4a5f3db4f9de17638d61ef66e"
       },
       "standalonePackage": "vesting-client"
     },
@@ -52,7 +52,7 @@
       "clientModule": "dao",
       "contractVersion": "0.2.0",
       "generatedFiles": {
-        "src/clients/dao.ts": "0447488963d32e02a2e59adaf7243ba6343a0acdb8124315fa25196361cba270"
+        "src/clients/dao.ts": "33b11be4d1b9339153deb61e9a1d59a35d63ea9ef6cadd7b29f3a3b47a6e37fe"
       },
       "standalonePackage": "dao-governance-client"
     }
