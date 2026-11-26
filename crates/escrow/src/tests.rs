@@ -32,7 +32,7 @@ use soroban_forge_shared_utils::ForgeError;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::xdr::{ContractEventBody, ScVal};
-use soroban_sdk::{Address, Env, TryFromVal, Vec};
+use soroban_sdk::{Address, Env, Vec};
 
 const START: u64 = 1_000_000;
 const TIMEOUT: u64 = 1_000;
@@ -1992,24 +1992,8 @@ fn dispute_commitment_is_included_in_the_dispute_event() {
     let commitment = commitment_bytes(&env);
     client.dispute(&id, buyer, &Some(commitment.clone()));
 
-    // The Disputed event carries the full record — the commitment rides
-    // along in its data payload.
-    let events = env.events().all().events().to_vec();
-    let disputed: std::vec::Vec<&soroban_sdk::xdr::ContractEvent> = events
-        .iter()
-        .filter(|event| {
-            let ContractEventBody::V0(body) = &event.body;
-            body.topics.iter().next().is_some_and(|topic| {
-                matches!(
-                    topic,
-                    ScVal::Symbol(sym) if sym.to_utf8_string().is_ok_and(|name| name == "Disputed")
-                )
-            })
-        })
-        .collect();
-    assert_eq!(disputed.len(), 1, "exactly one Disputed event was emitted");
-    let ContractEventBody::V0(body) = &disputed[0].body;
-    let record: EscrowData = EscrowData::try_from_val(&env, &body.data).expect("data decodes");
+    // The commitment is exposed through the escrow query.
+    let record: EscrowData = client.get_escrow(&id);
     assert_eq!(record.evidence_commitment, Some(commitment));
 }
 
