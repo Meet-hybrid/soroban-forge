@@ -278,6 +278,18 @@ export const SUBSCRIPTION_EVENT_SPECS = {
 } as const;
 
 export const MARKETPLACE_EVENT_SPECS = {
+  RecipientRotationAccepted: {
+    topics: 1,
+    fields: { collection: "address", previous: "address", new_recipient: "address" },
+  },
+  RecipientRotationCancelled: {
+    topics: 1,
+    fields: { collection: "address", current: "address", new_recipient: "address" },
+  },
+  RecipientRotationProposed: {
+    topics: 1,
+    fields: { collection: "address", current: "address", new_recipient: "address" },
+  },
   RoyaltyConfigured: {
     topics: 1,
     fields: { collection: "address", recipient: "address", bps: "u32" },
@@ -339,6 +351,15 @@ export const DAO_EVENT_SPECS = {
       proposal_id: "u64",
       voter: "address",
       support: "bool",
+      weight: "i128",
+    },
+  },
+  VoteRevised: {
+    topics: 1,
+    fields: {
+      proposal_id: "u64",
+      voter: "address",
+      new_support: "bool",
       weight: "i128",
     },
   },

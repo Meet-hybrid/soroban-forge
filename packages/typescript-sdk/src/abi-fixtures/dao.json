@@ -176,6 +176,22 @@
       ]
     },
     {
+      "name": "get_vote_revision_count",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<u32,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_vote_snapshot",
       "inputs": [
         {
@@ -313,6 +329,26 @@
       ],
       "outputs": [
         "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "revise_vote",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        },
+        {
+          "name": "support",
+          "type": "bool"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -493,6 +529,28 @@
         },
         {
           "name": "support",
+          "type": "bool"
+        },
+        {
+          "name": "weight",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "name": "VoteRevised",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        },
+        {
+          "name": "new_support",
           "type": "bool"
         },
         {
