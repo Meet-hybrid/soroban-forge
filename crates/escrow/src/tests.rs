@@ -29,9 +29,9 @@ use crate::{
     MAX_ACCEPTANCE_DEADLINE, MAX_RELEASE_WINDOW,
 };
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::xdr::{ContractEventBody, ScVal};
+
 use soroban_sdk::{Address, Env, Vec};
 
 const START: u64 = 1_000_000;
