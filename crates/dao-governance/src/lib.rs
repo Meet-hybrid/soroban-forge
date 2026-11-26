@@ -312,6 +312,39 @@ pub trait SorobanForgeDaoGovernance {
         voter: Address,
     ) -> Result<VoteReceipt, soroban_forge_shared_utils::ForgeError>;
 
+    /// Read the proposal-level snapshot metadata (snapshot ledger sequence and
+    /// ledger timestamp recorded when the proposal was created).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no proposal with this id.
+    fn get_proposal_snapshot(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<ProposalSnapshot, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the vote-power snapshot for `voter` on `proposal_id`, including
+    /// the snapshot ledger sequence, timestamp, and recorded voter weight.
+    ///
+    /// Returns zero weight (`has_voted: false`, `weight: 0`) for an address
+    /// that has not voted on the proposal, and [`ForgeError::NotFound`] for an
+    /// unknown proposal id.
+    fn get_vote_snapshot(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<VoteSnapshot, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the recorded voting weight for `voter` on `proposal_id`.
+    ///
+    /// Returns `Ok(0)` when `voter` has not voted on `proposal_id`, and
+    /// [`ForgeError::NotFound`] for an unknown proposal id.
+    fn get_voter_weight(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
+
     /// Permissionless keeper entrypoint: extend the persistent storage TTL of a proposal.
     ///
     /// # Errors
@@ -394,6 +427,39 @@ pub struct VoteReceipt {
     pub support: Option<bool>,
     /// Governance-token balance recorded when the vote was cast.
     pub weight: i128,
+}
+
+/// Snapshot ledger sequence and timestamp recorded for a proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalSnapshot {
+    /// Proposal identifier.
+    pub proposal_id: u64,
+    /// Ledger sequence number at which the proposal was created.
+    pub snapshot_ledger: u32,
+    /// Ledger timestamp at which the proposal was created.
+    pub snapshot_timestamp: u64,
+}
+
+/// Read-only vote-power snapshot for a voter on a proposal.
+///
+/// Exposes the snapshot ledger and timestamp alongside the immutable weight
+/// recorded when the vote was cast (or `0` when the address has not voted).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoteSnapshot {
+    /// Proposal identifier.
+    pub proposal_id: u64,
+    /// Whether this voter cast a vote on the proposal.
+    pub has_voted: bool,
+    /// Recorded vote direction (`Some(true)` for, `Some(false)` against, `None` if not voted).
+    pub support: Option<bool>,
+    /// Recorded voting weight (`0` for non-voters).
+    pub weight: i128,
+    /// Ledger sequence when the snapshot was recorded.
+    pub snapshot_ledger: u32,
+    /// Ledger timestamp when the snapshot was recorded.
+    pub snapshot_timestamp: u64,
 }
 
 /// Lifecycle state of a governance proposal.
@@ -562,6 +628,10 @@ enum DataKey {
     VotingStart(u64),
     /// Voting delay in seconds configured at proposal creation.
     VotingDelay(u64),
+    /// Ledger sequence and timestamp recorded when `proposal_id` was created.
+    ProposalSnapshot(u64),
+    /// Ledger sequence and timestamp recorded when `voter` cast a vote on `proposal_id`.
+    VoteSnapshot(u64, Address),
 }
 
 /// Maximum number of concurrent active proposals a single proposer may have by default.
@@ -752,6 +822,14 @@ impl DaoGovernance {
         env.storage().persistent().set(&delay_key, &delay);
         bump_entry(&env, &delay_key);
 
+        env.storage().instance().set(
+            &DataKey::ProposalSnapshot(proposal_id),
+            &ProposalSnapshot {
+                proposal_id,
+                snapshot_ledger: env.ledger().sequence(),
+                snapshot_timestamp: env.ledger().timestamp(),
+            },
+        );
         env.storage().instance().set(&DataKey::BondHeld, &next_held);
         Self::inc_active_proposals(&env, &proposer)?;
         events::proposed(&env, &proposal);
@@ -880,6 +958,10 @@ impl DaoGovernance {
                 support: Some(support),
                 weight,
             },
+        );
+        env.storage().instance().set(
+            &DataKey::VoteSnapshot(proposal_id, voter.clone()),
+            &(env.ledger().sequence(), env.ledger().timestamp()),
         );
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
@@ -1243,6 +1325,94 @@ impl DaoGovernance {
             support: None,
             weight: 0,
         }))
+    }
+
+    /// Read the proposal-level snapshot metadata (snapshot ledger sequence and
+    /// timestamp recorded when `proposal_id` was created).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no proposal with this id.
+    pub fn get_proposal_snapshot(
+        env: Env,
+        proposal_id: u64,
+    ) -> Result<ProposalSnapshot, ForgeError> {
+        Self::proposal_snapshot_impl(&env, proposal_id)
+    }
+
+    /// Read the vote-power snapshot for `voter` on `proposal_id` (read-only view).
+    ///
+    /// Exposes the snapshot ledger sequence, timestamp, and immutable recorded
+    /// weight. For a non-voter on an existing proposal, returns `has_voted: false`,
+    /// `support: None`, `weight: 0`, and the proposal's creation snapshot ledger
+    /// and timestamp. Returns [`ForgeError::NotFound`] for an unknown proposal.
+    pub fn get_vote_snapshot(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<VoteSnapshot, ForgeError> {
+        let proposal_snapshot = Self::proposal_snapshot_impl(&env, proposal_id)?;
+        let receipt: VoteReceipt = env
+            .storage()
+            .instance()
+            .get(&DataKey::VoteReceipt(proposal_id, voter.clone()))
+            .unwrap_or(VoteReceipt {
+                has_voted: false,
+                support: None,
+                weight: 0,
+            });
+        let (snapshot_ledger, snapshot_timestamp) = if receipt.has_voted {
+            env.storage()
+                .instance()
+                .get(&DataKey::VoteSnapshot(proposal_id, voter))
+                .unwrap_or((
+                    proposal_snapshot.snapshot_ledger,
+                    proposal_snapshot.snapshot_timestamp,
+                ))
+        } else {
+            (
+                proposal_snapshot.snapshot_ledger,
+                proposal_snapshot.snapshot_timestamp,
+            )
+        };
+        Ok(VoteSnapshot {
+            proposal_id,
+            has_voted: receipt.has_voted,
+            support: receipt.support,
+            weight: receipt.weight,
+            snapshot_ledger,
+            snapshot_timestamp,
+        })
+    }
+
+    /// Read the recorded voting weight for `voter` on `proposal_id` (read-only view).
+    ///
+    /// Returns `Ok(0)` for an address that has not voted on the proposal, and
+    /// [`ForgeError::NotFound`] for an unknown proposal id.
+    pub fn get_voter_weight(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<i128, ForgeError> {
+        Self::get_proposal_impl(&env, proposal_id)?;
+        let receipt: Option<VoteReceipt> = env
+            .storage()
+            .instance()
+            .get(&DataKey::VoteReceipt(proposal_id, voter));
+        Ok(receipt.map_or(0, |r| r.weight))
+    }
+
+    fn proposal_snapshot_impl(env: &Env, proposal_id: u64) -> Result<ProposalSnapshot, ForgeError> {
+        Self::get_proposal_impl(env, proposal_id)?;
+        Ok(env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalSnapshot(proposal_id))
+            .unwrap_or(ProposalSnapshot {
+                proposal_id,
+                snapshot_ledger: 0,
+                snapshot_timestamp: 0,
+            }))
     }
 
     /// Check whether `voter` has voted on `proposal_id` (read-only view).
@@ -4884,6 +5054,140 @@ mod tests {
             ProposalState::Executed
         );
         assert_eq!(target.count(), 1);
+    }
+
+    #[test]
+    fn vote_power_snapshot_queries_cover_before_after_and_finalized_proposals() {
+        let (env, _token, tc, _contract_id, client, accounts, target_id) = fresh_bond!();
+        env.ledger().set_sequence_number(42);
+        env.ledger().set_timestamp(START);
+
+        // Unknown proposal returns NotFound across all snapshot queries.
+        assert_eq!(
+            client.try_get_proposal_snapshot(&999).unwrap_err().unwrap(),
+            ForgeError::NotFound
+        );
+        assert_eq!(
+            client
+                .try_get_vote_snapshot(&999, &accounts.user2)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+        assert_eq!(
+            client
+                .try_get_voter_weight(&999, &accounts.user2)
+                .unwrap_err()
+                .unwrap(),
+            ForgeError::NotFound
+        );
+
+        let proposal_id = client.propose(
+            &accounts.user1,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        );
+
+        // Proposal snapshot captures creation ledger sequence and timestamp.
+        let prop_snap = client.get_proposal_snapshot(&proposal_id);
+        assert_eq!(
+            prop_snap,
+            ProposalSnapshot {
+                proposal_id,
+                snapshot_ledger: 42,
+                snapshot_timestamp: START,
+            }
+        );
+
+        // Before vote: voter and non-voter queries return weight 0 and proposal snapshot ledger/time.
+        assert_eq!(client.get_voter_weight(&proposal_id, &accounts.user2), 0);
+        assert_eq!(
+            client.get_vote_snapshot(&proposal_id, &accounts.user2),
+            VoteSnapshot {
+                proposal_id,
+                has_voted: false,
+                support: None,
+                weight: 0,
+                snapshot_ledger: 42,
+                snapshot_timestamp: START,
+            }
+        );
+
+        // Advance ledger and cast votes.
+        env.ledger().set_sequence_number(55);
+        env.ledger().set_timestamp(START + 100);
+        client.vote(&proposal_id, &accounts.user2, &true);
+
+        env.ledger().set_sequence_number(60);
+        env.ledger().set_timestamp(START + 250);
+        client.vote(&proposal_id, &accounts.user3, &false);
+
+        // After vote: recorded weight and vote ledger/time are exposed.
+        assert_eq!(
+            client.get_voter_weight(&proposal_id, &accounts.user2),
+            FUNDS
+        );
+        assert_eq!(
+            client.get_vote_snapshot(&proposal_id, &accounts.user2),
+            VoteSnapshot {
+                proposal_id,
+                has_voted: true,
+                support: Some(true),
+                weight: FUNDS,
+                snapshot_ledger: 55,
+                snapshot_timestamp: START + 100,
+            }
+        );
+
+        // Later token movement does not alter recorded weight or non-voter weight.
+        tc.transfer(&accounts.user2, &accounts.validator, &(FUNDS / 2));
+        tc.transfer(&accounts.user3, &accounts.validator, &FUNDS);
+        assert_eq!(
+            client.get_voter_weight(&proposal_id, &accounts.user2),
+            FUNDS
+        );
+        assert_eq!(
+            client.get_voter_weight(&proposal_id, &accounts.user3),
+            FUNDS
+        );
+        assert_eq!(
+            client.get_voter_weight(&proposal_id, &accounts.validator),
+            0
+        );
+
+        // Finalize (Defeated on tie) and verify snapshots remain immutable.
+        env.ledger().set_sequence_number(100);
+        env.ledger().set_timestamp(START + DURATION + 1);
+        client.execute(&proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).state,
+            ProposalState::Defeated
+        );
+        assert_eq!(
+            client.get_vote_snapshot(&proposal_id, &accounts.user2),
+            VoteSnapshot {
+                proposal_id,
+                has_voted: true,
+                support: Some(true),
+                weight: FUNDS,
+                snapshot_ledger: 55,
+                snapshot_timestamp: START + 100,
+            }
+        );
+        assert_eq!(
+            client.get_vote_snapshot(&proposal_id, &accounts.validator),
+            VoteSnapshot {
+                proposal_id,
+                has_voted: false,
+                support: None,
+                weight: 0,
+                snapshot_ledger: 42,
+                snapshot_timestamp: START,
+            }
+        );
     }
 }
 

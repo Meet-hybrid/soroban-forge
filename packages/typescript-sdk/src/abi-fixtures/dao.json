@@ -82,6 +82,13 @@
       ]
     },
     {
+      "name": "get_governance_policy",
+      "inputs": [],
+      "outputs": [
+        "result<udt:GovernancePolicy,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_proposal",
       "inputs": [
         {
@@ -98,6 +105,30 @@
       "inputs": [],
       "outputs": [
         "u64"
+      ]
+    },
+    {
+      "name": "get_proposal_policy",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:GovernancePolicy,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_proposal_snapshot",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:ProposalSnapshot,udt:ForgeError>"
       ]
     },
     {
@@ -142,6 +173,50 @@
       ],
       "outputs": [
         "result<udt:VoteReceipt,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_vote_snapshot",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<udt:VoteSnapshot,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_voter_weight",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "voter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_voting_start",
+      "inputs": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
       ]
     },
     {
@@ -202,6 +277,74 @@
       ],
       "outputs": [
         "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "propose_with_delay",
+      "inputs": [
+        {
+          "name": "proposer",
+          "type": "address"
+        },
+        {
+          "name": "target",
+          "type": "address"
+        },
+        {
+          "name": "action",
+          "type": "bytes"
+        },
+        {
+          "name": "delay",
+          "type": "u64"
+        },
+        {
+          "name": "duration",
+          "type": "u64"
+        },
+        {
+          "name": "requires",
+          "type": "vec<u64>"
+        },
+        {
+          "name": "conflicts_with",
+          "type": "option<u64>"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_governance_address",
+      "inputs": [
+        {
+          "name": "governance",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_governance_policy",
+      "inputs": [
+        {
+          "name": "quorum_bps",
+          "type": "u32"
+        },
+        {
+          "name": "min_participation",
+          "type": "i128"
+        },
+        {
+          "name": "voting_period",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -301,6 +444,24 @@
         {
           "name": "against_votes",
           "type": "i128"
+        }
+      ]
+    },
+    {
+      "name": "PolicyUpdated",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "quorum_bps",
+          "type": "u32"
+        },
+        {
+          "name": "min_participation",
+          "type": "i128"
+        },
+        {
+          "name": "voting_period",
+          "type": "u64"
         }
       ]
     },
@@ -468,6 +629,24 @@
     },
     {
       "kind": "struct",
+      "name": "GovernancePolicy",
+      "fields": [
+        {
+          "name": "min_participation",
+          "type": "i128"
+        },
+        {
+          "name": "quorum_bps",
+          "type": "u32"
+        },
+        {
+          "name": "voting_period",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
       "name": "Proposal",
       "fields": [
         {
@@ -520,6 +699,24 @@
         },
         {
           "name": "voting_ends",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ProposalSnapshot",
+      "fields": [
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "snapshot_ledger",
+          "type": "u32"
+        },
+        {
+          "name": "snapshot_timestamp",
           "type": "u64"
         }
       ]
@@ -595,6 +792,36 @@
         {
           "name": "has_voted",
           "type": "bool"
+        },
+        {
+          "name": "support",
+          "type": "option<bool>"
+        },
+        {
+          "name": "weight",
+          "type": "i128"
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "VoteSnapshot",
+      "fields": [
+        {
+          "name": "has_voted",
+          "type": "bool"
+        },
+        {
+          "name": "proposal_id",
+          "type": "u64"
+        },
+        {
+          "name": "snapshot_ledger",
+          "type": "u32"
+        },
+        {
+          "name": "snapshot_timestamp",
+          "type": "u64"
         },
         {
           "name": "support",
