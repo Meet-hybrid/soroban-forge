@@ -424,8 +424,6 @@ proptest! {
     }
 }
 
-
-
 #[test]
 fn lifecycle_test_seed_is_reproducible() {
     let first_seed = 42_u64;
@@ -433,4 +431,3 @@ fn lifecycle_test_seed_is_reproducible() {
 
     assert_eq!(first_seed, second_seed);
 }
-

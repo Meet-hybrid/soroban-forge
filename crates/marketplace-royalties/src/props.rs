@@ -1021,10 +1021,6 @@ fn multi_recipient_residue_known_values() {
     assert_eq!(w.balance(&w.sellers[0]), 9_999);
 }
 
-
-
-
-
 #[test]
 fn royalty_split_amounts_preserve_gross_value() {
     let gross = 1_000_i128;
@@ -1033,6 +1029,3 @@ fn royalty_split_amounts_preserve_gross_value() {
 
     assert_eq!(royalty + seller_net, gross);
 }
-
-
-
