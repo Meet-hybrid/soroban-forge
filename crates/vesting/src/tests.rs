@@ -1280,6 +1280,141 @@ fn reassignment_rejects_unknown_tranche_and_completed_schedules() {
     assert_eq!(err, ForgeError::InvalidInput);
 }
 
+#[test]
+fn propose_reassignment_stores_pending_and_cancellation_clears_it() {
+    let (_env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    assert_eq!(client.pending_beneficiary(&id), None);
+    client.propose_reassignment(&id, &accounts.user2);
+    assert_eq!(
+        client.pending_beneficiary(&id),
+        Some(accounts.user2.clone())
+    );
+
+    // Schedule beneficiary has NOT changed yet.
+    assert_eq!(client.get_schedule(&id).beneficiary, accounts.user1);
+
+    // Cancellation clears the proposal.
+    client.cancel_reassignment(&id);
+    assert_eq!(client.pending_beneficiary(&id), None);
+
+    // Attempting to accept after cancellation fails.
+    let err = client.try_accept_reassignment(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+}
+
+#[test]
+fn reassignment_replacement_proposal_overwrites_pending_beneficiary() {
+    let (_env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    client.propose_reassignment(&id, &accounts.user2);
+    assert_eq!(
+        client.pending_beneficiary(&id),
+        Some(accounts.user2.clone())
+    );
+
+    // Replace proposal with validator account.
+    client.propose_reassignment(&id, &accounts.validator);
+    assert_eq!(
+        client.pending_beneficiary(&id),
+        Some(accounts.validator.clone())
+    );
+
+    // Acceptance accepts the replaced beneficiary.
+    client.accept_reassignment(&id);
+    assert_eq!(client.get_schedule(&id).beneficiary, accounts.validator);
+    assert_eq!(client.pending_beneficiary(&id), None);
+}
+
+#[test]
+fn claims_remain_with_old_beneficiary_until_acceptance_and_move_atomically() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    let proposal_time = START + CLIFF + 1_000;
+    env.ledger().set_timestamp(proposal_time);
+    client.propose_reassignment(&id, &accounts.user2);
+
+    // While proposal is pending, old beneficiary can claim.
+    let old_claimable = client.claimable(&id);
+    assert_eq!(old_claimable, 3_333);
+    let claimed = client.claim(&id);
+    assert_eq!(claimed, 3_333);
+
+    // Advance time and accept.
+    let accept_time = START + CLIFF + 2_000;
+    env.ledger().set_timestamp(accept_time);
+    client.accept_reassignment(&id);
+
+    // Old beneficiary holds former balance, new beneficiary accrues from acceptance.
+    let schedule = client.get_schedule(&id);
+    assert_eq!(schedule.beneficiary, accounts.user2);
+    assert_eq!(schedule.reassignment_count, 1);
+    assert_eq!(schedule.reassignment_vested, 6_666);
+
+    // Claim for new beneficiary at full duration.
+    env.ledger().set_timestamp(START + DURATION);
+    let new_claimed = client.claim(&id);
+    assert_eq!(new_claimed, 3_334);
+
+    // Old beneficiary can claim their frozen former entitlement.
+    let former_claimed = client.claim_for(&id, &accounts.user1);
+    assert_eq!(former_claimed, 3_333);
+}
+
+#[test]
+fn reassignment_acceptance_boundaries_reject_invalid_states() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    // Cannot accept when no proposal exists.
+    assert_eq!(
+        client.try_accept_reassignment(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // Cannot cancel when no proposal exists.
+    assert_eq!(
+        client.try_cancel_reassignment(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // Cannot propose current beneficiary or funder.
+    assert_eq!(
+        client
+            .try_propose_reassignment(&id, &accounts.user1)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_propose_reassignment(&id, &accounts.deployer)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // Fully claim and complete schedule.
+    env.ledger().set_timestamp(START + DURATION);
+    client.claim(&id);
+
+    // Completed schedule rejects propose, cancel, and accept.
+    assert_eq!(
+        client
+            .try_propose_reassignment(&id, &accounts.user2)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_accept_reassignment(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+}
+
 // -----------------------------------------------------------------------
 // Issue #609: Schedule Creation, Cancellation, and Authorization Matrix Tests
 // -----------------------------------------------------------------------

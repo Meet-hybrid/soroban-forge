@@ -3,6 +3,30 @@
   "contract": "soroban-forge-vesting",
   "functions": [
     {
+      "name": "accept_reassignment",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "cancel_reassignment",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "claim",
       "inputs": [
         {
@@ -179,7 +203,7 @@
       ]
     },
     {
-      "name": "preview_claimable",
+      "name": "pending_beneficiary",
       "inputs": [
         {
           "name": "schedule_id",
@@ -187,19 +211,23 @@
         }
       ],
       "outputs": [
-        "result<udt:TranchePreview,udt:ForgeError>"
+        "result<option<address>,udt:ForgeError>"
       ]
     },
     {
-      "name": "preview_tranche",
+      "name": "propose_reassignment",
       "inputs": [
         {
           "name": "schedule_id",
           "type": "u64"
+        },
+        {
+          "name": "new_beneficiary",
+          "type": "address"
         }
       ],
       "outputs": [
-        "result<udt:TranchePreview,udt:ForgeError>"
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -345,6 +373,46 @@
         {
           "name": "reassignment_count",
           "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "ReassignmentCancelled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "pending_beneficiary",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "name": "ReassignmentProposed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "current_beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "pending_beneficiary",
+          "type": "address"
         }
       ]
     },
@@ -565,24 +633,6 @@
         {
           "name": "unlock_at",
           "type": "u64"
-        }
-      ]
-    },
-    {
-      "kind": "struct",
-      "name": "TranchePreview",
-      "fields": [
-        {
-          "name": "claimable",
-          "type": "i128"
-        },
-        {
-          "name": "evaluated_timestamp",
-          "type": "u64"
-        },
-        {
-          "name": "next_unlock_timestamp",
-          "type": "option<u64>"
         }
       ]
     },

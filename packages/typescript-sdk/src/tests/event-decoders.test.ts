@@ -94,7 +94,7 @@ for (const contract of Object.keys(FORGE_EVENT_SPECS) as ForgeContractName[]) {
         event.params,
         `${contract}.${event.name}: fields differ from the ABI fixture`,
       );
-      assert.ok(spec.topics >= 1 && spec.topics <= Object.keys(spec.fields).length);
+      assert.ok(spec.topics >= 0 && spec.topics <= Object.keys(spec.fields).length);
     }
   });
 }
@@ -294,6 +294,26 @@ test("marketplace: SaleSettled decodes addresses and amounts", () => {
       seller_net: 900n,
       royalty_share: 100n,
     },
+  });
+});
+
+test("dao: PolicyUpdated decodes an event with no topic fields", () => {
+  const event = okEvent(
+    decodeDaoEvent(
+      raw(
+        [sym("policy_updated")],
+        map([
+          ["min_participation", i128(50n)],
+          ["quorum_bps", u32(4_000)],
+          ["voting_period", u64(86_400n)],
+        ]),
+      ),
+    ),
+  );
+  assert.deepEqual(event, {
+    contract: "dao",
+    event: "PolicyUpdated",
+    fields: { quorum_bps: 4_000, min_participation: 50n, voting_period: 86_400n },
   });
 });
 
