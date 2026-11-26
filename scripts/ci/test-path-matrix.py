@@ -47,6 +47,7 @@ ALL_WORKSPACE_PACKAGES = sorted(
         *CONTRACT_PACKAGES,
         "soroban-forge-cli",
         "soroban-forge-composition-tests",
+        "soroban-forge-docs",
         "soroban-forge-shared-utils",
         "soroban-forge-test-utils",
     ]
