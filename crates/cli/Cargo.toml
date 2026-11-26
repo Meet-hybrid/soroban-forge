@@ -26,6 +26,7 @@ ed25519-dalek = "3"
 stellar-xdr = { version = "21.2.0", features = ["base64", "curr"] }
 soroban-spec = "29.0.1"
 stellar-xdr-28 = { package = "stellar-xdr", version = "28.0.0", features = ["base64"] }
+ureq = { version = "2", features = ["native-tls"] }
 
 tracing-subscriber = "0.3"
 tempfile = "3.8"

@@ -354,6 +354,15 @@ export const DAO_EVENT_SPECS = {
       weight: "i128",
     },
   },
+  VoteRevised: {
+    topics: 1,
+    fields: {
+      proposal_id: "u64",
+      voter: "address",
+      new_support: "bool",
+      weight: "i128",
+    },
+  },
 } as const;
 
 /** Contract names; they match the unified SDK namespaces and `abi-fixtures/<name>.json`. */
