@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **TypeScript SDK typed event decoders.** `decodeEscrowEvent`, `decodeVestingEvent`, `decodeMultisigEvent`, `decodeSubscriptionEvent`, `decodeMarketplaceEvent` and `decodeDaoEvent` turn raw events into discriminated unions keyed by event name, return typed errors for unknown or malformed events, and are optionally wired into `createIndexer` via `decoders`. A test keeps them in sync with the ABI fixtures.
+
 ### Changed
 - **Escrow release now has a review window (breaking).** The seller asks to be
   paid with `request_release(escrow_id, amount)` (all or part, for
@@ -31,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `refund_expired_returns_only_what_is_left_after_partial_releases`).
 
 ### Added
+- Multi-signature wallets can confirm up to 16 transactions with one owner authorization.
+- Subscriptions support mutually authorized price changes with prorated credit and a read-only catch-up quote.
 - **Next.js example local demo state tools** (`packages/nextjs-example`):
   versioned JSON export, validated import, state inspection, and a confirmed
   reset flow for browser-only form state. Exports exclude chain-derived escrow

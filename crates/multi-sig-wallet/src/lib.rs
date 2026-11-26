@@ -59,9 +59,9 @@
 //! - `add_owner` rejects addresses already in the set at submission and
 //!   again (against the live set) at execution.
 //! - `remove_owner` rejects removal of a non-member or of the final owner at
-//!   submission, and execution additionally refuses a removal that would
+//!   submission. Both submission and execution refuse a removal that would
 //!   leave `threshold > owners` — the wallet's approval invariant — so a
-//!   valid submission can only fail at execution if the owner set changed
+//!   valid submission can fail at execution if owners or threshold changed
 //!   underneath it.
 //! - `set_threshold` requires `1 <= new_threshold <= owners.len()` at
 //!   submission against the current set and again at execution against the
@@ -300,6 +300,13 @@ use soroban_sdk::{
     Env, IntoVal, Symbol, Val, Vec,
 };
 
+/// Maximum number of distinct transaction IDs that [`MultiSigWallet::confirm_batch`]
+/// accepts in a single atomic call.
+///
+/// Batches larger than `MAX_CONFIRM_BATCH` or empty batches are rejected with
+/// [`ForgeError::InvalidInput`] before any state is written.
+pub const MAX_CONFIRM_BATCH: u32 = 16;
+
 /// Public interface for the Soroban Forge multi-signature wallet contract.
 #[contractclient(name = "SorobanForgeMultiSigWalletClient")]
 pub trait SorobanForgeMultiSigWallet {
@@ -356,6 +363,36 @@ pub trait SorobanForgeMultiSigWallet {
         tx_id: u64,
         signer: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Record `signer`'s approval across a bounded batch of distinct pending
+    /// transactions in a single atomic invocation.
+    ///
+    /// Requires `signer` authorization once and confirms each listed transaction
+    /// in order. Rejects empty batches, batches exceeding [`MAX_CONFIRM_BATCH`],
+    /// duplicate transaction IDs, non-owner signers, and non-pending or expired
+    /// transactions, rolling back the entire batch on any error.
+    fn confirm_batch(env: Env, tx_ids: Vec<u64>, signer: Address) -> Result<(), ForgeError>;
+
+    /// Permissionlessly finalize an expired transaction at or after its expiry
+    /// timestamp, persisting [`TxStatus::Expired`] and clearing its recorded
+    /// confirmations without moving any funds.
+    ///
+    /// Idempotent once a transaction is already [`TxStatus::Expired`].
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no transaction exists for `tx_id`.
+    /// * [`ForgeError::InvalidInput`] — the transaction has no expiry, has not
+    ///   yet reached its expiry timestamp, or is already in another terminal
+    ///   state (`Executed`, `Rejected`, `Cancelled`).
+    fn expire_tx(env: Env, tx_id: u64) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Check whether `tx_id` is expired (read-only view).
+    ///
+    /// Returns `Ok(true)` when the transaction's effective status is
+    /// [`TxStatus::Expired`], `Ok(false)` otherwise, and
+    /// [`ForgeError::NotFound`] if `tx_id` does not exist.
+    fn is_expired(env: Env, tx_id: u64) -> Result<bool, soroban_forge_shared_utils::ForgeError>;
 
     /// Record `signer`'s formal objection to `tx_id`.
     ///
@@ -696,7 +733,7 @@ pub trait SorobanForgeMultiSigWallet {
     /// * [`ForgeError::NotInitialized`] — the wallet has no owner set.
     /// * [`ForgeError::Unauthorized`] — `submitter` is not an owner.
     /// * [`ForgeError::InvalidInput`] — `existing_owner` is not an owner, or
-    ///   is the final owner.
+    ///   is the final owner, or removal would leave fewer owners than the threshold.
     fn remove_owner(
         env: Env,
         submitter: Address,
@@ -1140,36 +1177,117 @@ impl MultiSigWallet {
     ///
     /// A rejected transaction returns [`ForgeError::InvalidInput`] unchanged.
     pub fn confirm(env: Env, tx_id: u64, signer: Address) -> Result<(), ForgeError> {
-        let mut wallet_tx = Self::get_tx_impl(&env, tx_id)?;
-        if wallet_tx.status == TxStatus::Expired {
-            return Err(ForgeError::DeadlineReached);
-        }
-        if wallet_tx.status != TxStatus::Pending {
+        let tx = Self::pending_for_owner(&env, tx_id, &signer)?;
+        signer.require_auth();
+        Self::write_confirmation(&env, Self::with_confirmation(tx, &signer)?);
+        Ok(())
+    }
+
+    /// Confirm up to [`MAX_CONFIRM_BATCH`] distinct pending transactions in the
+    /// supplied order, requiring `signer`'s authorization once.
+    pub fn confirm_batch(env: Env, tx_ids: Vec<u64>, signer: Address) -> Result<(), ForgeError> {
+        if tx_ids.is_empty() || tx_ids.len() > MAX_CONFIRM_BATCH {
             return Err(ForgeError::InvalidInput);
         }
-        if let Some(exp) = wallet_tx.expiry {
-            if env.ledger().timestamp() >= exp {
-                return Err(ForgeError::DeadlineReached);
+        let mut seen = Vec::new(&env);
+        for id in tx_ids.iter() {
+            if seen.contains(id) {
+                return Err(ForgeError::InvalidInput);
             }
+            seen.push_back(id);
         }
-        if !Self::is_owner_impl(&env, &signer) {
-            return Err(ForgeError::Unauthorized);
+        let mut pending = Vec::new(&env);
+        for id in tx_ids.iter() {
+            let tx = Self::pending_for_owner(&env, id, &signer)?;
+            pending.push_back(Self::with_confirmation(tx, &signer)?);
         }
         signer.require_auth();
-
-        if wallet_tx.confirmations.contains(&signer) {
-            return Err(ForgeError::InvalidInput);
+        for tx in pending.iter() {
+            Self::write_confirmation(&env, tx);
         }
-        if wallet_tx.rejections.contains(&signer) {
-            return Err(ForgeError::InvalidInput);
-        }
-        wallet_tx.confirmations.push_back(signer);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Tx(tx_id), &wallet_tx);
-        bump_entry(&env, &DataKey::Tx(tx_id));
-        events::confirmed(&env, &wallet_tx);
         Ok(())
+    }
+
+    /// Permissionlessly finalize an expired transaction at or after its expiry
+    /// timestamp, persisting [`TxStatus::Expired`] and clearing its recorded
+    /// confirmations without moving any funds.
+    ///
+    /// Cleanup is idempotent: calling `expire_tx` again on an already-finalized
+    /// expired transaction succeeds as a no-op and never affects other
+    /// transaction IDs or the transaction counter.
+    pub fn expire_tx(env: Env, tx_id: u64) -> Result<(), ForgeError> {
+        let key = DataKey::Tx(tx_id);
+        let mut wallet_tx: WalletTx = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ForgeError::NotFound)?;
+
+        match wallet_tx.status {
+            TxStatus::Expired => {
+                if !wallet_tx.confirmations.is_empty() {
+                    wallet_tx.confirmations = Vec::new(&env);
+                    env.storage().persistent().set(&key, &wallet_tx);
+                    bump_entry(&env, &key);
+                }
+                Ok(())
+            }
+            TxStatus::Pending => {
+                let Some(exp) = wallet_tx.expiry else {
+                    return Err(ForgeError::InvalidInput);
+                };
+                let now = env.ledger().timestamp();
+                if now < exp {
+                    return Err(ForgeError::InvalidInput);
+                }
+                wallet_tx.confirmations = Vec::new(&env);
+                wallet_tx.status = TxStatus::Expired;
+                env.storage().persistent().set(&key, &wallet_tx);
+                bump_entry(&env, &key);
+                Ok(())
+            }
+            TxStatus::Executed | TxStatus::Rejected | TxStatus::Cancelled => {
+                Err(ForgeError::InvalidInput)
+            }
+        }
+    }
+
+    /// Check whether `tx_id` has expired (read-only view).
+    pub fn is_expired(env: Env, tx_id: u64) -> Result<bool, ForgeError> {
+        let wallet_tx = Self::get_tx_impl(&env, tx_id)?;
+        Ok(wallet_tx.status == TxStatus::Expired)
+    }
+
+    fn pending_for_owner(env: &Env, tx_id: u64, signer: &Address) -> Result<WalletTx, ForgeError> {
+        let tx = Self::get_tx_impl(env, tx_id)?;
+        if tx.status == TxStatus::Expired {
+            return Err(ForgeError::DeadlineReached);
+        }
+        if tx.status != TxStatus::Pending {
+            return Err(ForgeError::InvalidInput);
+        }
+        if tx.expiry.is_some_and(|end| env.ledger().timestamp() >= end) {
+            return Err(ForgeError::DeadlineReached);
+        }
+        if !Self::is_owner_impl(env, signer) {
+            return Err(ForgeError::Unauthorized);
+        }
+        Ok(tx)
+    }
+
+    fn with_confirmation(mut tx: WalletTx, signer: &Address) -> Result<WalletTx, ForgeError> {
+        if tx.confirmations.contains(signer) || tx.rejections.contains(signer) {
+            return Err(ForgeError::InvalidInput);
+        }
+        tx.confirmations.push_back(signer.clone());
+        Ok(tx)
+    }
+
+    fn write_confirmation(env: &Env, tx: WalletTx) {
+        let key = DataKey::Tx(tx.tx_id);
+        env.storage().persistent().set(&key, &tx);
+        bump_entry(env, &key);
+        events::confirmed(env, &tx);
     }
 
     /// Record an owner's formal objection to a pending transaction.
@@ -1789,8 +1907,8 @@ impl MultiSigWallet {
     ///
     /// Creates only a pending governance [`TxKind::RemoveOwner`] tx; the
     /// owner set is untouched until the threshold-approved `execute` applies
-    /// it. Removing the final owner is rejected at submission so a pending
-    /// proposal can never leave the wallet ownerless.
+    /// it. Submission rejects removing the final owner or leaving fewer
+    /// owners than the current threshold.
     pub fn remove_owner(
         env: Env,
         submitter: Address,
@@ -1805,7 +1923,9 @@ impl MultiSigWallet {
         if !Self::is_owner_impl(&env, &existing_owner) {
             return Err(ForgeError::InvalidInput);
         }
-        if Self::owner_count(&env) <= 1 {
+        let owners = Self::owner_count(&env);
+        let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
+        if owners <= 1 || owners - 1 < threshold {
             return Err(ForgeError::InvalidInput);
         }
         submitter.require_auth();
@@ -2541,6 +2661,9 @@ mod events {
 // dao-governance suites' two-layer pattern (issue #61).
 #[cfg(test)]
 mod authz;
+
+#[cfg(test)]
+mod batch;
 
 // Randomized property suite covering the threshold-enforcement,
 // execute-once, and distinct-owner confirmation-counting invariants
@@ -5183,24 +5306,24 @@ mod tests {
 
     #[test]
     fn execution_refuses_removal_that_would_break_the_threshold() {
-        // A three-owner wallet with a threshold of 3: removing anyone
-        // leaves 2 owners, which cannot satisfy the 3-owner threshold.
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(MultiSigWallet, ());
         let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
         let accounts = TestAccounts::generate(&env);
-        client.initialize(&owner_vec(&env, &accounts), &3_u32);
+        client.initialize(&owner_vec(&env, &accounts), &2_u32);
 
         let tx = client.remove_owner(&accounts.user1, &accounts.user3);
         client.confirm(&tx, &accounts.user2);
         client.confirm(&tx, &accounts.user1);
         client.confirm(&tx, &accounts.user3);
 
-        // The submission was valid (3 owners, >1), but execution
-        // re-validates the resulting state and refuses: 2 owners cannot
-        // satisfy threshold 3. The tx stays pending and the owner set is
-        // untouched.
+        // A separate governance proposal raises the threshold after submission.
+        let raise = client.set_threshold(&accounts.user1, &3);
+        client.confirm(&raise, &accounts.user1);
+        client.confirm(&raise, &accounts.user2);
+        client.execute(&raise);
+
         let err = client.try_execute(&tx).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
         assert_eq!(client.get_tx(&tx).status, TxStatus::Pending);
@@ -5557,6 +5680,62 @@ mod tests {
         assert_eq!(pending.get_unchecked(0).tx_id, id2);
         assert_eq!(pending.get_unchecked(1).tx_id, id3);
     }
+
+    #[test]
+    fn expire_tx_permissionless_cleanup_clears_confirmations_and_preserves_funds_and_newer_txs() {
+        let (env, client, accounts, token, token_client) = custody!();
+        client.deposit(&token, &accounts.user1, &DEPOSIT);
+        env.ledger().set_timestamp(1_000);
+
+        let expiring_id =
+            client.submit(&accounts.user1, &target(&env), &payload(&env), &Some(2_000));
+        client.confirm(&expiring_id, &accounts.user1);
+        let newer_id = client.submit(&accounts.user2, &target(&env), &payload(&env), &Some(5_000));
+        client.confirm(&newer_id, &accounts.user2);
+
+        // 1 second before expiry (1_999): not expired; cleanup is rejected.
+        env.ledger().set_timestamp(1_999);
+        assert!(!client.is_expired(&expiring_id));
+        assert_eq!(
+            client.try_expire_tx(&expiring_id).unwrap_err().unwrap(),
+            ForgeError::InvalidInput
+        );
+        assert_eq!(client.get_confirmations(&expiring_id).len(), 1);
+        assert_eq!(client.get_tx(&expiring_id).status, TxStatus::Pending);
+
+        // Exactly at expiry boundary (2_000): is_expired is true, execution is rejected,
+        // and permissionless expire_tx succeeds even with a blank auth envelope.
+        env.ledger().set_timestamp(2_000);
+        assert!(client.is_expired(&expiring_id));
+        assert_eq!(
+            client.try_execute(&expiring_id).unwrap_err().unwrap(),
+            ForgeError::DeadlineReached
+        );
+        env.set_auths(&[]);
+        client.expire_tx(&expiring_id);
+        assert_eq!(env.auths().len(), 0);
+        assert!(client.get_confirmations(&expiring_id).is_empty());
+        assert_eq!(client.get_tx(&expiring_id).status, TxStatus::Expired);
+        assert!(client.is_expired(&expiring_id));
+
+        // After expiry (2_500): repeated cleanup is idempotent,
+        // moves no funds, and leaves the newer transaction untouched.
+        env.ledger().set_timestamp(2_500);
+        client.expire_tx(&expiring_id);
+        assert!(client.get_confirmations(&expiring_id).is_empty());
+        assert_eq!(
+            client.try_execute(&expiring_id).unwrap_err().unwrap(),
+            ForgeError::DeadlineReached
+        );
+        assert_eq!(client.balance(&token), DEPOSIT);
+        assert_eq!(token_client.balance(&client.address), DEPOSIT);
+
+        // Newer transaction ID and its confirmation remain intact.
+        assert!(!client.is_expired(&newer_id));
+        assert_eq!(client.get_tx(&newer_id).status, TxStatus::Pending);
+        assert_eq!(client.get_confirmations(&newer_id).len(), 1);
+        assert_eq!(client.get_tx_count(), 2);
+    }
 }
 
 // Tests for the new submit_call functionality
@@ -5635,3 +5814,6 @@ mod call_tests {
         assert_eq!(err, ForgeError::Unauthorized);
     }
 }
+
+#[cfg(test)]
+mod wallet_state_machine;

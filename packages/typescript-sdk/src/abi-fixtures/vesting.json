@@ -3,6 +3,30 @@
   "contract": "soroban-forge-vesting",
   "functions": [
     {
+      "name": "accept_reassignment",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "cancel_reassignment",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "claim",
       "inputs": [
         {
@@ -110,6 +134,10 @@
       "name": "create_tranche_schedule",
       "inputs": [
         {
+          "name": "funder",
+          "type": "address"
+        },
+        {
           "name": "beneficiary",
           "type": "address"
         },
@@ -139,6 +167,18 @@
       ]
     },
     {
+      "name": "get_schedule_status",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<udt:ScheduleStatus,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "get_status",
       "inputs": [
         {
@@ -160,6 +200,34 @@
       ],
       "outputs": [
         "result<udt:TrancheSchedule,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "pending_beneficiary",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<option<address>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "propose_reassignment",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "new_beneficiary",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -200,6 +268,58 @@
       ],
       "outputs": [
         "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "revoke_tranche_schedule",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "schedules_for_beneficiary",
+      "inputs": [
+        {
+          "name": "beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<vec<u64>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "schedules_for_funder",
+      "inputs": [
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        },
+        {
+          "name": "limit",
+          "type": "u32"
+        }
+      ],
+      "outputs": [
+        "result<vec<u64>,udt:ForgeError>"
       ]
     }
   ],
@@ -257,6 +377,46 @@
       ]
     },
     {
+      "name": "ReassignmentCancelled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "pending_beneficiary",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "name": "ReassignmentProposed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "current_beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "pending_beneficiary",
+          "type": "address"
+        }
+      ]
+    },
+    {
       "name": "RevokedRefunded",
       "dataFormat": "scSpecEventDataFormatMap",
       "params": [
@@ -297,6 +457,28 @@
         {
           "name": "duration",
           "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "TrancheRevoked",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "unlocked_at_revocation",
+          "type": "i128"
+        },
+        {
+          "name": "refunded_to_funder",
+          "type": "i128"
         }
       ]
     }
@@ -395,6 +577,48 @@
         {
           "name": "ReleasePending",
           "value": 16
+        },
+        {
+          "name": "InvalidState",
+          "value": 17
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ScheduleStatus",
+      "fields": [
+        {
+          "name": "claimable",
+          "type": "i128"
+        },
+        {
+          "name": "claimed",
+          "type": "i128"
+        },
+        {
+          "name": "cliff",
+          "type": "u64"
+        },
+        {
+          "name": "cliff_timestamp",
+          "type": "u64"
+        },
+        {
+          "name": "duration",
+          "type": "u64"
+        },
+        {
+          "name": "start",
+          "type": "u64"
+        },
+        {
+          "name": "status",
+          "type": "udt:VestingStatus"
+        },
+        {
+          "name": "total_amount",
+          "type": "i128"
         }
       ]
     },
@@ -423,6 +647,18 @@
         {
           "name": "claimed",
           "type": "i128"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "refunded_amount",
+          "type": "i128"
+        },
+        {
+          "name": "revoked_unlocked",
+          "type": "option<i128>"
         },
         {
           "name": "start",
@@ -591,6 +827,10 @@
     {
       "name": "ReleasePending",
       "code": 16
+    },
+    {
+      "name": "InvalidState",
+      "code": 17
     }
   ]
 }

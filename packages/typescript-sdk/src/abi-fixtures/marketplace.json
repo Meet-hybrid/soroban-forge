@@ -3,6 +3,50 @@
   "contract": "soroban-forge-marketplace-royalties",
   "functions": [
     {
+      "name": "accept_recipient_rotation",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "cancel_recipient_rotation",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "clear_royalty_tiers",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "distribute",
       "inputs": [
         {
@@ -43,6 +87,22 @@
       ]
     },
     {
+      "name": "get_pending_rotation",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "option<address>"
+      ]
+    },
+    {
       "name": "get_royalty",
       "inputs": [
         {
@@ -64,6 +124,18 @@
       ],
       "outputs": [
         "result<vec<udt:RoyaltyShare>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_royalty_tiers",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "vec<tuple<i128,u32>>"
       ]
     },
     {
@@ -92,6 +164,26 @@
       ],
       "outputs": [
         "result<udt:SettlementPreview,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "propose_recipient_rotation",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        },
+        {
+          "name": "new_recipient",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
       ]
     },
     {
@@ -156,6 +248,22 @@
         {
           "name": "recipients",
           "type": "vec<udt:RoyaltyShare>"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "set_royalty_tiers",
+      "inputs": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "tiers",
+          "type": "vec<tuple<i128,u32>>"
         }
       ],
       "outputs": [
@@ -228,6 +336,60 @@
     }
   ],
   "events": [
+    {
+      "name": "RecipientRotationAccepted",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "previous",
+          "type": "address"
+        },
+        {
+          "name": "new_recipient",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "name": "RecipientRotationCancelled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        },
+        {
+          "name": "new_recipient",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "name": "RecipientRotationProposed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "collection",
+          "type": "address"
+        },
+        {
+          "name": "current",
+          "type": "address"
+        },
+        {
+          "name": "new_recipient",
+          "type": "address"
+        }
+      ]
+    },
     {
       "name": "RoyaltyConfigured",
       "dataFormat": "scSpecEventDataFormatMap",
@@ -353,6 +515,10 @@
         {
           "name": "ReleasePending",
           "value": 16
+        },
+        {
+          "name": "InvalidState",
+          "value": 17
         }
       ]
     },
@@ -551,6 +717,10 @@
     {
       "name": "ReleasePending",
       "code": 16
+    },
+    {
+      "name": "InvalidState",
+      "code": 17
     }
   ]
 }

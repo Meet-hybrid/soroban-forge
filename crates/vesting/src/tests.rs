@@ -1,11 +1,15 @@
 use super::*;
+use soroban_forge_shared_utils::{
+    jump_after, jump_before, jump_to, jump_to_timestamp, BalanceSnapshot, TestSac,
+    TEST_START_TIMESTAMP,
+};
 use soroban_forge_test_utils::TestAccounts;
 use soroban_sdk::events::Event as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
-use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+use soroban_sdk::token::StellarAssetClient;
 use soroban_sdk::{Env, Vec as SorobanVec};
 
-const START: u64 = 1_000_000;
+const START: u64 = TEST_START_TIMESTAMP;
 const CLIFF: u64 = 1_000;
 const DURATION: u64 = 4_000;
 const TOTAL: i128 = 10_000;
@@ -17,20 +21,18 @@ macro_rules! setup {
     () => {{
         let env = Env::default();
         env.mock_all_auths();
-        env.ledger().set_timestamp(START);
+        jump_to_timestamp(&env, TEST_START_TIMESTAMP);
 
-        // Real Stellar Asset Contract — the same fixture escrow uses.
-        let admin = Address::generate(&env);
-        let sac = env.register_stellar_asset_contract_v2(admin);
-        let token = sac.address();
-        let token_admin = StellarAssetClient::new(&env, &token);
-        let token_client = TokenClient::new(&env, &token);
+        // Real Stellar Asset Contract, registered by the shared fixture.
+        let sac = TestSac::new(&env);
+        let token = sac.token.clone();
+        let token_client = sac.client();
         let contract_id = env.register(Vesting, ());
         let client = SorobanForgeVestingClient::new(&env, &contract_id);
         let accounts = TestAccounts::generate(&env);
         // Fund the schedule contract up front with the full allocation,
         // the way a deployment is topped up before schedules run.
-        token_admin.mint(&contract_id, &TOTAL);
+        sac.mint(&contract_id, TOTAL);
         (env, token, token_client, contract_id, client, accounts)
     }};
 }
@@ -251,9 +253,9 @@ fn cliff_equals_duration_vests_at_once() {
         &DURATION,
         &DURATION,
     );
-    env.ledger().set_timestamp(START + DURATION - 1);
+    jump_before(&env, START + DURATION, 1);
     assert_eq!(client.claimable(&id), 0);
-    env.ledger().set_timestamp(START + DURATION);
+    jump_to(&env, START + DURATION);
     assert_eq!(client.claimable(&id), TOTAL);
 }
 
@@ -302,8 +304,11 @@ fn claimable_overflow_is_reported() {
 
 #[test]
 fn claim_transfers_vested_tokens_to_beneficiary() {
-    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
     let id = create(&client, &token, &accounts);
+    let holders = [contract_id.clone(), accounts.user1.clone()];
+    let before = BalanceSnapshot::new(&env, &token, &holders);
+    before.assert_balances(&[TOTAL, 0]);
 
     // Halfway through the vesting window: 5_000 claimable.
     env.ledger()
@@ -311,8 +316,9 @@ fn claim_transfers_vested_tokens_to_beneficiary() {
     assert_eq!(client.claim(&id), TOTAL / 2);
 
     // Tokens actually moved, and the schedule recorded the claim.
-    assert_eq!(tc.balance(&accounts.user1), TOTAL / 2);
-    assert_eq!(tc.balance(&contract_id), TOTAL - TOTAL / 2);
+    let after = BalanceSnapshot::new(&env, &token, &holders);
+    before.assert_delta(&after, &[-TOTAL / 2, TOTAL / 2]);
+    assert_eq!(before.total(), after.total());
     assert_eq!(client.claimable(&id), 0);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
 }
@@ -437,37 +443,37 @@ fn boundary_cliff_and_duration_step_progression() {
     let id = create(&client, &token, &accounts);
 
     // At creation start:
-    env.ledger().set_timestamp(START);
+    jump_to(&env, START);
     assert_eq!(client.get_status(&id), VestingStatus::Locked);
     assert_eq!(client.claimable(&id), 0);
 
     // 1 second before cliff:
-    env.ledger().set_timestamp(START + CLIFF - 1);
+    jump_before(&env, START + CLIFF, 1);
     assert_eq!(client.get_status(&id), VestingStatus::Locked);
     assert_eq!(client.claimable(&id), 0);
 
     // At cliff boundary:
-    env.ledger().set_timestamp(START + CLIFF);
+    jump_to(&env, START + CLIFF);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     assert_eq!(client.claimable(&id), 0);
 
     // 1 second after cliff: floor(10_000 * 1 / 3_000) = 3
-    env.ledger().set_timestamp(START + CLIFF + 1);
+    jump_after(&env, START + CLIFF, 1);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     assert_eq!(client.claimable(&id), 3);
 
     // 1 second before full duration: floor(10_000 * 2_999 / 3_000) = 9_996
-    env.ledger().set_timestamp(START + DURATION - 1);
+    jump_before(&env, START + DURATION, 1);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     assert_eq!(client.claimable(&id), 9_996);
 
     // Exactly at duration:
-    env.ledger().set_timestamp(START + DURATION);
+    jump_to(&env, START + DURATION);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     assert_eq!(client.claimable(&id), TOTAL);
 
     // After duration:
-    env.ledger().set_timestamp(START + DURATION + 10_000);
+    jump_after(&env, START + DURATION, 10_000);
     assert_eq!(client.get_status(&id), VestingStatus::Vesting);
     assert_eq!(client.claimable(&id), TOTAL);
 }
@@ -570,21 +576,112 @@ fn total_amount_i128_max_at_duration_succeeds() {
 #[test]
 fn start_plus_duration_u64_overflow_reported() {
     let (env, _token, _tc, _cid, client, accounts) = setup!();
-    // A schedule whose duration would cause start + duration to overflow u64.
+    // Creating a schedule above MAX_VESTING_DURATION is rejected at creation.
+    let err = client
+        .try_create_schedule(
+            &accounts.deployer,
+            &accounts.user1,
+            &accounts.validator,
+            &TOTAL,
+            &0_u64,
+            &u64::MAX,
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+
+    // A schedule created with a valid duration near u64::MAX whose
+    // start + duration overflows u64 reports ArithmeticOverflow on claimable/claim.
+    env.ledger().set_timestamp(u64::MAX - 500);
     let id = client.create_schedule(
         &accounts.deployer,
         &accounts.user1,
         &accounts.validator,
         &TOTAL,
         &0_u64,
-        &u64::MAX,
+        &1_000_u64,
     );
-    env.ledger().set_timestamp(START + 100);
+    env.ledger().set_timestamp(u64::MAX - 100);
     let err = client.try_claimable(&id).unwrap_err().unwrap();
     assert_eq!(err, ForgeError::ArithmeticOverflow);
 
     let claim_err = client.try_claim(&id).unwrap_err().unwrap();
     assert_eq!(claim_err, ForgeError::ArithmeticOverflow);
+}
+
+#[test]
+fn create_schedule_validates_max_duration_and_exposes_cliff_in_status_queries() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+
+    // Above MAX_VESTING_DURATION is rejected.
+    let err = client
+        .try_create_schedule(
+            &accounts.deployer,
+            &accounts.user1,
+            &token,
+            &TOTAL,
+            &CLIFF,
+            &(MAX_VESTING_DURATION + 1),
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+
+    // Exactly at MAX_VESTING_DURATION is accepted.
+    let max_id = client.create_schedule(
+        &accounts.deployer,
+        &accounts.user1,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &MAX_VESTING_DURATION,
+    );
+    let max_status = client.get_schedule_status(&max_id);
+    assert_eq!(max_status.cliff, CLIFF);
+    assert_eq!(max_status.cliff_timestamp, START + CLIFF);
+    assert_eq!(max_status.duration, MAX_VESTING_DURATION);
+    assert_eq!(max_status.status, VestingStatus::Locked);
+
+    // Linear schedule with cliff: verify before, at, and after cliff timestamps.
+    let id = create(&client, &token, &accounts);
+
+    // Before cliff: Locked, claimable == 0, cliff exposed in status query.
+    env.ledger().set_timestamp(START + CLIFF - 1);
+    let before = client.get_schedule_status(&id);
+    assert_eq!(before.status, VestingStatus::Locked);
+    assert_eq!(before.cliff, CLIFF);
+    assert_eq!(before.cliff_timestamp, START + CLIFF);
+    assert_eq!(before.claimable, 0);
+    assert_eq!(client.claimable(&id), 0);
+
+    // Exactly at cliff: transitions to Vesting, claimable is still 0 (elapsed == 0).
+    env.ledger().set_timestamp(START + CLIFF);
+    let at_cliff = client.get_schedule_status(&id);
+    assert_eq!(at_cliff.status, VestingStatus::Vesting);
+    assert_eq!(at_cliff.cliff, CLIFF);
+    assert_eq!(at_cliff.cliff_timestamp, START + CLIFF);
+    assert_eq!(at_cliff.claimable, 0);
+    assert_eq!(client.claimable(&id), 0);
+
+    // After cliff (midway between cliff and duration): linear ramp accrues half.
+    env.ledger()
+        .set_timestamp(START + CLIFF + (DURATION - CLIFF) / 2);
+    let after_cliff = client.get_schedule_status(&id);
+    assert_eq!(after_cliff.status, VestingStatus::Vesting);
+    assert_eq!(after_cliff.cliff, CLIFF);
+    assert_eq!(after_cliff.claimable, TOTAL / 2);
+    assert_eq!(client.claim(&id), TOTAL / 2);
+
+    // After full duration and claim: Completed, cliff metadata preserved.
+    env.ledger().set_timestamp(START + DURATION);
+    assert_eq!(client.claim(&id), TOTAL - TOTAL / 2);
+    let completed = client.get_schedule_status(&id);
+    assert_eq!(completed.status, VestingStatus::Completed);
+    assert_eq!(completed.cliff, CLIFF);
+    assert_eq!(completed.claimed, TOTAL);
+    assert_eq!(completed.claimable, 0);
+    assert_eq!(tc.balance(&accounts.user1), TOTAL);
+    assert_eq!(tc.balance(&contract_id), 0);
 }
 
 #[test]
@@ -668,7 +765,7 @@ fn get_schedule_tranche_id_returns_not_found() {
             },
         ],
     );
-    let id = client.create_tranche_schedule(&accounts.user1, &token, &tranches);
+    let id = client.create_tranche_schedule(&accounts.deployer, &accounts.user1, &token, &tranches);
 
     let err = client.try_get_schedule(&id).unwrap_err().unwrap();
     assert_eq!(err, ForgeError::NotFound);
@@ -960,7 +1057,8 @@ fn revoke_unknown_or_tranche_id_is_not_found() {
             },
         ],
     );
-    let tranche_id = client.create_tranche_schedule(&accounts.user1, &token, &tranches);
+    let tranche_id =
+        client.create_tranche_schedule(&accounts.deployer, &accounts.user1, &token, &tranches);
     let err = client.try_revoke(&tranche_id).unwrap_err().unwrap();
     assert_eq!(err, ForgeError::NotFound);
 }
@@ -1155,6 +1253,7 @@ fn reassignment_rejects_unknown_tranche_and_completed_schedules() {
     assert_eq!(err, ForgeError::NotFound);
 
     let tranche_id = client.create_tranche_schedule(
+        &accounts.deployer,
         &accounts.user1,
         &token,
         &soroban_sdk::vec![
@@ -1179,6 +1278,141 @@ fn reassignment_rejects_unknown_tranche_and_completed_schedules() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, ForgeError::InvalidInput);
+}
+
+#[test]
+fn propose_reassignment_stores_pending_and_cancellation_clears_it() {
+    let (_env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    assert_eq!(client.pending_beneficiary(&id), None);
+    client.propose_reassignment(&id, &accounts.user2);
+    assert_eq!(
+        client.pending_beneficiary(&id),
+        Some(accounts.user2.clone())
+    );
+
+    // Schedule beneficiary has NOT changed yet.
+    assert_eq!(client.get_schedule(&id).beneficiary, accounts.user1);
+
+    // Cancellation clears the proposal.
+    client.cancel_reassignment(&id);
+    assert_eq!(client.pending_beneficiary(&id), None);
+
+    // Attempting to accept after cancellation fails.
+    let err = client.try_accept_reassignment(&id).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+}
+
+#[test]
+fn reassignment_replacement_proposal_overwrites_pending_beneficiary() {
+    let (_env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    client.propose_reassignment(&id, &accounts.user2);
+    assert_eq!(
+        client.pending_beneficiary(&id),
+        Some(accounts.user2.clone())
+    );
+
+    // Replace proposal with validator account.
+    client.propose_reassignment(&id, &accounts.validator);
+    assert_eq!(
+        client.pending_beneficiary(&id),
+        Some(accounts.validator.clone())
+    );
+
+    // Acceptance accepts the replaced beneficiary.
+    client.accept_reassignment(&id);
+    assert_eq!(client.get_schedule(&id).beneficiary, accounts.validator);
+    assert_eq!(client.pending_beneficiary(&id), None);
+}
+
+#[test]
+fn claims_remain_with_old_beneficiary_until_acceptance_and_move_atomically() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    let proposal_time = START + CLIFF + 1_000;
+    env.ledger().set_timestamp(proposal_time);
+    client.propose_reassignment(&id, &accounts.user2);
+
+    // While proposal is pending, old beneficiary can claim.
+    let old_claimable = client.claimable(&id);
+    assert_eq!(old_claimable, 3_333);
+    let claimed = client.claim(&id);
+    assert_eq!(claimed, 3_333);
+
+    // Advance time and accept.
+    let accept_time = START + CLIFF + 2_000;
+    env.ledger().set_timestamp(accept_time);
+    client.accept_reassignment(&id);
+
+    // Old beneficiary holds former balance, new beneficiary accrues from acceptance.
+    let schedule = client.get_schedule(&id);
+    assert_eq!(schedule.beneficiary, accounts.user2);
+    assert_eq!(schedule.reassignment_count, 1);
+    assert_eq!(schedule.reassignment_vested, 6_666);
+
+    // Claim for new beneficiary at full duration.
+    env.ledger().set_timestamp(START + DURATION);
+    let new_claimed = client.claim(&id);
+    assert_eq!(new_claimed, 3_334);
+
+    // Old beneficiary can claim their frozen former entitlement.
+    let former_claimed = client.claim_for(&id, &accounts.user1);
+    assert_eq!(former_claimed, 3_333);
+}
+
+#[test]
+fn reassignment_acceptance_boundaries_reject_invalid_states() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    // Cannot accept when no proposal exists.
+    assert_eq!(
+        client.try_accept_reassignment(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // Cannot cancel when no proposal exists.
+    assert_eq!(
+        client.try_cancel_reassignment(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // Cannot propose current beneficiary or funder.
+    assert_eq!(
+        client
+            .try_propose_reassignment(&id, &accounts.user1)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_propose_reassignment(&id, &accounts.deployer)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // Fully claim and complete schedule.
+    env.ledger().set_timestamp(START + DURATION);
+    client.claim(&id);
+
+    // Completed schedule rejects propose, cancel, and accept.
+    assert_eq!(
+        client
+            .try_propose_reassignment(&id, &accounts.user2)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client.try_accept_reassignment(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -1383,7 +1617,8 @@ fn refund_revoked_requires_a_revoked_linear_schedule() {
             amount: 1_000,
         }],
     );
-    let tranche_id = client.create_tranche_schedule(&accounts.user1, &token, &tranches);
+    let tranche_id =
+        client.create_tranche_schedule(&accounts.deployer, &accounts.user1, &token, &tranches);
     assert_eq!(
         client.try_refund_revoked(&tranche_id).unwrap_err().unwrap(),
         ForgeError::NotFound
@@ -1628,5 +1863,362 @@ fn create_schedules_batch_emits_creation_events() {
         }
         .to_xdr(&env, &cid),
     ];
+    assert_eq!(emitted.events(), expected.as_slice());
+}
+
+// ---------------------------------------------------------------------------
+// Tranche revocation (revoke_tranche_schedule)
+// ---------------------------------------------------------------------------
+
+/// Helper: build a 3-tranche schedule summing to `TOTAL` (10_000).
+///
+/// - t = START + 1_000 -> 2_000 tokens
+/// - t = START + 3_000 -> 3_000 tokens
+/// - t = START + 6_000 -> 5_000 tokens
+///
+/// Funder = `accounts.deployer`, beneficiary = `accounts.user1`.
+fn create_tranche_3(
+    env: &Env,
+    client: &SorobanForgeVestingClient<'_>,
+    token: &Address,
+    accounts: &soroban_forge_test_utils::TestAccounts,
+) -> u64 {
+    let tranches = soroban_sdk::Vec::from_array(
+        env,
+        [
+            Tranche {
+                unlock_at: 1_000,
+                amount: 2_000,
+            },
+            Tranche {
+                unlock_at: 3_000,
+                amount: 3_000,
+            },
+            Tranche {
+                unlock_at: 6_000,
+                amount: 5_000,
+            },
+        ],
+    );
+    client.create_tranche_schedule(&accounts.deployer, &accounts.user1, token, &tranches)
+}
+
+#[test]
+fn create_tranche_schedule_rejects_funder_equal_to_beneficiary() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let tranches = soroban_sdk::Vec::from_array(
+        &env,
+        [Tranche {
+            unlock_at: 1_000,
+            amount: TOTAL,
+        }],
+    );
+    let err = client
+        .try_create_tranche_schedule(&accounts.user1, &accounts.user1, &token, &tranches)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ForgeError::InvalidInput);
+}
+
+/// Revoking before the first tranche unlocks refunds the entire allocation
+/// to the funder; nothing is claimable and claiming locked tranches fails.
+#[test]
+fn revoke_tranche_before_first_tranche_refunds_all() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create_tranche_3(&env, &client, &token, &accounts);
+
+    env.ledger().set_timestamp(START + 500);
+    assert_eq!(client.get_status(&id), VestingStatus::Locked);
+    assert_eq!(client.claimable(&id), 0);
+
+    let refunded = client.revoke_tranche_schedule(&id);
+    assert_eq!(refunded, TOTAL);
+    assert_eq!(tc.balance(&accounts.deployer), TOTAL);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+
+    let record = client.get_tranche_schedule(&id);
+    assert_eq!(record.status, VestingStatus::Revoked);
+    assert_eq!(record.revoked_unlocked, Some(0));
+    assert_eq!(record.refunded_amount, TOTAL);
+    assert_eq!(record.claimed, 0);
+
+    // Advance past every tranche: nothing becomes claimable, and claiming
+    // locked tranches is rejected with InvalidInput.
+    env.ledger().set_timestamp(START + 10_000);
+    assert_eq!(client.claimable(&id), 0);
+    assert_eq!(
+        client.try_claim(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(
+        client
+            .try_claim_for(&id, &accounts.user1)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+    assert_eq!(tc.balance(&accounts.user1), 0);
+}
+
+/// Revoking between tranches 1 and 2 leaves tranche 1 claimable by the
+/// beneficiary, refunds tranches 2+3 to the funder, and rejects later claims
+/// for the locked tranches.
+#[test]
+fn revoke_tranche_between_tranches_freezes_unlocked_refunds_locked() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create_tranche_3(&env, &client, &token, &accounts);
+
+    env.ledger().set_timestamp(START + 2_000);
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+    assert_eq!(client.claimable(&id), 2_000);
+
+    let refunded = client.revoke_tranche_schedule(&id);
+    assert_eq!(refunded, 8_000);
+    assert_eq!(tc.balance(&accounts.deployer), 8_000);
+    assert_eq!(tc.balance(&contract_id), 2_000);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+
+    let record = client.get_tranche_schedule(&id);
+    assert_eq!(record.status, VestingStatus::Revoked);
+    assert_eq!(record.revoked_unlocked, Some(2_000));
+    assert_eq!(record.refunded_amount, 8_000);
+    assert_eq!(record.claimed, 0);
+    assert_eq!(
+        record.claimed + record.refunded_amount + client.claimable(&id),
+        TOTAL
+    );
+
+    // Advancing past locked tranches does not increase claimable.
+    env.ledger().set_timestamp(START + 10_000);
+    assert_eq!(client.claimable(&id), 2_000);
+
+    // Beneficiary claims the already-unlocked tranche.
+    assert_eq!(client.claim(&id), 2_000);
+    assert_eq!(tc.balance(&accounts.user1), 2_000);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.claimable(&id), 0);
+
+    // Subsequent claim against locked tranches is rejected.
+    assert_eq!(
+        client.try_claim(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    let drained = client.get_tranche_schedule(&id);
+    assert_eq!(drained.status, VestingStatus::Revoked);
+    assert_eq!(drained.revoked_unlocked, Some(2_000));
+    assert_eq!(drained.refunded_amount, 8_000);
+    assert_eq!(drained.claimed, 2_000);
+}
+
+/// Revoking exactly at an intermediate tranche's unlock timestamp counts that
+/// tranche as unlocked and refunds only the later locked tranches.
+#[test]
+fn revoke_tranche_exactly_at_unlock_time_freezes_that_tranche() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create_tranche_3(&env, &client, &token, &accounts);
+
+    env.ledger().set_timestamp(START + 3_000);
+    assert_eq!(client.claimable(&id), 5_000);
+
+    let refunded = client.revoke_tranche_schedule(&id);
+    assert_eq!(refunded, 5_000);
+    assert_eq!(tc.balance(&accounts.deployer), 5_000);
+    assert_eq!(tc.balance(&contract_id), 5_000);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+
+    let record = client.get_tranche_schedule(&id);
+    assert_eq!(record.revoked_unlocked, Some(5_000));
+    assert_eq!(record.refunded_amount, 5_000);
+
+    assert_eq!(client.claim(&id), 5_000);
+    assert_eq!(tc.balance(&accounts.user1), 5_000);
+    assert_eq!(tc.balance(&contract_id), 0);
+
+    // Advancing past tranche 3 still leaves nothing claimable and rejects claim.
+    env.ledger().set_timestamp(START + 7_000);
+    assert_eq!(client.claimable(&id), 0);
+    assert_eq!(
+        client.try_claim(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+}
+
+/// Revoking at or after the final tranche has unlocked is rejected with
+/// `ForgeError::InvalidInput`; the schedule remains active and claimable.
+#[test]
+fn revoke_tranche_at_or_after_final_tranche_is_rejected() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create_tranche_3(&env, &client, &token, &accounts);
+
+    // Exactly at final tranche unlock (START + 6_000): everything unlocked.
+    env.ledger().set_timestamp(START + 6_000);
+    assert_eq!(
+        client
+            .try_revoke_tranche_schedule(&id)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // Strictly after final tranche unlock (START + 7_000): still rejected.
+    env.ledger().set_timestamp(START + 7_000);
+    assert_eq!(
+        client
+            .try_revoke_tranche_schedule(&id)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // State and custody are untouched; beneficiary can claim the full grant.
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+    let record = client.get_tranche_schedule(&id);
+    assert_eq!(record.revoked_unlocked, None);
+    assert_eq!(record.refunded_amount, 0);
+    assert_eq!(tc.balance(&accounts.deployer), 0);
+    assert_eq!(tc.balance(&contract_id), TOTAL);
+
+    assert_eq!(client.claim(&id), TOTAL);
+    assert_eq!(client.get_status(&id), VestingStatus::Completed);
+    assert_eq!(tc.balance(&accounts.user1), TOTAL);
+    assert_eq!(tc.balance(&contract_id), 0);
+
+    // Completed schedule also rejects revocation.
+    assert_eq!(
+        client
+            .try_revoke_tranche_schedule(&id)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+}
+
+#[test]
+fn revoke_tranche_double_revoke_is_rejected() {
+    let (env, token, tc, _cid, client, accounts) = setup!();
+    let id = create_tranche_3(&env, &client, &token, &accounts);
+
+    env.ledger().set_timestamp(START + 2_000);
+    assert_eq!(client.revoke_tranche_schedule(&id), 8_000);
+
+    env.ledger().set_timestamp(START + 5_000);
+    assert_eq!(
+        client
+            .try_revoke_tranche_schedule(&id)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::InvalidInput
+    );
+
+    // First revocation state and balances remain intact.
+    let record = client.get_tranche_schedule(&id);
+    assert_eq!(record.revoked_unlocked, Some(2_000));
+    assert_eq!(record.refunded_amount, 8_000);
+    assert_eq!(tc.balance(&accounts.deployer), 8_000);
+}
+
+#[test]
+fn revoke_tranche_after_partial_claim_leaves_zero_claimable() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create_tranche_3(&env, &client, &token, &accounts);
+
+    // Beneficiary claims tranche 1 before revocation.
+    env.ledger().set_timestamp(START + 1_500);
+    assert_eq!(client.claim(&id), 2_000);
+
+    // Funder revokes between tranche 1 and tranche 2.
+    env.ledger().set_timestamp(START + 2_500);
+    assert_eq!(client.revoke_tranche_schedule(&id), 8_000);
+
+    assert_eq!(tc.balance(&accounts.user1), 2_000);
+    assert_eq!(tc.balance(&accounts.deployer), 8_000);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.claimable(&id), 0);
+
+    let record = client.get_tranche_schedule(&id);
+    assert_eq!(record.claimed, 2_000);
+    assert_eq!(record.refunded_amount, 8_000);
+    assert_eq!(record.revoked_unlocked, Some(2_000));
+    assert_eq!(record.status, VestingStatus::Revoked);
+
+    // Further claim attempts are rejected.
+    env.ledger().set_timestamp(START + 9_000);
+    assert_eq!(
+        client.try_claim(&id).unwrap_err().unwrap(),
+        ForgeError::InvalidInput
+    );
+}
+
+#[test]
+fn revoke_tranche_unknown_and_linear_ids_are_not_found() {
+    let (_env, token, _tc, _cid, client, accounts) = setup!();
+    assert_eq!(
+        client
+            .try_revoke_tranche_schedule(&999)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::NotFound
+    );
+
+    let linear_id = create(&client, &token, &accounts);
+    assert_eq!(
+        client
+            .try_revoke_tranche_schedule(&linear_id)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::NotFound
+    );
+}
+
+#[test]
+fn revoke_tranche_failed_transfer_leaves_schedule_unchanged() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let id = create_tranche_3(&env, &client, &token, &accounts);
+
+    // Drain contract custody so the refund transfer fails.
+    tc.transfer(&contract_id, &accounts.user2, &TOTAL);
+    env.ledger().set_timestamp(START + 2_000);
+
+    assert_eq!(
+        client
+            .try_revoke_tranche_schedule(&id)
+            .unwrap_err()
+            .unwrap(),
+        ForgeError::TokenTransferFailed
+    );
+
+    // Schedule is completely unchanged.
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+    let record = client.get_tranche_schedule(&id);
+    assert_eq!(record.revoked_unlocked, None);
+    assert_eq!(record.refunded_amount, 0);
+    assert_eq!(tc.balance(&accounts.deployer), 0);
+
+    // Restoring custody allows revocation to succeed.
+    StellarAssetClient::new(&env, &token).mint(&contract_id, &TOTAL);
+    assert_eq!(client.revoke_tranche_schedule(&id), 8_000);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+    assert_eq!(client.get_tranche_schedule(&id).refunded_amount, 8_000);
+}
+
+#[test]
+fn revoke_tranche_emits_tranche_revoked_event() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let id = create_tranche_3(&env, &client, &token, &accounts);
+
+    env.ledger().set_timestamp(START + 2_000);
+    let refunded = client.revoke_tranche_schedule(&id);
+    assert_eq!(refunded, 8_000);
+
+    let emitted = env.events().all().filter_by_contract(&contract_id);
+    let expected = std::vec![events::TrancheRevoked {
+        schedule_id: id,
+        funder: accounts.deployer.clone(),
+        unlocked_at_revocation: 2_000,
+        refunded_to_funder: 8_000,
+    }
+    .to_xdr(&env, &contract_id)];
     assert_eq!(emitted.events(), expected.as_slice());
 }

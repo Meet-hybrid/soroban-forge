@@ -147,8 +147,12 @@ impl World {
     /// (same mint-then-create shape as the linear fixture helpers).
     fn create_tranche(&self, tranches: &soroban_sdk::Vec<Tranche>, total_amount: i128) -> u64 {
         self.mint_to_contract(total_amount);
-        self.vesting_client()
-            .create_tranche_schedule(&self.beneficiary, &self.token, tranches)
+        self.vesting_client().create_tranche_schedule(
+            &self.funder,
+            &self.beneficiary,
+            &self.token,
+            tranches,
+        )
     }
 
     /// Balances of (beneficiary, contract) — the whole pool.
@@ -955,9 +959,12 @@ proptest! {
         let pool_before_probe = w.pool_total();
         let probe_amount = total_amount - unlockable_total(&table) + 1;
         let probe_table = [(0u64, probe_amount)];
-        let probe_id = w
-            .vesting_client()
-            .create_tranche_schedule(&w.beneficiary, &w.token, &to_tranche_vec(&w.env, &probe_table));
+        let probe_id = w.vesting_client().create_tranche_schedule(
+            &w.funder,
+            &w.beneficiary,
+            &w.token,
+            &to_tranche_vec(&w.env, &probe_table),
+        );
         let probe_before = w.vesting_client().get_tranche_schedule(&probe_id);
 
         let probe_result = w.vesting_client().try_claim(&probe_id);

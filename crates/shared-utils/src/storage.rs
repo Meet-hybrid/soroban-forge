@@ -32,3 +32,42 @@ pub struct StorageEntry {
     /// Unix timestamp (seconds) at which the entry was last written.
     pub updated_at: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Persisted XDR: a two-entry ScMap with symbol keys "updated_at" (U64)
+    // and "value" (Bytes). Keep these bytes independent of the current encoder
+    // so a schema change cannot silently regenerate the expected records.
+    const NONEMPTY: &[u8] = b"\0\0\0\x11\0\0\0\x01\0\0\0\x02\
+        \0\0\0\x0f\0\0\0\x0aupdated_at\0\0\
+        \0\0\0\x05\0\0\0\x01\0\0\0\x02\
+        \0\0\0\x0f\0\0\0\x05value\0\0\0\
+        \0\0\0\x0d\0\0\0\x03\xff\0\x80\0";
+    const EMPTY: &[u8] = b"\0\0\0\x11\0\0\0\x01\0\0\0\x02\
+        \0\0\0\x0f\0\0\0\x0aupdated_at\0\0\
+        \0\0\0\x05\0\0\0\0\0\0\0\0\
+        \0\0\0\x0f\0\0\0\x05value\0\0\0\
+        \0\0\0\x0d\0\0\0\0";
+
+    #[test]
+    fn storage_entry_persisted_xdr_compatibility() {
+        let env = Env::default();
+        for (fixture, payload, timestamp) in [
+            (NONEMPTY, &b"\xff\0\x80"[..], 0x1_0000_0002),
+            (EMPTY, &b""[..], 0),
+        ] {
+            let encoded = Bytes::from_slice(&env, fixture);
+            let entry = StorageEntry::from_xdr(&env, &encoded).unwrap();
+            let expected_value = Bytes::from_slice(&env, payload);
+            assert_eq!(entry.value, expected_value);
+            assert_eq!(entry.updated_at, timestamp);
+
+            let restored = xdr_round_trip(&env, entry).unwrap();
+            assert_eq!(restored.value, expected_value);
+            assert_eq!(restored.updated_at, timestamp);
+            assert_eq!(restored.to_xdr(&env), encoded);
+        }
+    }
+}

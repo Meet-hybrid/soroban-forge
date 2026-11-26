@@ -15,7 +15,7 @@ test("multisig: every ABI method encodes zero and edge arguments", () => {
   assertEveryMethodEncodes("multisig", client);
 });
 
-test("multisig: ForgeError 1 through 16 map to names and messages", () => assertForgeErrors(multisig.ForgeError));
+test("multisig: ForgeError 1 through 17 map to names and messages", () => assertForgeErrors(multisig.ForgeError));
 
 test("multisig: main read methods decode fixture ScVals", async () => {
   const server = new FixtureRpcServer(successfulSimulation(nativeToScVal(3n, { type: "u32" })));

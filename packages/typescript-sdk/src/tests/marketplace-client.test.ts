@@ -15,7 +15,7 @@ test("marketplace: every ABI method encodes zero and edge arguments", () => {
   assertEveryMethodEncodes("marketplace", client);
 });
 
-test("marketplace: ForgeError 1 through 16 map to names and messages", () => assertForgeErrors(marketplace.ForgeError));
+test("marketplace: ForgeError 1 through 17 map to names and messages", () => assertForgeErrors(marketplace.ForgeError));
 
 test("marketplace: main read methods decode fixture ScVals", async () => {
   const fixture = {

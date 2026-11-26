@@ -38,6 +38,7 @@ pub enum DaoModelState {
         against_votes: i128,
         voted_voters: Vec<usize>,
         voting_ends: u64,
+        created_at: u64,
     },
     Succeeded {
         for_votes: i128,
@@ -123,6 +124,7 @@ impl LifecycleModel for DaoLifecycleModel {
                                 against_votes: 0,
                                 voted_voters: Vec::new(),
                                 voting_ends: current_time.saturating_add(*duration),
+                                created_at: *current_time,
                             },
                             *current_time,
                         ))
@@ -136,6 +138,7 @@ impl LifecycleModel for DaoLifecycleModel {
                     against_votes,
                     voted_voters,
                     voting_ends,
+                    created_at,
                 } => {
                     if *current_time >= *voting_ends {
                         Err("voting has ended".into())
@@ -157,6 +160,7 @@ impl LifecycleModel for DaoLifecycleModel {
                                 against_votes: new_against,
                                 voted_voters: next_voters,
                                 voting_ends: *voting_ends,
+                                created_at: *created_at,
                             },
                             *current_time,
                         ))
@@ -165,7 +169,18 @@ impl LifecycleModel for DaoLifecycleModel {
                 _ => Err("cannot vote unless proposal is Active".into()),
             },
             DaoModelOp::CancelProposal => match current_state {
-                DaoModelState::Active { .. } => Ok((DaoModelState::Cancelled, *current_time)),
+                DaoModelState::Active {
+                    for_votes,
+                    against_votes,
+                    created_at,
+                    ..
+                } => {
+                    if *current_time > *created_at || *for_votes > 0 || *against_votes > 0 {
+                        Err("cannot cancel after voting starts".into())
+                    } else {
+                        Ok((DaoModelState::Cancelled, *current_time))
+                    }
+                }
                 _ => Err("cannot cancel non-active proposal".into()),
             },
             DaoModelOp::Execute => match current_state {

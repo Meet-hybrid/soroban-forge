@@ -294,3 +294,16 @@ Limit: < 150 KB
 ## Feature Flags
 
 - `test-utils` — enables test-only helpers (proptest, authz tests)
+
+### Replace an arbiter
+
+The buyer and seller can jointly authorize `replace_arbiter(escrow_id, new_arbiter)`
+or `replace_basket_arbiter(escrow_id, new_arbiter)` while the escrow is Pending or
+Funded. A pending release request keeps its original review window and can still
+be approved or executed. Disputed, Completed, Refunded, and Cancelled escrows
+return `InvalidState`. Passing the current arbiter, buyer, or seller returns
+`InvalidInput`.
+
+A successful replacement updates the participant index in creation order and
+emits `ArbiterReplaced` with the escrow ID and both arbiter addresses. The new
+arbiter authorizes resolution of future disputes.

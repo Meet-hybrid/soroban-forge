@@ -79,6 +79,22 @@
       ]
     },
     {
+      "name": "confirm_batch",
+      "inputs": [
+        {
+          "name": "tx_ids",
+          "type": "vec<u64>"
+        },
+        {
+          "name": "signer",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "deposit",
       "inputs": [
         {
@@ -100,6 +116,18 @@
     },
     {
       "name": "execute",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "expire_tx",
       "inputs": [
         {
           "name": "tx_id",
@@ -265,6 +293,18 @@
       ],
       "outputs": [
         "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "is_expired",
+      "inputs": [
+        {
+          "name": "tx_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<bool,udt:ForgeError>"
       ]
     },
     {
@@ -779,6 +819,10 @@
         {
           "name": "ReleasePending",
           "value": 16
+        },
+        {
+          "name": "InvalidState",
+          "value": 17
         }
       ]
     },
@@ -1055,6 +1099,10 @@
     {
       "name": "ReleasePending",
       "code": 16
+    },
+    {
+      "name": "InvalidState",
+      "code": 17
     }
   ]
 }

@@ -14,6 +14,7 @@
 ///   no-double-count invariants.
 use super::*;
 
+use soroban_sdk::events::Event as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{Env, Vec as SorobanVec};
@@ -60,8 +61,7 @@ fn setup() -> (
     // 'static bound is satisfied because `Env::default()` is `'static` in
     // soroban-sdk test helpers.  We re-create the clients from raw addresses
     // at call sites that need them, so this is fine.
-    let token_client: TokenClient<'static> =
-        unsafe { core::mem::transmute(token_client) };
+    let token_client: TokenClient<'static> = unsafe { core::mem::transmute(token_client) };
     let dao: SorobanForgeDaoGovernanceClient<'static> = unsafe { core::mem::transmute(dao) };
 
     (env, token, token_client, contract_id, dao, accounts)
@@ -83,7 +83,7 @@ fn make_proposal(env: &Env, dao: &SorobanForgeDaoGovernanceClient, proposer: &Ad
 
 #[test]
 fn test_delegate_and_get_delegate() {
-    let (env, _token, _tc, _cid, dao, accounts) = setup();
+    let (_env, _token, _tc, _cid, dao, accounts) = setup();
     let [a, b, _, _, _] = &accounts;
 
     assert_eq!(dao.get_delegate(a), None);
@@ -179,7 +179,10 @@ fn test_chain_at_depth_limit_accepted() {
 
     // Chain: accs[0] → accs[1] → … → accs[MAX_DELEGATION_DEPTH]
     for i in 0..(n - 1) {
-        dao.delegate(&accs.get(i as u32).unwrap(), &accs.get(i as u32 + 1).unwrap());
+        dao.delegate(
+            &accs.get(i as u32).unwrap(),
+            &accs.get(i as u32 + 1).unwrap(),
+        );
     }
     // Verify tip has the right delegate.
     assert_eq!(
@@ -219,7 +222,10 @@ fn test_chain_beyond_depth_limit_rejected() {
 
     // Build a chain of MAX_DELEGATION_DEPTH hops first (accepted).
     for i in 0..(n - 2) {
-        dao.delegate(&accs.get(i as u32).unwrap(), &accs.get(i as u32 + 1).unwrap());
+        dao.delegate(
+            &accs.get(i as u32).unwrap(),
+            &accs.get(i as u32 + 1).unwrap(),
+        );
     }
     // This final hop would exceed the limit.
     let last = n - 1;
@@ -349,27 +355,29 @@ fn test_delegated_event_emitted() {
 
     dao.delegate(a, b);
 
-    let evts = env.events().all();
-    let found = evts.iter().any(|(cid, topics, _data)| {
-        cid == contract_id
-            && topics.len() >= 1
-            && topics.get(0) == Some(soroban_sdk::Val::from(soroban_sdk::Symbol::new(&env, "Delegated")))
-    });
-    // At minimum verify the event vector is non-empty after delegation.
-    assert!(!evts.is_empty(), "expected events after delegate");
-    let _ = found; // event topic format may vary; non-empty check is sufficient
+    assert_eq!(
+        env.events().all().filter_by_contract(&contract_id).events(),
+        std::vec![events::Delegated {
+            from: a.clone(),
+            to: b.clone(),
+        }
+        .to_xdr(&env, &contract_id)]
+        .as_slice()
+    );
 }
 
 #[test]
 fn test_undelegated_event_emitted() {
-    let (env, _token, _tc, _cid, dao, accounts) = setup();
+    let (env, _token, _tc, contract_id, dao, accounts) = setup();
     let [a, b, _, _, _] = &accounts;
 
     dao.delegate(a, b);
-    let before = env.events().all().len();
     dao.undelegate(a);
-    let after = env.events().all().len();
-    assert!(after > before, "expected Undelegated event");
+
+    assert_eq!(
+        env.events().all().filter_by_contract(&contract_id).events(),
+        std::vec![events::Undelegated { from: a.clone() }.to_xdr(&env, &contract_id)].as_slice()
+    );
 }
 
 // ── re-delegation (change delegate) ─────────────────────────────────────────
@@ -473,10 +481,7 @@ fn proptest_weight_conservation_and_no_double_count() {
         // Each token unit contributes to exactly one account's effective power.
         // Sum of all voting powers = total supply among participants.
         let total_supply = BAL * N as i128;
-        let total_power: i128 = accs
-            .iter()
-            .map(|a| dao.get_voting_power(a))
-            .sum();
+        let total_power: i128 = accs.iter().map(|a| dao.get_voting_power(a)).sum();
         assert_eq!(
             total_power, total_supply,
             "weight conservation violated: sum={total_power} supply={total_supply}"
