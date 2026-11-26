@@ -2588,6 +2588,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "soroban-forge-docs"
+version = "0.2.0"
+
+[[package]]
 name = "soroban-forge-escrow"
 version = "0.2.0"
 dependencies = [

@@ -1,0 +1,11 @@
+[package]
+name = "soroban-forge-docs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Documentation checks for Soroban Forge contract authorization docs"
+keywords = ["documentation", "soroban", "stellar"]
+categories = ["development-tools"]
+readme = "../../README.md"

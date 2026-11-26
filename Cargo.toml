@@ -11,6 +11,7 @@ members = [
     "crates/marketplace-royalties",
     "crates/cli",
     "crates/composition-tests",
+    "crates/docs",
 ]
 exclude = ["packages", "examples", "templates"]
 
