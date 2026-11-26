@@ -33,6 +33,10 @@
 //! 4. Batch conservation: the aggregate of a random batch satisfies `sum(seller_net) + sum(royalty_share) == sum(amount)`.
 //! 5. Cap boundary: a batch exceeding `MAX_SETTLE_SALES` is rejected before any transfer.
 //! 6. Rollback integrity: a failed batch transfer leaves every balance and the summary untouched.
+//! 7. Model-based settlement verification: an independent reference model predicts
+//!    royalty quotes and settlement payouts, verifying that quote equals settlement
+//!    and that financial conservation holds under randomized inputs up to 40
+//!    settlement steps.
 
 use crate::{
     MarketplaceRoyalties, RoyaltyShare, SettlementSummary, SorobanForgeMarketplaceRoyaltiesClient,
@@ -1019,6 +1023,306 @@ fn multi_recipient_residue_known_values() {
     assert_eq!(settlement.royalty_share, 0);
     assert_eq!(settlement.seller_net, 9_999);
     assert_eq!(w.balance(&w.sellers[0]), 9_999);
+}
+
+// -----------------------------------------------------------------------
+// Independent Reference Model for Royalty Calculations
+// -----------------------------------------------------------------------
+
+/// Independent reference model that predicts settlement outcomes without using
+/// the contract's implementation. This model serves as an oracle to verify
+/// that the contract's calculations are correct.
+mod reference_model {
+    /// Independent calculation of royalty split using floor division
+    pub fn calculate_split(amount: i128, bps: u32) -> (i128, i128) {
+        if amount <= 0 || bps == 0 {
+            return (0, amount);
+        }
+        if bps > 10_000 {
+            panic!("Invalid bps: {}", bps);
+        }
+
+        // Floor division: royalty_share = floor(amount * bps / 10_000)
+        let royalty_share = (amount / 10_000)
+            .checked_mul(bps as i128)
+            .and_then(|whole| whole.checked_add((amount % 10_000) * (bps as i128) / 10_000))
+            .expect("overflow in model split");
+
+        let seller_net = amount
+            .checked_sub(royalty_share)
+            .expect("overflow in model");
+
+        (royalty_share, seller_net)
+    }
+
+    #[cfg(test)]
+    mod model_tests {
+        use super::*;
+
+        #[test]
+        fn model_split_zero_bps() {
+            assert_eq!(calculate_split(1000, 0), (0, 1000));
+        }
+
+        #[test]
+        fn model_split_full_bps() {
+            assert_eq!(calculate_split(1000, 10_000), (1000, 0));
+        }
+
+        #[test]
+        fn model_split_conservation() {
+            let (royalty, seller) = calculate_split(999_999_999, 2500);
+            assert_eq!(royalty + seller, 999_999_999);
+        }
+
+        #[test]
+        fn model_split_floors_correctly() {
+            // 100 * 1 / 10_000 = 0.01, should floor to 0
+            let (royalty, seller) = calculate_split(100, 1);
+            assert_eq!(royalty, 0);
+            assert_eq!(seller, 100);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Model-Based Property Tests
+// -----------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// Independent model predicts quote correctly
+    #[test]
+    fn prop_quote_matches_reference_model(
+        amount in 1i128..=MAX_AMOUNT,
+        bps in 0u32..=10_000_u32,
+    ) {
+        let w = setup_world(bps, amount);
+
+        // Get quote from contract
+        let quote = w.client().quote_sale(&w.collection, &amount);
+
+        // Calculate expected values using reference model
+        let (expected_royalty, expected_seller_net) =
+            reference_model::calculate_split(amount, bps);
+
+        prop_assert_eq!(quote.gross, amount, "quote gross must equal amount");
+        prop_assert_eq!(quote.royalty_bps, bps, "quote bps must match configuration");
+        prop_assert_eq!(
+            quote.royalty_amount, expected_royalty,
+            "quote royalty_amount must match reference model"
+        );
+        prop_assert_eq!(
+            quote.seller_net, expected_seller_net,
+            "quote seller_net must match reference model"
+        );
+        prop_assert_eq!(
+            quote.royalty_amount + quote.seller_net, amount,
+            "quote must conserve amount"
+        );
+    }
+
+    /// Quote matches actual settlement
+    #[test]
+    fn prop_quote_matches_settlement(
+        amount in 1i128..=MAX_AMOUNT,
+        bps in 0u32..=10_000_u32,
+    ) {
+        let w = setup_world(bps, amount);
+
+        // Get quote first
+        let quote = w.client().quote_sale(&w.collection, &amount);
+
+        // Then settle
+        let settlement = w.client().settle_sale(
+            &w.collection,
+            &w.token,
+            &w.payer,
+            &w.seller,
+            &amount
+        );
+
+        prop_assert_eq!(
+            settlement.royalty_share, quote.royalty_amount,
+            "settlement royalty_share must equal quote royalty_amount"
+        );
+        prop_assert_eq!(
+            settlement.seller_net, quote.seller_net,
+            "settlement seller_net must equal quote seller_net"
+        );
+    }
+
+    /// Model-based settlement sequence verification (up to 40 steps)
+    #[test]
+    fn prop_settlement_sequence_matches_model(
+        bps in 0u32..=10_000_u32,
+        sales in prop_vec(1i128..=MAX_AMOUNT, 1..=40),
+    ) {
+        let total: i128 = sales.iter().sum();
+        let w = setup_world(bps, total);
+
+        // Track cumulative values for verification
+        let mut cumulative_gross = 0i128;
+        let mut cumulative_royalty = 0i128;
+        let mut cumulative_seller_net = 0i128;
+
+        for (step, &amount) in sales.iter().enumerate() {
+            // Predict using reference model
+            let (expected_royalty, expected_seller_net) =
+                reference_model::calculate_split(amount, bps);
+
+            // Execute actual settlement
+            let settlement = w.client().settle_sale(
+                &w.collection,
+                &w.token,
+                &w.payer,
+                &w.seller,
+                &amount
+            );
+
+            // Verify this step matches model
+            prop_assert_eq!(
+                settlement.royalty_share, expected_royalty,
+                "step {} royalty_share mismatch: expected {}, got {}",
+                step, expected_royalty, settlement.royalty_share
+            );
+            prop_assert_eq!(
+                settlement.seller_net, expected_seller_net,
+                "step {} seller_net mismatch: expected {}, got {}",
+                step, expected_seller_net, settlement.seller_net
+            );
+
+            // Verify conservation at each step
+            prop_assert_eq!(
+                settlement.royalty_share + settlement.seller_net, amount,
+                "step {} conservation failed", step
+            );
+
+            cumulative_gross += amount;
+            cumulative_royalty += settlement.royalty_share;
+            cumulative_seller_net += settlement.seller_net;
+        }
+
+        // Verify cumulative conservation
+        prop_assert_eq!(
+            cumulative_royalty + cumulative_seller_net, cumulative_gross,
+            "cumulative conservation failed after {} steps", sales.len()
+        );
+
+        // Verify summary matches cumulative
+        let summary = w.client().get_settlement_summary(&w.collection);
+        prop_assert_eq!(
+            summary.sales, sales.len() as u32,
+            "summary sales count mismatch"
+        );
+        prop_assert_eq!(
+            summary.gross_volume, cumulative_gross,
+            "summary gross_volume mismatch"
+        );
+        prop_assert_eq!(
+            summary.royalties_paid, cumulative_royalty,
+            "summary royalties_paid mismatch"
+        );
+    }
+
+    /// No duplicate recipient payments in batch
+    #[test]
+    fn prop_no_duplicate_recipient_payments(
+        bps in 1u32..=10_000_u32,
+        amounts in prop_vec(1i128..=MAX_AMOUNT, 1..=MAX_SETTLE_SALES as usize),
+    ) {
+        let w = setup_batch_world(bps, amounts.clone());
+
+        let recipient_balance_before = w
+            .client()
+            .try_get_settlement_summary(&w.collection)
+            .ok()
+            .and_then(Result::ok)
+            .map_or(0, |summary| summary.royalties_paid);
+
+        // Settle batch
+        let settlements = w.client().settle_sales(
+            &w.collection,
+            &w.token,
+            &w.payer,
+            &w.batch()
+        );
+
+        // Calculate expected total royalty from model
+        let expected_total_royalty: i128 = amounts
+            .iter()
+            .map(|&amount| reference_model::calculate_split(amount, bps).0)
+            .sum();
+
+        // Get actual summary
+        let summary = w.client().get_settlement_summary(&w.collection);
+        let actual_royalty_paid = summary.royalties_paid - recipient_balance_before;
+
+        prop_assert_eq!(
+            actual_royalty_paid, expected_total_royalty,
+            "total royalty paid must match model prediction (no duplicates)"
+        );
+
+        // Verify sum of settlements matches
+        let settlement_sum: i128 = settlements
+            .iter()
+            .map(|s| s.royalty_share)
+            .sum();
+
+        prop_assert_eq!(
+            settlement_sum, expected_total_royalty,
+            "sum of settlement royalty_shares must match model"
+        );
+    }
+
+    /// Batch rounding behavior preserves dust with sellers
+    #[test]
+    fn prop_batch_rounding_dust_with_sellers(
+        bps in 1u32..=9_999_u32, // Avoid 0 and 10_000 to ensure rounding cases
+        amounts in prop_vec(50i128..=1000i128, 2..=10), // Small amounts to ensure rounding
+    ) {
+        let w = setup_batch_world(bps, amounts.clone());
+
+        // Calculate expected values using reference model
+        let model_predictions: Vec<_> = amounts
+            .iter()
+            .map(|&amount| reference_model::calculate_split(amount, bps))
+            .collect();
+
+        // Settle batch
+        let settlements = w.client().settle_sales(
+            &w.collection,
+            &w.token,
+            &w.payer,
+            &w.batch()
+        );
+
+        for (i, (settlement, &amount)) in settlements.iter().zip(&amounts).enumerate() {
+            let (expected_royalty, expected_seller_net) = model_predictions[i];
+
+            // Verify exact match with model (rounding included)
+            prop_assert_eq!(
+                settlement.royalty_share, expected_royalty,
+                "sale {} royalty mismatch", i
+            );
+            prop_assert_eq!(
+                settlement.seller_net, expected_seller_net,
+                "sale {} seller_net mismatch", i
+            );
+
+            // Verify dust stays with seller (conservative vs floor division)
+            let floor_royalty = amount * (bps as i128) / 10_000;
+            prop_assert!(
+                settlement.royalty_share <= floor_royalty,
+                "sale {} royalty must not exceed floor", i
+            );
+            prop_assert_eq!(
+                settlement.seller_net, amount - settlement.royalty_share,
+                "sale {} seller receives remainder", i
+            );
+        }
+    }
 }
 
 #[test]

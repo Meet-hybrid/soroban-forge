@@ -340,6 +340,28 @@ pub struct ValidatePlanArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct SimulateArgs {
+    /// Contract address or alias
+    #[arg(long)]
+    pub contract: String,
+    /// Function name to invoke
+    #[arg(long)]
+    pub function: String,
+    /// Function arguments (key=value format)
+    #[arg(long = "arg", action = clap::ArgAction::Append)]
+    pub args: Vec<String>,
+    /// Network to use
+    #[arg(long, default_value = "testnet")]
+    pub network: String,
+    /// Source account
+    #[arg(long)]
+    pub source: Option<String>,
+    /// Output as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct TtlAuditArgs {
     /// Contract address (Stellar strkey, starts with C).
     #[arg(long)]
