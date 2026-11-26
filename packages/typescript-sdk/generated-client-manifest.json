@@ -1,0 +1,60 @@
+{
+  "schema": "soroban-forge-generated-clients-v1",
+  "generatedAt": "2026-11-26T10:13:29.854Z",
+  "generationCommit": "c07e1f3903fd387d3cbb1fdabd2466d7d4fcf03a",
+  "contracts": [
+    {
+      "crateName": "soroban-forge-escrow",
+      "clientModule": "escrow",
+      "contractVersion": "0.2.0",
+      "generatedFiles": {
+        "src/clients/escrow.ts": "377a5a392a71be8740044904e8804243b31dc1d549f16efbfc5d85f0ceb9cd8e"
+      }
+    },
+    {
+      "crateName": "soroban-forge-vesting",
+      "clientModule": "vesting",
+      "contractVersion": "0.2.0",
+      "generatedFiles": {
+        "src/clients/vesting.ts": "19096cde8d8e0c0f056f08db692cbd212dab217c87de0d87a139fb5773ab84e2"
+      },
+      "standalonePackage": "vesting-client"
+    },
+    {
+      "crateName": "soroban-forge-multi-sig-wallet",
+      "clientModule": "multisig",
+      "contractVersion": "0.2.0",
+      "generatedFiles": {
+        "src/clients/multisig.ts": "22587a21f74c5909d019436b5f0656eef296ee10f576fc5f08ea6e66f19aad90"
+      },
+      "standalonePackage": "multi-sig-wallet-client"
+    },
+    {
+      "crateName": "soroban-forge-marketplace-royalties",
+      "clientModule": "marketplace",
+      "contractVersion": "0.2.0",
+      "generatedFiles": {
+        "src/clients/marketplace.ts": "07c69443f562535e9126f63d17090f7375a6523ac07434a949c2c2512235e41c"
+      },
+      "standalonePackage": "marketplace-royalties-client"
+    },
+    {
+      "crateName": "soroban-forge-subscription-payments",
+      "clientModule": "subscription",
+      "contractVersion": "0.2.0",
+      "generatedFiles": {
+        "src/clients/subscription.ts": "7bd3683a4812d002e89c60537c63c4778e747a27c8fb49ed096ba2b5b9119108"
+      },
+      "standalonePackage": "subscription-payments-client"
+    },
+    {
+      "crateName": "soroban-forge-dao-governance",
+      "clientModule": "dao",
+      "contractVersion": "0.2.0",
+      "generatedFiles": {
+        "src/clients/dao.ts": "33b11be4d1b9339153deb61e9a1d59a35d63ea9ef6cadd7b29f3a3b47a6e37fe"
+      },
+      "standalonePackage": "dao-governance-client"
+    }
+  ]
+}
