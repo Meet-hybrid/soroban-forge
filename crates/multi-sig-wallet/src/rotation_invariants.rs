@@ -20,7 +20,7 @@ extern crate std;
 use crate::{MultiSigWallet, SorobanForgeMultiSigWalletClient, TxKind, TxStatus, WalletTx};
 use soroban_forge_shared_utils::ForgeError;
 use soroban_forge_test_utils::{MockTarget, TestAccounts};
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Events as _};
 use soroban_sdk::{Address, Env, Vec};
 use std::vec;
 
@@ -271,6 +271,13 @@ fn in_flight_tx_confirmations_follow_removed_owner_semantics() {
         remove,
         &[accounts.user3.clone(), accounts.user1.clone()],
     );
+    let events = env.events().all();
+    let soroban_sdk::xdr::ContractEventBody::V0(body) = &events.events().last().unwrap().body;
+    assert_eq!(
+        body.topics[0],
+        soroban_sdk::xdr::ScVal::Symbol("tx_executed".try_into().unwrap())
+    );
+    assert_eq!(body.topics[1], soroban_sdk::xdr::ScVal::U64(remove));
     assert!(!client.is_owner(&accounts.user2));
 
     // The removed owner's signature no longer counts, but the tx is still
@@ -542,18 +549,20 @@ fn rotation_matrix_preserves_threshold_owner_invariant() {
             // Removing an owner must either succeed while preserving
             // `threshold <= owners`, or fail with the wallet untouched.
             let removed = owners.get_unchecked(owner_count - 1);
-            let remove = client.remove_owner(&owners.get_unchecked(0), &removed);
-            for index in 0..threshold {
-                client.confirm(&remove, &owners.get_unchecked(index));
-            }
-
             let before = wallet_state(&client);
             if threshold > owner_count - 1 {
-                let error = client.try_execute(&remove).unwrap_err().unwrap();
+                let error = client
+                    .try_remove_owner(&owners.get_unchecked(0), &removed)
+                    .unwrap_err()
+                    .unwrap();
                 assert_eq!(error, ForgeError::InvalidInput);
                 assert_wallet_state(&client, &before);
                 assert!(client.is_owner(&removed));
             } else {
+                let remove = client.remove_owner(&owners.get_unchecked(0), &removed);
+                for index in 0..threshold {
+                    client.confirm(&remove, &owners.get_unchecked(index));
+                }
                 client.execute(&remove);
                 assert_eq!(client.get_owners().len(), owner_count - 1);
                 assert_eq!(client.get_threshold(), threshold);
