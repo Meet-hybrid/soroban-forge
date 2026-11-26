@@ -49,6 +49,7 @@ creation so they can act later.
 | Entrypoint | Required signer(s) | Failure behavior | Token transfer authority |
 | --- | --- | --- | --- |
 | `create_escrow` | buyer | `InvalidInput` (non-positive amount or zero timeout); `ArithmeticOverflow` (id counter) | none |
+| `create_milestone_escrow` | buyer | `InvalidInput` (zero timeout, no milestones, more than `MAX_MILESTONES`, or a non-positive milestone amount); `ArithmeticOverflow` (milestone total or id counter) | none at creation; the total is funded separately |
 | `create_escrow_with_arbiter_fee` | buyer | `InvalidInput` (base validation or fee above 1000 bps); `ArithmeticOverflow` | none |
 | `create_escrow_with_review` | buyer | `InvalidInput` (base validation or review period outside 60 seconds to 30 days); `ArithmeticOverflow` | none |
 | `deposit` | buyer | `NotFound` (unknown id); `InvalidInput` (not `Pending`); `TokenTransferFailed` | buyer → contract, all-or-nothing |
@@ -62,6 +63,7 @@ creation so they can act later.
 | `request_release` | seller | `NotFound`; `InvalidInput` (not `Funded` or invalid amount); `ReleasePending`; `DeadlineReached` | none; starts the review window only |
 | `request_release_basket` | seller | `NotFound`; `InvalidInput` (not `Funded`); `ReleasePending`; `DeadlineReached` | none; starts the review window only |
 | `approve_release` | buyer | `NotFound` (no pending request); `TokenTransferFailed` | contract → seller, all legs when requested by basket |
+| `approve_milestone` | buyer | `NotFound` (no milestone escrow); `InvalidInput` (not `Funded`, or not the next unpaid milestone); `TokenTransferFailed` | contract → seller, exactly that milestone's amount; the last approval completes the escrow |
 | `execute_release` | none (permissionless after the review window) | `NotFound` (no pending request); `DeadlineReached` (window not ended); `TokenTransferFailed` | contract → seller |
 | `cancel` | buyer | `NotFound`; `InvalidInput` (not `Pending`) | none; nothing was funded |
 | `create_basket` | buyer | `InvalidInput` (zero timeout, empty or oversized basket, non-positive leg, duplicate token); `ArithmeticOverflow` | none |
@@ -90,6 +92,7 @@ creation so they can act later.
 | `get_basket_action_summary` | none | Basket-specific eligibility; no mutation |
 | `get_status` | none | `NotFound` for an unknown id; covers both record kinds |
 | `get_escrow` | none | `NotFound` for an unknown id or a basket id |
+| `get_milestones` | none | Every milestone in order with its amount and status; `NotFound` for a non-milestone escrow |
 | `get_basket` | none | `NotFound` for an unknown id or a single-token id |
 | `escrows_for_participant` | none | Paged creation-order ids; unknown participants read as an empty page |
 | `ttl_info` | none | `NotFound` for an unknown or archived id; no TTL extension |
