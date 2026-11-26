@@ -39,6 +39,22 @@
       ]
     },
     {
+      "name": "delegate",
+      "inputs": [
+        {
+          "name": "from",
+          "type": "address"
+        },
+        {
+          "name": "to",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "execute",
       "inputs": [
         {
@@ -67,6 +83,18 @@
       "inputs": [],
       "outputs": [
         "result<udt:BondConfig,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_delegate",
+      "inputs": [
+        {
+          "name": "account",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "option<address>"
       ]
     },
     {
@@ -221,6 +249,18 @@
       ],
       "outputs": [
         "result<i128,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "get_voting_power",
+      "inputs": [
+        {
+          "name": "account",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "i128"
       ]
     },
     {
@@ -396,6 +436,18 @@
       ]
     },
     {
+      "name": "undelegate",
+      "inputs": [
+        {
+          "name": "from",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "vote",
       "inputs": [
         {
@@ -462,6 +514,20 @@
       ]
     },
     {
+      "name": "Delegated",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "from",
+          "type": "address"
+        },
+        {
+          "name": "to",
+          "type": "address"
+        }
+      ]
+    },
+    {
       "name": "Finalised",
       "dataFormat": "scSpecEventDataFormatMap",
       "params": [
@@ -512,6 +578,16 @@
         {
           "name": "data",
           "type": "udt:Proposal"
+        }
+      ]
+    },
+    {
+      "name": "Undelegated",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "from",
+          "type": "address"
         }
       ]
     },

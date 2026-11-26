@@ -1,14 +1,14 @@
 {
   "schema": "soroban-forge-generated-clients-v1",
-  "generatedAt": "2026-11-26T10:44:11.722Z",
-  "generationCommit": "b0d3dc668c80e63ebd6cfb0f9b0824ca19d74f1e",
+  "generatedAt": "2026-11-26T10:38:11.273Z",
+  "generationCommit": "0c0f22055f1b27c4c0d0938e9ce23a9784b12002",
   "contracts": [
     {
       "crateName": "soroban-forge-escrow",
       "clientModule": "escrow",
       "contractVersion": "0.2.0",
       "generatedFiles": {
-        "src/clients/escrow.ts": "2d01f4a8bd3fad70a1db76a4cec9495597e0c075b9d15659fc7e3927d92665a5"
+        "src/clients/escrow.ts": "2821208b4e864625cf87dd270bfd03c5e9621e8ec45bb34deba14d991da7d7fc"
       }
     },
     {
@@ -52,7 +52,7 @@
       "clientModule": "dao",
       "contractVersion": "0.2.0",
       "generatedFiles": {
-        "src/clients/dao.ts": "33b11be4d1b9339153deb61e9a1d59a35d63ea9ef6cadd7b29f3a3b47a6e37fe"
+        "src/clients/dao.ts": "0447488963d32e02a2e59adaf7243ba6343a0acdb8124315fa25196361cba270"
       },
       "standalonePackage": "dao-governance-client"
     }
