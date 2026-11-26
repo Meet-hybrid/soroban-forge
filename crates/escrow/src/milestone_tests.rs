@@ -273,13 +273,18 @@ fn approval_emits_milestone_released_and_final_released() {
 
     t.approve(id, 1).unwrap();
     t.approve(id, 2).unwrap();
+    // `events().all()` only reports the most recent invocation, so read the
+    // final approval's events before the `get_escrow` view call below.
+    let final_events = t
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&t.contract)
+        .events()
+        .to_vec();
     let completed = t.client.get_escrow(&id);
     assert_eq!(
-        t.env
-            .events()
-            .all()
-            .filter_by_contract(&t.contract)
-            .events(),
+        final_events.as_slice(),
         std::vec![
             events::MilestoneReleased {
                 escrow_id: id,
