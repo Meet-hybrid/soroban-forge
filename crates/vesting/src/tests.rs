@@ -1866,6 +1866,200 @@ fn create_schedules_batch_emits_creation_events() {
     assert_eq!(emitted.events(), expected.as_slice());
 }
 
+#[test]
+fn tranche_preview_exact_unlock_and_post_final_timestamps() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let tranches = soroban_sdk::Vec::from_array(
+        &env,
+        [
+            Tranche {
+                unlock_at: 100,
+                amount: 3_000,
+            },
+            Tranche {
+                unlock_at: 300,
+                amount: 7_000,
+            },
+        ],
+    );
+    let id = client.create_tranche_schedule(&accounts.deployer, &accounts.user1, &token, &tranches);
+
+    // 1. Before first unlock: nothing claimable, next unlock is first tranche at START + 100
+    env.ledger().set_timestamp(START + 50);
+    let p_before = client.preview_claimable(&id);
+    assert_eq!(p_before.claimable, 0);
+    assert_eq!(p_before.evaluated_timestamp, START + 50);
+    assert_eq!(p_before.next_unlock_timestamp, Some(START + 100));
+    assert_eq!(p_before.claimable_amount(), 0);
+    assert_eq!(p_before.evaluated_at(), START + 50);
+    assert_eq!(p_before.next_unlock(), Some(START + 100));
+
+    // Alias preview_tranche returns identical preview
+    assert_eq!(client.preview_tranche(&id), p_before);
+
+    // 2. Exact unlock of first tranche: 3_000 claimable, next unlock is tranche 2 at START + 300
+    env.ledger().set_timestamp(START + 100);
+    let p_exact1 = client.preview_claimable(&id);
+    assert_eq!(p_exact1.claimable, 3_000);
+    assert_eq!(p_exact1.evaluated_timestamp, START + 100);
+    assert_eq!(p_exact1.next_unlock_timestamp, Some(START + 300));
+    // Matches amount claim would transfer
+    assert_eq!(p_exact1.claimable, client.claimable(&id));
+
+    // 3. Between tranches (at START + 200) without claiming tranche 1
+    env.ledger().set_timestamp(START + 200);
+    let p_between = client.preview_claimable(&id);
+    assert_eq!(p_between.claimable, 3_000);
+    assert_eq!(p_between.evaluated_timestamp, START + 200);
+    assert_eq!(p_between.next_unlock_timestamp, Some(START + 300));
+
+    // Partial claim of tranche 1
+    let claimed1 = client.claim(&id);
+    assert_eq!(claimed1, 3_000);
+    // At the same timestamp after claim: claimable becomes 0, next unlock remains START + 300
+    let p_claimed = client.preview_claimable(&id);
+    assert_eq!(p_claimed.claimable, 0);
+    assert_eq!(p_claimed.evaluated_timestamp, START + 200);
+    assert_eq!(p_claimed.next_unlock_timestamp, Some(START + 300));
+
+    // 4. Exact unlock of final tranche (at START + 300): remaining 7_000 claimable, no further unlocks
+    env.ledger().set_timestamp(START + 300);
+    let p_final = client.preview_claimable(&id);
+    assert_eq!(p_final.claimable, 7_000);
+    assert_eq!(p_final.evaluated_timestamp, START + 300);
+    assert_eq!(p_final.next_unlock_timestamp, None);
+
+    // 5. Post-final timestamp before claiming: all tokens unlocked, next unlock remains None
+    env.ledger().set_timestamp(START + 500);
+    let p_post = client.preview_claimable(&id);
+    assert_eq!(p_post.claimable, 7_000);
+    assert_eq!(p_post.evaluated_timestamp, START + 500);
+    assert_eq!(p_post.next_unlock_timestamp, None);
+    // Matches what claim transfers
+    assert_eq!(client.claim(&id), 7_000);
+
+    // 6. Terminal Completed state: 0 claimable, next unlock is None
+    let p_completed = client.preview_claimable(&id);
+    assert_eq!(p_completed.claimable, 0);
+    assert_eq!(p_completed.evaluated_timestamp, START + 500);
+    assert_eq!(p_completed.next_unlock_timestamp, None);
+}
+
+#[test]
+fn linear_preview_cliff_ramp_and_post_final_timestamps() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+    let cliff_time = START + CLIFF;
+    let end_time = START + DURATION;
+
+    // 1. Before cliff: 0 claimable, next unlock is cliff timestamp
+    env.ledger().set_timestamp(START + 500);
+    let p_pre_cliff = client.preview_claimable(&id);
+    assert_eq!(p_pre_cliff.claimable, 0);
+    assert_eq!(p_pre_cliff.evaluated_timestamp, START + 500);
+    assert_eq!(p_pre_cliff.next_unlock_timestamp, Some(cliff_time));
+    assert_eq!(client.preview_tranche(&id), p_pre_cliff);
+
+    // 2. Exactly at cliff: initial vested amount, next unlock is end_time
+    env.ledger().set_timestamp(cliff_time);
+    let p_at_cliff = client.preview_claimable(&id);
+    let expected_cliff = client.claimable(&id);
+    assert_eq!(p_at_cliff.claimable, expected_cliff);
+    assert_eq!(p_at_cliff.evaluated_timestamp, cliff_time);
+    assert_eq!(p_at_cliff.next_unlock_timestamp, Some(end_time));
+
+    // 3. During linear vesting (START + CLIFF + 2_000): floor(10_000 * 2_000 / 3_000) = 6_666
+    let mid_time = cliff_time + 2_000;
+    env.ledger().set_timestamp(mid_time);
+    let p_mid = client.preview_claimable(&id);
+    assert_eq!(p_mid.claimable, 6_666);
+    assert_eq!(p_mid.evaluated_timestamp, mid_time);
+    assert_eq!(p_mid.next_unlock_timestamp, Some(end_time));
+
+    // Claim halfway
+    assert_eq!(client.claim(&id), 6_666);
+    let p_mid_claimed = client.preview_claimable(&id);
+    assert_eq!(p_mid_claimed.claimable, 0);
+    assert_eq!(p_mid_claimed.evaluated_timestamp, mid_time);
+    assert_eq!(p_mid_claimed.next_unlock_timestamp, Some(end_time));
+
+    // 4. Exact final duration and post-final timestamps: all remaining tokens unlocked, next unlock is None
+    env.ledger().set_timestamp(end_time);
+    let p_end = client.preview_claimable(&id);
+    assert_eq!(p_end.claimable, TOTAL - 6_666);
+    assert_eq!(p_end.evaluated_timestamp, end_time);
+    assert_eq!(p_end.next_unlock_timestamp, None);
+
+    env.ledger().set_timestamp(end_time + 10_000);
+    let p_post = client.preview_claimable(&id);
+    assert_eq!(p_post.claimable, TOTAL - 6_666);
+    assert_eq!(p_post.evaluated_timestamp, end_time + 10_000);
+    assert_eq!(p_post.next_unlock_timestamp, None);
+
+    // Settle final claim -> Completed
+    assert_eq!(client.claim(&id), TOTAL - 6_666);
+    let p_completed = client.preview_claimable(&id);
+    assert_eq!(p_completed.claimable, 0);
+    assert_eq!(p_completed.evaluated_timestamp, end_time + 10_000);
+    assert_eq!(p_completed.next_unlock_timestamp, None);
+}
+
+#[test]
+fn linear_preview_revoked_schedule_returns_terminal_values() {
+    let (env, token, _tc, _cid, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    // Revoke midway: floor(10_000 * 2_000 / 3_000) = 6_666 frozen
+    env.ledger().set_timestamp(START + CLIFF + 2_000);
+    client.revoke(&id);
+
+    // Post-revocation timestamp: terminal next_unlock_timestamp is None, claimable is frozen amount
+    env.ledger().set_timestamp(START + DURATION + 1_000);
+    let p_revoked = client.preview_claimable(&id);
+    assert_eq!(p_revoked.claimable, 6_666);
+    assert_eq!(p_revoked.evaluated_timestamp, START + DURATION + 1_000);
+    assert_eq!(p_revoked.next_unlock_timestamp, None);
+    assert_eq!(client.preview_tranche(&id), p_revoked);
+
+    // Beneficiary claims the frozen remainder
+    assert_eq!(client.claim(&id), 6_666);
+
+    // Subsequent preview: 0 claimable, next_unlock_timestamp remains None
+    let p_revoked_claimed = client.preview_claimable(&id);
+    assert_eq!(p_revoked_claimed.claimable, 0);
+    assert_eq!(
+        p_revoked_claimed.evaluated_timestamp,
+        START + DURATION + 1_000
+    );
+    assert_eq!(p_revoked_claimed.next_unlock_timestamp, None);
+}
+
+#[test]
+fn preview_is_read_only_and_rejects_unknown_id() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let id = create(&client, &token, &accounts);
+
+    env.ledger().set_timestamp(START + CLIFF + 500);
+    let p1 = client.preview_claimable(&id);
+    let count1: u64 = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::Count).unwrap_or(0)
+    });
+
+    let p2 = client.preview_claimable(&id);
+    let count2: u64 = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::Count).unwrap_or(0)
+    });
+
+    assert_eq!(p1, p2);
+    assert_eq!(count1, count2);
+
+    // Unknown schedule id returns NotFound
+    let err = client.try_preview_claimable(&999_999).unwrap_err().unwrap();
+    assert_eq!(err, ForgeError::NotFound);
+    let err2 = client.try_preview_tranche(&999_999).unwrap_err().unwrap();
+    assert_eq!(err2, ForgeError::NotFound);
+}
+
 // ---------------------------------------------------------------------------
 // Tranche revocation (revoke_tranche_schedule)
 // ---------------------------------------------------------------------------

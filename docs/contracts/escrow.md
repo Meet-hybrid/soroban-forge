@@ -29,6 +29,11 @@ fn get_action_summary(escrow_id, caller) -> Result<EscrowActionSummary, ForgeErr
 fn escrows_for_participant(participant, cursor, limit) -> ParticipantEscrowsPage
 fn touch_ttl(escrow_id) -> Result<(), ForgeError>              // either record kind
 
+// Milestone schedules (single-token escrows with a fixed payment plan)
+fn create_milestone_escrow(buyer, seller, arbiter, token, amounts: Vec<i128>, timeout) -> Result<u64, ForgeError>
+fn approve_milestone(escrow_id, index: u32) -> Result<(), ForgeError>      // buyer; next unpaid only
+fn get_milestones(escrow_id) -> Result<Vec<Milestone>, ForgeError>
+
 // Multi-asset baskets (additive; the single-token interface above is unchanged)
 fn create_basket(buyer, seller, arbiter, assets: Vec<EscrowAsset>, timeout) -> Result<u64, ForgeError>
 fn deposit_basket(escrow_id) -> Result<(), ForgeError>
@@ -42,6 +47,17 @@ fn cancel_basket(escrow_id) -> Result<(), ForgeError>
 fn get_basket(escrow_id) -> Result<BasketEscrowData, ForgeError> // basket records
 fn get_basket_action_summary(escrow_id, caller) -> Result<EscrowActionSummary, ForgeError>
 ```
+
+## Participant Escrow Pagination
+
+`escrows_for_participant(participant, cursor, limit)` provides bounded,
+deterministic pagination over all escrow IDs involving a given participant (as buyer, seller, or arbiter).
+
+- **Cursor and limit**: `cursor` is the zero-based offset in the participant's list; `limit` is the requested page size.
+- **Maximum page size**: The maximum allowed page size is `MAX_PARTICIPANT_PAGE_SIZE = 100`. Any requested `limit` greater than 100 is automatically clamped to 100.
+- **Stable results**: Pages are stable, non-overlapping, and return `ParticipantEscrowsPage { ids, total, next_cursor }`.
+- **Exhaustion**: When the current page reaches the end of the records, `next_cursor` is `None`.
+- **Zero limit / unknown participant**: Passing `limit: 0` returns an empty page (`ids: []`) with `next_cursor: None`. An unknown participant or an address with no escrows also returns an empty page with `total: 0` and `next_cursor: None` without error.
 
 ## Action Eligibility Summary
 
@@ -64,8 +80,10 @@ both record kinds.
 
 An eligible action has `reason: Eligible`. Ineligible actions have a stable
 reason identifier: `WrongRole`, `WrongStatus`, `BeforeDeadline`,
-`AfterDeadline`, `ReviewWindowNotEnded`, `ReleasePending`, or
-`NoPendingRequest`. The summary uses the contract's same deadline,
+`AfterDeadline`, `ReviewWindowNotEnded`, `ReleasePending`,
+`NoPendingRequest`, or `MilestoneSchedule` (the escrow pays the seller only
+through `approve_milestone`, so `RequestRelease`, `Release` and
+`ReleasePartial` are closed). The summary uses the contract's same deadline,
 refund-authorizer, pending-request, and review-window checks as the
 state-changing entrypoints. It describes contract-level eligibility only; it
 cannot indicate whether a caller has provided the required authorization
@@ -262,6 +280,80 @@ carries `partial_amount` (the incremental transfer) and the full `EscrowData`
 (including updated `released` and `status`). The existing `Released` event
 remains exclusively for the `release` entrypoint and signals terminal
 completion to indexers.
+
+## Milestone Schedules
+
+`create_milestone_escrow(buyer, seller, arbiter, token, amounts, timeout)`
+lets buyer and seller agree a payment plan up front. The result is an ordinary
+single-token escrow for `sum(amounts)`, so `deposit`, `dispute`, `resolve`,
+`resolve_split`, `refund`, `refund_expired`, `extend_deadline`, `touch_ttl`
+and every existing event behave as documented above. The plan itself is a
+`MilestoneSchedule { amounts, paid }` stored under `DataKey::Milestones(id)`,
+outside `EscrowData`, so the record and event shapes are unchanged.
+
+### Creation rules
+
+- Between 1 and `MAX_MILESTONES` (**20**) milestones. The cap bounds the
+  stored schedule and the `get_milestones` view.
+- Every amount must be `> 0`.
+- The total must fit in `i128`; an overflowing total returns
+  `ArithmeticOverflow`.
+- `timeout > 0`. Buyer-authorized only, like `create_escrow`; validation runs
+  before authorization.
+
+### Approval
+
+`approve_milestone(escrow_id, index)` requires `buyer.require_auth()` and pays
+exactly `amounts[index]` to the seller. It only accepts the **next unpaid**
+milestone (`index == paid`) of a `Funded` escrow. Approving out of order,
+approving a paid milestone again, or an index past the end returns
+`InvalidInput` and moves nothing. The final approval moves the escrow to
+`Completed`.
+
+A milestone escrow pays the seller only by schedule: `release`,
+`release_partial` and `request_release` return `InvalidInput`, and the action
+summary reports `MilestoneSchedule` for them.
+
+### Disputes, refunds and expiry
+
+A dispute moves the escrow to `Disputed`, which freezes every unpaid
+milestone (`approve_milestone` returns `InvalidInput`). `resolve`,
+`resolve_split`, `refund` and `refund_expired` settle the **remaining**
+balance, which for a milestone escrow is exactly the unpaid remainder.
+Milestones already paid are never clawed back.
+
+### Statuses
+
+`get_milestones` returns `{ index, amount, status }` for each milestone, in
+order:
+
+| Status | Meaning |
+| --- | --- |
+| `Unpaid` | Not paid yet (escrow `Pending` or `Funded`) |
+| `Paid` | Approved and paid to the seller |
+| `Frozen` | Unpaid while a dispute is open |
+| `Settled` | Unpaid, and the remainder was settled by refund, expiry refund or the arbiter |
+| `Cancelled` | The escrow was cancelled before funding |
+
+`get_milestones` and `approve_milestone` return `NotFound` for any escrow that
+was not created with a schedule.
+
+### Events
+
+Each approval emits `MilestoneReleased { escrow_id (topic), index, amount }`.
+The final approval also emits the terminal `Released` event, like every other
+path that completes an escrow.
+
+### Invariants (property-tested)
+
+`milestone_props.rs` runs random schedules through random approve, dispute,
+resolve, split, refund, expiry and time-jump sequences, with a fixed
+`RngSeed`. After every step it checks:
+
+- `paid + refunded + held == funded total`;
+- the contract's balance equals `remaining()`;
+- no milestone is paid twice;
+- milestones are paid strictly in order.
 
 ## Storage Compatibility
 

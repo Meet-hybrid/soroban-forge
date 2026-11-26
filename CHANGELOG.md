@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Milestone-scheduled escrows.** `create_milestone_escrow(buyer, seller, arbiter, token, amounts, timeout)` stores an ordered plan of up to `MAX_MILESTONES` (20) positive amounts with an overflow-checked total. `approve_milestone(escrow_id, index)` is buyer-signed and pays exactly the next unpaid milestone (in order only), emitting `MilestoneReleased`. `get_milestones` reports each milestone's amount and status. A dispute freezes the unpaid milestones, and arbiter resolution, refunds and `refund_expired` settle only the unpaid remainder. Ad-hoc `release`, `release_partial` and `request_release` are closed for these escrows (new action-summary reason `MilestoneSchedule`). A fixed-seed proptest suite checks conservation and in-order payment, and TypeScript clients are regenerated.
 - **TypeScript SDK typed event decoders.** `decodeEscrowEvent`, `decodeVestingEvent`, `decodeMultisigEvent`, `decodeSubscriptionEvent`, `decodeMarketplaceEvent` and `decodeDaoEvent` turn raw events into discriminated unions keyed by event name, return typed errors for unknown or malformed events, and are optionally wired into `createIndexer` via `decoders`. A test keeps them in sync with the ABI fixtures.
 
 ### Changed

@@ -1,6 +1,6 @@
 use crate::cli::{KeysArgs, KeysCommand};
 use anyhow::{bail, Context, Result};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::SysRng, TryRng};
 use serde::Serialize;
 use std::io::IsTerminal;
 use stellar_strkey::{ed25519, Strkey};
@@ -29,7 +29,9 @@ pub fn run(args: KeysArgs) -> Result<()> {
 
 fn generate(json: bool) -> Result<()> {
     let mut seed = [0_u8; 32];
-    OsRng.fill_bytes(&mut seed);
+    SysRng
+        .try_fill_bytes(&mut seed)
+        .map_err(|err| anyhow::anyhow!("failed to read OS randomness: {err}"))?;
     let private = ed25519::PrivateKey(seed);
     let public = ed25519::PublicKey(
         ed25519_dalek::SigningKey::from_bytes(&seed)

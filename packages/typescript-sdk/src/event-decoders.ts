@@ -101,6 +101,10 @@ export const ESCROW_EVENT_SPECS = {
   },
   Disputed: { topics: 1, fields: ESCROW_DATA },
   EscrowCreated: { topics: 1, fields: ESCROW_DATA },
+  MilestoneReleased: {
+    topics: 1,
+    fields: { escrow_id: "u64", index: "u32", amount: "i128" },
+  },
   PartiallyReleased: {
     topics: 1,
     fields: {
@@ -324,6 +328,10 @@ export const DAO_EVENT_SPECS = {
       forfeited: "bool",
     },
   },
+  Delegated: {
+    topics: 1,
+    fields: { from: "address", to: "address" },
+  },
   Finalised: {
     topics: 1,
     fields: {
@@ -344,6 +352,10 @@ export const DAO_EVENT_SPECS = {
   Proposed: {
     topics: 1,
     fields: { proposal_id: "u64", data: "udt:Proposal" },
+  },
+  Undelegated: {
+    topics: 1,
+    fields: { from: "address" },
   },
   VoteCast: {
     topics: 1,

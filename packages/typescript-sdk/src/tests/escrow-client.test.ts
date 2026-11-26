@@ -179,6 +179,7 @@ test("ABI exposes the complete regenerated escrow function names", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   const funcNames = client.spec.funcs().map((f) => f.name().toString());
   const sortedExpected = [
+    "approve_milestone",
     "approve_release",
     "cancel",
     "cancel_basket",
@@ -186,6 +187,7 @@ test("ABI exposes the complete regenerated escrow function names", () => {
     "create_escrow",
     "create_escrow_with_arbiter_fee",
     "create_escrow_with_review",
+    "create_milestone_escrow",
     "deposit",
     "deposit_basket",
     "dispute",
@@ -199,6 +201,7 @@ test("ABI exposes the complete regenerated escrow function names", () => {
     "get_basket",
     "get_basket_action_summary",
     "get_escrow",
+    "get_milestones",
     "get_release_request",
     "get_status",
     "preflight_deposit",

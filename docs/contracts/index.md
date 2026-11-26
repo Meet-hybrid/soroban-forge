@@ -9,6 +9,10 @@
 | Subscription Payments | crates/subscription-payments | State machine + tests · atomic SEP-41 settlement via `charge` and `charge_catchup`     |
 | Marketplace Royalties | crates/marketplace-royalties | State machine + tests · **atomic SEP-41 settlement** via `settle_sale`                 |
 
+For integrators, the [Authorization Matrix](./authorization-matrix.md) lists
+every mutating entrypoint, its required signer(s), failure behavior, token
+transfer authority, and all read-only views across all six contracts.
+
 Per-entrypoint detail lives in the [Feature Status Matrix](../FEATURE-STATUS.md);
 the aggregate gaps (token settlement, events, storage TTL, deployments) are
 documented in [Known Limitations](../KNOWN-LIMITATIONS.md).

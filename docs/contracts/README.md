@@ -2,6 +2,8 @@
 
 Comprehensive, synchronized reference documentation for all smart contracts in the Soroban Forge ecosystem.
 
+Start with the [Cross-Crate Authorization Matrix](./authorization-matrix.md) for the required signer(s), failure behavior, token transfer authority, and read-only views of every public entrypoint.
+
 Each contract in Soroban Forge implements verified, production-grade WebAssembly smart contracts targeting the Soroban runtime (`wasm32v1-none`, Soroban SDK v28 / Protocol 22+).
 
 ---
