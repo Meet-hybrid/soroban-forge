@@ -299,6 +299,43 @@ pub trait SorobanForgeMarketplaceRoyalties {
         env: Env,
         collection: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Propose a rotation of the royalty payout address for `collection`.
+    ///
+    /// `current` must be an existing royalty recipient for the collection.
+    /// `new_recipient` must differ from `current`. Requires `current.require_auth()`.
+    /// A pending rotation replaces any prior pending rotation for the same `current`.
+    fn propose_recipient_rotation(
+        env: Env,
+        collection: Address,
+        current: Address,
+        new_recipient: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Accept a pending rotation for `collection`.
+    ///
+    /// Requires the proposed `new_recipient.require_auth()`. Replaces every
+    /// split entry belonging to `current` with `new_recipient`, preserving
+    /// bps and ordering. Clears the pending rotation on success.
+    fn accept_recipient_rotation(
+        env: Env,
+        collection: Address,
+        current: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Cancel a pending rotation for `collection`.
+    ///
+    /// Requires `current.require_auth()`. Returns `NotFound` when no rotation
+    /// is pending.
+    fn cancel_recipient_rotation(
+        env: Env,
+        collection: Address,
+        current: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Return the proposed new address for a pending rotation, or `None` when
+    /// no rotation is pending. No authorization required.
+    fn get_pending_rotation(env: Env, collection: Address, current: Address) -> Option<Address>;
 }
 
 /// Lifecycle state of a registered royalty configuration.
@@ -418,6 +455,9 @@ enum DataKey {
     /// `min_amount` order starting at `1`. Appended to preserve the encoded
     /// discriminants of the existing persistent keys.
     Tiers(Address),
+    /// Pending recipient rotation for a collection and its current recipient.
+    /// Stores the proposed new recipient address until accepted or cancelled.
+    PendingRotation(Address, Address),
 }
 
 /// The deployable marketplace royalties contract.
@@ -430,6 +470,7 @@ impl MarketplaceRoyalties {
     ///
     /// Requires the collection's authorization and `bps <= 10_000`
     /// (100%). Re-registration updates the existing configuration in place.
+    /// Any pending recipient rotation for this collection is cleared.
     pub fn set_royalty(
         env: Env,
         collection: Address,
@@ -444,6 +485,12 @@ impl MarketplaceRoyalties {
             return Err(ForgeError::InvalidInput);
         }
 
+        // Load old splits before overwriting so we can clear their pending rotations.
+        let old_splits: Option<soroban_sdk::Vec<RoyaltyShare>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Splits(collection.clone()));
+
         let royalty = Royalty {
             collection,
             recipient,
@@ -452,21 +499,30 @@ impl MarketplaceRoyalties {
         };
         let key = DataKey::Royalty(royalty.collection.clone());
         env.storage().persistent().set(&key, &royalty);
-        let mut recipients = soroban_sdk::Vec::new(&env);
-        recipients.push_back(RoyaltyShare {
+        let mut new_splits = soroban_sdk::Vec::new(&env);
+        new_splits.push_back(RoyaltyShare {
             recipient: royalty.recipient.clone(),
             bps,
         });
         env.storage()
             .persistent()
-            .set(&DataKey::Splits(royalty.collection.clone()), &recipients);
+            .set(&DataKey::Splits(royalty.collection.clone()), &new_splits);
         bump_entry(&env, &DataKey::Splits(royalty.collection.clone()));
         bump_entry(&env, &key);
+
+        // Clear any pending rotation for all previously configured recipients.
+        if let Some(old) = old_splits {
+            clear_pending_rotations_for_collection(&env, &royalty.collection, &old);
+        }
+        // Also clear for the new recipient in case it had a pending rotation.
+        clear_pending_rotations_for_collection(&env, &royalty.collection, &new_splits);
+
         events::royalty_configured(&env, &royalty);
         Ok(())
     }
 
     /// Replace a collection's split atomically. Zero-rate recipients are valid.
+    /// Any pending recipient rotations for this collection are cleared.
     pub fn set_royalty_splits(
         env: Env,
         collection: Address,
@@ -489,6 +545,13 @@ impl MarketplaceRoyalties {
         if total > max_royalty_cap(&env, &collection) {
             return Err(ForgeError::InvalidInput);
         }
+
+        // Load old splits before overwriting so we can clear their pending rotations.
+        let old_splits: Option<soroban_sdk::Vec<RoyaltyShare>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Splits(collection.clone()));
+
         let first = recipients.get(0).ok_or(ForgeError::InvalidInput)?;
         let royalty = Royalty {
             collection: collection.clone(),
@@ -503,6 +566,14 @@ impl MarketplaceRoyalties {
             .set(&DataKey::Splits(collection), &recipients);
         bump_entry(&env, &DataKey::Splits(royalty.collection.clone()));
         bump_entry(&env, &key);
+
+        // Clear pending rotations for previously configured recipients.
+        if let Some(old) = old_splits {
+            clear_pending_rotations_for_collection(&env, &royalty.collection, &old);
+        }
+        // Also clear for all recipients in the new split.
+        clear_pending_rotations_for_collection(&env, &royalty.collection, &recipients);
+
         events::royalty_configured(&env, &royalty);
         Ok(())
     }
@@ -1060,6 +1131,155 @@ impl MarketplaceRoyalties {
         }
         Ok(())
     }
+
+    /// Propose a rotation of the royalty payout address for `collection`.
+    ///
+    /// Requires `current.require_auth()`. The collection must be configured and
+    /// `current` must be an existing royalty recipient. `new_recipient` must
+    /// differ from `current`. A new proposal overwrites any prior pending
+    /// rotation for the same `current` on the same collection.
+    pub fn propose_recipient_rotation(
+        env: Env,
+        collection: Address,
+        current: Address,
+        new_recipient: Address,
+    ) -> Result<(), ForgeError> {
+        // Validate the collection exists.
+        let royalty: Royalty = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Royalty(collection.clone()))
+            .ok_or(ForgeError::NotFound)?;
+
+        // Reject self-rotation.
+        if current == new_recipient {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        // Require the current recipient's authorization.
+        current.require_auth();
+
+        // Verify `current` is actually a configured recipient.
+        let splits = royalty_splits(&env, &royalty)?;
+        let is_recipient = splits.iter().any(|s| s.recipient == current);
+        if !is_recipient {
+            return Err(ForgeError::NotFound);
+        }
+
+        // Store the pending rotation.
+        let key = DataKey::PendingRotation(collection.clone(), current.clone());
+        env.storage().persistent().set(&key, &new_recipient);
+        bump_entry(&env, &key);
+
+        events::rotation_proposed(&env, &collection, &current, &new_recipient);
+        Ok(())
+    }
+
+    /// Accept a pending rotation for `collection`.
+    ///
+    /// Requires the proposed `new_recipient.require_auth()`. Replaces every
+    /// split entry belonging to `current` with `new_recipient`, preserving
+    /// bps and ordering. Also updates the legacy `Royalty` record when
+    /// `current` is its recipient. Clears the pending rotation on success.
+    pub fn accept_recipient_rotation(
+        env: Env,
+        collection: Address,
+        current: Address,
+    ) -> Result<(), ForgeError> {
+        // Load the pending rotation.
+        let pending_key = DataKey::PendingRotation(collection.clone(), current.clone());
+        let new_recipient: Address = env
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .ok_or(ForgeError::NotFound)?;
+
+        // Require the proposed new recipient's authorization.
+        new_recipient.require_auth();
+
+        // Load the existing configuration.
+        let mut royalty: Royalty = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Royalty(collection.clone()))
+            .ok_or(ForgeError::NotFound)?;
+
+        // Reject if new_recipient is already a recipient (other than current).
+        let splits = royalty_splits(&env, &royalty)?;
+        for share in splits.iter() {
+            if share.recipient == new_recipient && share.recipient != current {
+                return Err(ForgeError::InvalidInput);
+            }
+        }
+
+        // Replace every occurrence of `current` with `new_recipient` in the split.
+        let mut new_splits = soroban_sdk::Vec::new(&env);
+        for share in splits.iter() {
+            if share.recipient == current {
+                new_splits.push_back(RoyaltyShare {
+                    recipient: new_recipient.clone(),
+                    bps: share.bps,
+                });
+            } else {
+                new_splits.push_back(share);
+            }
+        }
+
+        // Update the legacy Royalty record when current is its recipient.
+        if royalty.recipient == current {
+            royalty.recipient = new_recipient.clone();
+        }
+
+        // Persist the updated split and legacy record.
+        let royalty_key = DataKey::Royalty(collection.clone());
+        let splits_key = DataKey::Splits(collection.clone());
+        env.storage().persistent().set(&royalty_key, &royalty);
+        env.storage().persistent().set(&splits_key, &new_splits);
+        bump_entry(&env, &royalty_key);
+        bump_entry(&env, &splits_key);
+
+        // Remove the pending rotation.
+        env.storage().persistent().remove(&pending_key);
+
+        events::rotation_accepted(&env, &collection, &current, &new_recipient);
+        Ok(())
+    }
+
+    /// Cancel a pending rotation for `collection`.
+    ///
+    /// Requires `current.require_auth()`. Returns `NotFound` when no rotation
+    /// is pending for `current`.
+    pub fn cancel_recipient_rotation(
+        env: Env,
+        collection: Address,
+        current: Address,
+    ) -> Result<(), ForgeError> {
+        let pending_key = DataKey::PendingRotation(collection.clone(), current.clone());
+        let new_recipient: Address = env
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .ok_or(ForgeError::NotFound)?;
+
+        current.require_auth();
+
+        env.storage().persistent().remove(&pending_key);
+
+        events::rotation_cancelled(&env, &collection, &current, &new_recipient);
+        Ok(())
+    }
+
+    /// Return the proposed new address for a pending rotation, or `None` when
+    /// no rotation is pending. No authorization required.
+    pub fn get_pending_rotation(
+        env: Env,
+        collection: Address,
+        current: Address,
+    ) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingRotation(collection, current))
+    }
 }
 
 fn quote_inputs(
@@ -1216,6 +1436,23 @@ fn max_royalty_cap(env: &Env, collection: &Address) -> u32 {
         .persistent()
         .get(&DataKey::MaxCap(collection.clone()))
         .unwrap_or(10_000)
+}
+
+/// Clear any pending rotation records for all recipients in `splits`.
+///
+/// Called from `set_royalty` and `set_royalty_splits` to ensure that
+/// reconfiguring a collection never leaves stale pending rotations alive.
+fn clear_pending_rotations_for_collection(
+    env: &Env,
+    collection: &Address,
+    splits: &soroban_sdk::Vec<RoyaltyShare>,
+) {
+    for share in splits.iter() {
+        let key = DataKey::PendingRotation(collection.clone(), share.recipient.clone());
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().remove(&key);
+        }
+    }
 }
 
 /// Load the current split, falling back to the legacy single-recipient record.
@@ -1375,6 +1612,30 @@ mod events {
         pub royalty_share: i128,
     }
 
+    #[contractevent]
+    pub struct RecipientRotationProposed {
+        #[topic]
+        pub collection: Address,
+        pub current: Address,
+        pub new_recipient: Address,
+    }
+
+    #[contractevent]
+    pub struct RecipientRotationAccepted {
+        #[topic]
+        pub collection: Address,
+        pub previous: Address,
+        pub new_recipient: Address,
+    }
+
+    #[contractevent]
+    pub struct RecipientRotationCancelled {
+        #[topic]
+        pub collection: Address,
+        pub current: Address,
+        pub new_recipient: Address,
+    }
+
     pub fn royalty_configured(env: &Env, royalty: &Royalty) {
         RoyaltyConfigured {
             collection: royalty.collection.clone(),
@@ -1408,6 +1669,48 @@ mod events {
         }
         .publish(env);
     }
+
+    pub fn rotation_proposed(
+        env: &Env,
+        collection: &Address,
+        current: &Address,
+        new_recipient: &Address,
+    ) {
+        RecipientRotationProposed {
+            collection: collection.clone(),
+            current: current.clone(),
+            new_recipient: new_recipient.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn rotation_accepted(
+        env: &Env,
+        collection: &Address,
+        previous: &Address,
+        new_recipient: &Address,
+    ) {
+        RecipientRotationAccepted {
+            collection: collection.clone(),
+            previous: previous.clone(),
+            new_recipient: new_recipient.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn rotation_cancelled(
+        env: &Env,
+        collection: &Address,
+        current: &Address,
+        new_recipient: &Address,
+    ) {
+        RecipientRotationCancelled {
+            collection: collection.clone(),
+            current: current.clone(),
+            new_recipient: new_recipient.clone(),
+        }
+        .publish(env);
+    }
 }
 
 #[cfg(test)]
@@ -1425,6 +1728,12 @@ mod resource_report;
 
 #[cfg(test)]
 mod model_check;
+
+#[cfg(test)]
+mod rotation;
+
+#[cfg(test)]
+mod rotation_props;
 
 #[cfg(test)]
 mod tests {

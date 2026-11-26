@@ -278,6 +278,18 @@ export const SUBSCRIPTION_EVENT_SPECS = {
 } as const;
 
 export const MARKETPLACE_EVENT_SPECS = {
+  RecipientRotationAccepted: {
+    topics: 1,
+    fields: { collection: "address", previous: "address", new_recipient: "address" },
+  },
+  RecipientRotationCancelled: {
+    topics: 1,
+    fields: { collection: "address", current: "address", new_recipient: "address" },
+  },
+  RecipientRotationProposed: {
+    topics: 1,
+    fields: { collection: "address", current: "address", new_recipient: "address" },
+  },
   RoyaltyConfigured: {
     topics: 1,
     fields: { collection: "address", recipient: "address", bps: "u32" },
