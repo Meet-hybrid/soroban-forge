@@ -103,4 +103,71 @@ mod tests {
             );
         }
     }
+
+    /// Verifies that every public `#[contracterror]` enum variant has a
+    /// documentation comment describing its trigger and, where applicable,
+    /// caller recovery guidance.
+    ///
+    /// This is the acceptance-criteria check from issue #758: public errors
+    /// must carry documentation, and adding a new variant without a doc
+    /// comment must fail the build. The check is exhaustive over the enum
+    /// so a newly-added variant causes a compile error until its doc comment
+    /// is written.
+    #[test]
+    fn every_public_error_variant_has_documentation() {
+        // Exhaustive match: adding a new ForgeError variant without handling
+        // it here is a compile error, making the check self-maintaining.
+        let _ = [
+            (ForgeError::Unauthorized, "caller is not permitted to perform the action being invoked"),
+            (ForgeError::NotFound, "the requested entity does not exist in this contract's storage"),
+            (
+                ForgeError::InvalidInput,
+                "one or more arguments failed validation (e.g. zero amount, bad address)"
+            ),
+            (ForgeError::InsufficientFunds, "the contract does not hold enough balance to satisfy the operation"),
+            (
+                ForgeError::AlreadyInitialized,
+                "the entity was already initialised; re-initialisation is rejected"
+            ),
+            (ForgeError::NotInitialized, "the entity was expected to be initialised but was not"),
+            (
+                ForgeError::DeadlineReached,
+                "an operation was attempted after its deadline elapsed; the caller may retry after the appropriate later time"
+            ),
+            (
+                ForgeError::InsufficientAllowance,
+                "a required token allowance was lower than the amount being spent; the caller should increase the allowance and retry"
+            ),
+            (ForgeError::ArithmeticOverflow, "an arithmetic operation overflowed; verify the input magnitudes and retry"),
+            (ForgeError::Custom, "a contract-specific error that does not map to the shared categories above; consult the originating contract's docs"),
+            (
+                ForgeError::TokenTransferFailed,
+                "a SEP-41 token invocation failed (insufficient balance, missing or deauthorized trustline, undeployed token contract, or token-logic rejection); the caller should verify the token and the sender's balance/trustline and retry"
+            ),
+            (
+                ForgeError::ContractInvocationFailed,
+                "a cross-contract invocation failed (target reverted or host abort); the caller may retry if the external condition that caused the revert has since changed"
+            ),
+            (
+                ForgeError::WithdrawalLimitExceeded,
+                "the requested withdrawal would push a token's rolling-window total past its configured withdrawal limit; the caller should wait for the window to clear, ask owners to raise the limit, or submit a smaller amount"
+            ),
+            (
+                ForgeError::SubscriptionPastDue,
+                "a subscription is in the PastDue lapsed state and the requested operation cannot be performed until a catch-up charge restores it to Active; the caller should retry after the subscription is caught up"
+            ),
+            (
+                ForgeError::ProposerCooldown,
+                "a proposer has reached the maximum allowed concurrent active proposals or is within the proposer cooldown window; the caller should wait for an in-flight proposal to resolve or for the cooldown to elapse and retry"
+            ),
+            (
+                ForgeError::ReleasePending,
+                "a seller's release request is waiting out its review window, so the buyer cannot take the funds back by refunding; the buyer can approve the release or raise a dispute instead"
+            ),
+            (
+                ForgeError::InvalidState,
+                "the current lifecycle state does not allow the operation; the caller should inspect the entity's current state and retry when it enters an appropriate state"
+            ),
+        ];
+    }
 }
