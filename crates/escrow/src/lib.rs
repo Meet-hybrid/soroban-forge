@@ -3697,6 +3697,8 @@ mod basket_props;
 
 #[cfg(test)]
 mod basket_state_machine;
+
+#[cfg(test)]
 mod lifecycle_props;
 
 // TTL chaos harness demo: drives randomized ledger gaps through the

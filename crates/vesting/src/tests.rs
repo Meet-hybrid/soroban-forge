@@ -1747,7 +1747,7 @@ fn tranche_preview_exact_unlock_and_post_final_timestamps() {
             },
         ],
     );
-    let id = client.create_tranche_schedule(&accounts.user1, &token, &tranches);
+    let id = client.create_tranche_schedule(&accounts.deployer, &accounts.user1, &token, &tranches);
 
     // 1. Before first unlock: nothing claimable, next unlock is first tranche at START + 100
     env.ledger().set_timestamp(START + 50);
@@ -1923,6 +1923,8 @@ fn preview_is_read_only_and_rejects_unknown_id() {
     assert_eq!(err, ForgeError::NotFound);
     let err2 = client.try_preview_tranche(&999_999).unwrap_err().unwrap();
     assert_eq!(err2, ForgeError::NotFound);
+}
+
 // ---------------------------------------------------------------------------
 // Tranche revocation (revoke_tranche_schedule)
 // ---------------------------------------------------------------------------

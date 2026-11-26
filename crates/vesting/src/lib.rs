@@ -518,6 +518,17 @@ pub trait SorobanForgeVesting {
         env: Env,
         schedule_id: u64,
     ) -> Result<TranchePreview, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the derived status summary of a linear schedule, including its
+    /// configured cliff duration and cliff timestamp (read-only).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no linear schedule with this id.
+    fn get_schedule_status(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<ScheduleStatus, soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Preview of claimable tokens and tranche/unlock timing.
@@ -550,16 +561,6 @@ impl TranchePreview {
     pub fn next_unlock(&self) -> Option<u64> {
         self.next_unlock_timestamp
     }
-    /// Read the derived status summary of a linear schedule, including its
-    /// configured cliff duration and cliff timestamp (read-only).
-    ///
-    /// # Errors
-    ///
-    /// * [`ForgeError::NotFound`] — no linear schedule with this id.
-    fn get_schedule_status(
-        env: Env,
-        schedule_id: u64,
-    ) -> Result<ScheduleStatus, soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Read-only status summary for a linear vesting schedule, exposing its
@@ -1441,6 +1442,8 @@ impl Vesting {
                 })
             }
         }
+    }
+
     /// Read the derived status summary of a linear schedule, exposing the
     /// configured cliff duration and cliff timestamp alongside live claimable
     /// and claimed amounts (read-only view).

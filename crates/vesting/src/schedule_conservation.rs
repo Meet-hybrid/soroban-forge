@@ -444,6 +444,7 @@ fn run_conservation_trace(is_linear: bool, trace: &[VestingAction]) -> Result<()
         };
 
         let id = fixture.client.create_tranche_schedule(
+            &fixture.funder,
             &beneficiaries[0],
             &fixture.token,
             &tranches_soroban,
