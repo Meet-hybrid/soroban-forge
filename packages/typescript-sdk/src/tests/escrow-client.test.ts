@@ -5,7 +5,7 @@
  * accounts, or testnet credentials.  They verify:
  *
  *   1. Client construction and configuration surface
- *   2. All 11 generated escrow methods are present
+ *   2. All 28 generated escrow methods are present
  *   3. Argument encoding via ContractSpec.funcArgsToScVals()
  *   4. The ForgeError runtime object (codes and messages)
  *   5. ABI shape — function names, parameter names, and parameter types —
@@ -121,24 +121,41 @@ test("EXPECTED_CONTRACT_ID is a valid Stellar contract address", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. Method surface — all 11 escrow methods must be present
+// 2. Method surface — every escrow method must be present
 // ---------------------------------------------------------------------------
 
 const EXPECTED_METHODS = [
+  "approve_release_request",
   "cancel",
-  "refund",
+  "cancel_basket",
+  "create_basket",
+  "create_escrow",
   "deposit",
+  "deposit_basket",
   "dispute",
-  "release",
-  "resolve",
-  "touch_ttl",
+  "dispute_basket",
+  "escrows_for_participant",
+  "expire_release_request",
+  "get_basket",
+  "get_basket_summary",
   "get_escrow",
   "get_status",
-  "create_escrow",
-  "escrows_for_participant",
+  "refund",
+  "refund_basket",
+  "refund_expired",
+  "release",
+  "release_basket",
+  "release_partial",
+  "release_partial_basket",
+  "request_release",
+  "resolve",
+  "resolve_basket",
+  "resolve_split",
+  "touch_ttl",
+  "ttl_info",
 ] as const;
 
-test("Client exposes all 11 escrow method functions", () => {
+test("Client exposes every escrow method function", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   for (const method of EXPECTED_METHODS) {
     assert.equal(
@@ -149,7 +166,7 @@ test("Client exposes all 11 escrow method functions", () => {
   }
 });
 
-test("fromJSON exposes deserialization helpers for all 11 methods", () => {
+test("fromJSON exposes deserialization helpers for every method", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   for (const method of EXPECTED_METHODS) {
     assert.equal(
@@ -175,7 +192,7 @@ test("ContractSpec is accessible via client.spec", () => {
   );
 });
 
-test("ABI exposes exactly the 11 expected function names", () => {
+test("ABI exposes exactly the expected function names", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   const funcNames = client.spec.funcs().map((f) => f.name().toString());
   const sortedExpected = [...EXPECTED_METHODS].sort();
@@ -198,6 +215,7 @@ const EXPECTED_ABI_SHAPE: Record<string, Array<[string, string]>> = {
   dispute: [
     ["escrow_id", "scSpecTypeU64"],
     ["claimant", "scSpecTypeAddress"],
+    ["evidence_commitment", "scSpecTypeOption"],
   ],
   release: [["escrow_id", "scSpecTypeU64"]],
   resolve: [
@@ -205,6 +223,7 @@ const EXPECTED_ABI_SHAPE: Record<string, Array<[string, string]>> = {
     ["in_favor_of_seller", "scSpecTypeBool"],
   ],
   touch_ttl: [["escrow_id", "scSpecTypeU64"]],
+  ttl_info: [["escrow_id", "scSpecTypeU64"]],
   get_escrow: [["escrow_id", "scSpecTypeU64"]],
   get_status: [["escrow_id", "scSpecTypeU64"]],
   escrows_for_participant: [
@@ -219,7 +238,17 @@ const EXPECTED_ABI_SHAPE: Record<string, Array<[string, string]>> = {
     ["token", "scSpecTypeAddress"],
     ["amount", "scSpecTypeI128"],
     ["timeout", "scSpecTypeU64"],
+    ["acceptance_deadline", "scSpecTypeOption"],
   ],
+  // Issue #726 — review-window release requests.
+  request_release: [
+    ["escrow_id", "scSpecTypeU64"],
+    ["review_window", "scSpecTypeU64"],
+  ],
+  approve_release_request: [["escrow_id", "scSpecTypeU64"]],
+  expire_release_request: [["escrow_id", "scSpecTypeU64"]],
+  // Issue #729 — basket settlement summary view.
+  get_basket_summary: [["escrow_id", "scSpecTypeU64"]],
 };
 
 test("ABI parameter names and types match expected shape", () => {
@@ -283,16 +312,25 @@ test("deposit: escrow_id encodes as scvU64", () => {
   assert.equal(args[0]!.u64().toString(), "3");
 });
 
-test("dispute: encodes escrow_id (scvU64) and claimant (scvAddress)", () => {
+test("dispute: encodes escrow_id (scvU64), claimant (scvAddress), and evidence_commitment (Option)", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   const args = client.spec.funcArgsToScVals("dispute", {
     escrow_id: 5n,
     claimant: FIXTURE_BUYER,
+    evidence_commitment: null,
   });
-  assert.equal(args.length, 2);
+  assert.equal(args.length, 3);
   assert.equal(args[0]!.switch().name, "scvU64");
   assert.equal(args[0]!.u64().toString(), "5");
   assert.equal(args[1]!.switch().name, "scvAddress");
+  assert.equal(args[2]!.switch().name, "scvVoid", "None encodes as scvVoid");
+
+  const withCommitment = client.spec.funcArgsToScVals("dispute", {
+    escrow_id: 5n,
+    claimant: FIXTURE_BUYER,
+    evidence_commitment: new Uint8Array([0xde, 0xad]),
+  });
+  assert.equal(withCommitment[2]!.switch().name, "scvBytes");
 });
 
 test("release: escrow_id encodes as scvU64", () => {
@@ -344,7 +382,7 @@ test("get_status: escrow_id encodes as scvU64", () => {
   assert.equal(args[0]!.switch().name, "scvU64");
 });
 
-test("create_escrow: encodes 6 args with correct types and values", () => {
+test("create_escrow: encodes 7 args with correct types and values", () => {
   const client = new Client({ ...networks.testnet, rpcUrl: DUMMY_RPC_URL });
   const args = client.spec.funcArgsToScVals("create_escrow", {
     buyer: FIXTURE_BUYER,
@@ -353,8 +391,9 @@ test("create_escrow: encodes 6 args with correct types and values", () => {
     token: FIXTURE_TOKEN,
     amount: 500n,
     timeout: 86_400n,
+    acceptance_deadline: undefined,
   });
-  assert.equal(args.length, 6, "create_escrow must encode 6 arguments");
+  assert.equal(args.length, 7, "create_escrow must encode 7 arguments");
 
   // buyer, seller, arbiter, token → scvAddress
   assert.equal(args[0]!.switch().name, "scvAddress", "buyer must be scvAddress");
@@ -373,6 +412,13 @@ test("create_escrow: encodes 6 args with correct types and values", () => {
   // timeout → scvU64
   assert.equal(args[5]!.switch().name, "scvU64", "timeout must be scvU64");
   assert.equal(args[5]!.u64().toString(), "86400", "timeout must equal 86400");
+
+  // acceptance_deadline → scvVoid (None)
+  assert.equal(
+    args[6]!.switch().name,
+    "scvVoid",
+    "acceptance_deadline must encode as scvVoid",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -442,10 +488,28 @@ const EXPECTED_ESCROW_EVENTS = [
   "EscrowCreated",
   "Deposited",
   "Released",
+  "PartiallyReleased",
   "Refunded",
   "Disputed",
   "Resolved",
+  "ResolvedSplit",
   "Cancelled",
+  // Basket lifecycle events (multi-asset baskets, issue #238).
+  "BasketCreated",
+  "BasketDeposited",
+  "BasketReleased",
+  "BasketPartiallyReleased",
+  "BasketRefunded",
+  "BasketDisputed",
+  "BasketResolved",
+  "BasketCancelled",
+  // Issue #728 — basket acceptance-deadline refund path.
+  "RefundExpired",
+  "BasketRefundExpired",
+  // Issue #726 — review-window release requests.
+  "ReleaseRequestCreated",
+  "ReleaseRequestApproved",
+  "ReleaseRequestExpired",
 ] as const;
 
 test("ContractSpec includes all documented escrow event types", () => {
@@ -483,9 +547,11 @@ const _statusCancelled: EscrowStatus = { tag: "Cancelled", values: undefined };
 const _escrowDataShape: EscrowData = {
   amount: 500n,
   arbiter: FIXTURE_ARBITER,
+  acceptance_deadline: undefined,
   buyer: FIXTURE_BUYER,
   created_at: 0n,
   escrow_id: 1n,
+  evidence_commitment: undefined,
   seller: FIXTURE_SELLER,
   status: { tag: "Pending", values: undefined },
   timeout: 86_400n,

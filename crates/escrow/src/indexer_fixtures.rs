@@ -19,7 +19,7 @@
 
 extern crate std;
 
-use crate::{Escrow, SorobanForgeEscrowClient};
+use crate::{Escrow, EscrowAsset, SorobanForgeEscrowClient};
 use soroban_sdk::address_payload::AddressPayload;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::StellarAssetClient;
@@ -219,13 +219,13 @@ fn generate() -> serde_json::Value {
             StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
         });
         let id = b.step(&env, &escrow, 1001, "0000000000001001", || {
-            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT)
+            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT, &None)
         });
         b.step(&env, &escrow, 1002, "0000000000001002", || {
             client.deposit(&id);
         });
         b.step(&env, &escrow, 1003, "0000000000001003", || {
-            client.dispute(&id, &buyer);
+            client.dispute(&id, &buyer, &None);
         });
         b.step(&env, &escrow, 1004, "0000000000001004", || {
             client.resolve(&id, &true);
@@ -243,7 +243,7 @@ fn generate() -> serde_json::Value {
             StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
         });
         let id = b.step(&env, &escrow, 2001, "0000000000002001", || {
-            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT)
+            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT, &None)
         });
         b.step(&env, &escrow, 2002, "0000000000002002", || {
             client.cancel(&id);
@@ -261,7 +261,7 @@ fn generate() -> serde_json::Value {
             StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
         });
         let id = b.step(&env, &escrow, 3001, "0000000000003001", || {
-            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT)
+            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT, &None)
         });
         b.step(&env, &escrow, 3002, "0000000000003002", || {
             client.deposit(&id);
@@ -282,13 +282,13 @@ fn generate() -> serde_json::Value {
             StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
         });
         let id = b.step(&env, &escrow, 4001, "0000000000004001", || {
-            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT)
+            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT, &None)
         });
         b.step(&env, &escrow, 4002, "0000000000004002", || {
             client.deposit(&id);
         });
         b.step(&env, &escrow, 4003, "0000000000004003", || {
-            client.dispute(&id, &seller);
+            client.dispute(&id, &seller, &None);
         });
         b.step(&env, &escrow, 4004, "0000000000004004", || {
             client.resolve(&id, &false);
@@ -306,7 +306,7 @@ fn generate() -> serde_json::Value {
             StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
         });
         let id = b.step(&env, &escrow, 5001, "0000000000005001", || {
-            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT)
+            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT, &None)
         });
         b.step(&env, &escrow, 5002, "0000000000005002", || {
             client.deposit(&id);
@@ -327,7 +327,7 @@ fn generate() -> serde_json::Value {
             StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
         });
         let id = b.step(&env, &escrow, 6001, "0000000000006001", || {
-            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT)
+            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT, &None)
         });
         b.step(&env, &escrow, 6002, "0000000000006002", || {
             client.deposit(&id);
@@ -349,7 +349,7 @@ fn generate() -> serde_json::Value {
             StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
         });
         let id = b.step(&env, &escrow, 7001, "0000000000007001", || {
-            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT)
+            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT, &None)
         });
         b.step(&env, &escrow, 7002, "0000000000007002", || {
             client.deposit(&id);
@@ -362,6 +362,93 @@ fn generate() -> serde_json::Value {
         });
         b.step(&env, &escrow, 7005, "0000000000007005", || {
             client.release(&id);
+        });
+    }
+
+    // Scenario H — create -> deposit -> request_release -> approve_release_request
+    // (issue #726: review-window release requests).
+    {
+        let (env, escrow, token) = rig();
+        let client = SorobanForgeEscrowClient::new(&env, &escrow);
+        b.register_contract(&escrow);
+        b.register_contract(&token);
+        let (buyer, seller, arbiter) = parties(&env);
+        b.step(&env, &escrow, 8000, "0000000000008000", || {
+            StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
+        });
+        let id = b.step(&env, &escrow, 8001, "0000000000008001", || {
+            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT, &None)
+        });
+        b.step(&env, &escrow, 8002, "0000000000008002", || {
+            client.deposit(&id);
+        });
+        b.step(&env, &escrow, 8003, "0000000000008003", || {
+            client.request_release(&id, &100);
+        });
+        b.step(&env, &escrow, 8004, "0000000000008004", || {
+            client.approve_release_request(&id);
+        });
+    }
+
+    // Scenario I — create -> deposit -> request_release -> expire_release_request
+    // (issue #726: review-window expiry settlement).
+    {
+        let (env, escrow, token) = rig();
+        let client = SorobanForgeEscrowClient::new(&env, &escrow);
+        b.register_contract(&escrow);
+        b.register_contract(&token);
+        let (buyer, seller, arbiter) = parties(&env);
+        b.step(&env, &escrow, 9000, "0000000000009000", || {
+            StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
+        });
+        let id = b.step(&env, &escrow, 9001, "0000000000009001", || {
+            client.create_escrow(&buyer, &seller, &arbiter, &token, &AMOUNT, &TIMEOUT, &None)
+        });
+        b.step(&env, &escrow, 9002, "0000000000009002", || {
+            client.deposit(&id);
+        });
+        b.step(&env, &escrow, 9003, "0000000000009003", || {
+            client.request_release(&id, &100);
+        });
+        env.ledger().set_timestamp(START + 1_000);
+        b.step(&env, &escrow, 9004, "0000000000009004", || {
+            client.expire_release_request(&id);
+        });
+    }
+
+    // Scenario J — create_basket -> deposit_basket -> basket_refund_expired
+    // (issue #728: basket acceptance-deadline refund path).
+    {
+        let (env, escrow, token) = rig();
+        let client = SorobanForgeEscrowClient::new(&env, &escrow);
+        b.register_contract(&escrow);
+        b.register_contract(&token);
+        let (buyer, seller, arbiter) = parties(&env);
+        let mut assets = soroban_sdk::Vec::new(&env);
+        assets.push_back(EscrowAsset {
+            token: token.clone(),
+            amount: AMOUNT,
+            released: 0,
+        });
+        b.step(&env, &escrow, 10000, "0000000000010000", || {
+            StellarAssetClient::new(&env, &token).mint(&buyer, &AMOUNT);
+        });
+        let id = b.step(&env, &escrow, 10001, "0000000000010001", || {
+            client.create_basket(
+                &buyer,
+                &seller,
+                &arbiter,
+                &assets,
+                &TIMEOUT,
+                &Some(START + 500),
+            )
+        });
+        b.step(&env, &escrow, 10002, "0000000000010002", || {
+            client.deposit_basket(&id);
+        });
+        env.ledger().set_timestamp(START + 501);
+        b.step(&env, &escrow, 10003, "0000000000010003", || {
+            client.refund_expired(&id);
         });
     }
 
@@ -497,14 +584,20 @@ fn indexer_fixtures_regenerate_and_are_stable() {
     let fixture = build_fixture();
 
     let expected = [
-        ("escrow_created", 7u64),
-        ("deposited", 6),
+        ("escrow_created", 9u64),
+        ("deposited", 8),
         ("released", 2),
         ("partially_released", 2),
         ("refunded", 2),
         ("disputed", 2),
         ("resolved", 2),
         ("cancelled", 1),
+        // New events from the review-window (#726) and acceptance-deadline
+        // (#728) features, plus the basket deadline-refund path (#728).
+        ("release_request_created", 2),
+        ("release_request_approved", 1),
+        ("release_request_expired", 1),
+        ("basket_refund_expired", 1),
     ];
     let mut counts = std::collections::BTreeMap::<String, u64>::new();
     let mut escrow_events = 0u64;
@@ -530,6 +623,10 @@ fn indexer_fixtures_regenerate_and_are_stable() {
             "disputed",
             "resolved",
             "cancelled",
+            "release_request_created",
+            "release_request_approved",
+            "release_request_expired",
+            "basket_refund_expired",
         ]
         .contains(&name.as_str())
         {
