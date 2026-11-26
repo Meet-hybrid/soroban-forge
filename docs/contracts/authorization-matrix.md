@@ -208,6 +208,8 @@ The proposal bond is the only token custody in this contract.
 | `propose_with_delay` | proposer | Same failures as `propose`, plus `InvalidInput` for an invalid voting delay | proposer → contract, bond pulled before the proposal is stored |
 | `vote` | voter | `NotInitialized`; `InvalidInput` (inactive proposal, duplicate vote, zero token balance); `DeadlineReached`; `ArithmeticOverflow` | none |
 | `revise_vote` | voter who already voted | `InvalidState` (proposal not `Active`); `InvalidInput` (no prior vote or same direction); `DeadlineReached`; `ArithmeticOverflow` | none; moves the weight locked at first vote between tally sides |
+| `delegate` | delegator (`from`) | `InvalidInput` (self-delegation, a cycle, or a chain longer than `MAX_DELEGATION_DEPTH` = 8 hops counting existing delegators); `NotInitialized` | none; moves voting weight, not tokens, and the delegator can no longer vote directly |
+| `undelegate` | delegator (`from`) | `NotInitialized`; a no-op when there is no active delegation | none; restores direct voting |
 | `execute` | none (permissionless after voting ends) | `NotFound`; `InvalidInput` (voting open, terminal, or conflict executed); `DeadlineReached` (required proposal not yet executed); `ContractInvocationFailed` (target reverted or dependency blocked); `TokenTransferFailed` (bond refund or forfeit); `ArithmeticOverflow` | contract → proposer on success or cancel, contract → treasury on defeat |
 | `cancel_proposal` | original proposer only | `NotFound`; `Unauthorized` (not the proposer); `InvalidInput` (not `Active`); `TokenTransferFailed` | contract → proposer, bond refunded before the state write |
 | `touch_ttl` | none (keeper) | `NotFound` (no proposal record) | none; extends the persistent entry TTL only |
@@ -231,6 +233,8 @@ The proposal bond is the only token custody in this contract.
 | `get_proposal_policy` | none | Governance policy snapshotted onto the proposal; `NotFound` |
 | `get_voting_start` | none | Voting start timestamp (`0` when not delayed); `NotFound` |
 | `get_governance_policy` | none | Currently configured governance policy |
+| `get_delegate` | none | Address the account delegated to, or `None` |
+| `get_voting_power` | none | Own balance plus weight delegated in transitively; `0` for an account that has delegated away or before initialization |
 | `get_active_proposal_count` | none | No errors |
 
 ## Subscription Payments
