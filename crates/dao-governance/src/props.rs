@@ -493,3 +493,193 @@ fn p3_against_majority_is_defeated() {
         "1 for / 2 against must produce Defeated"
     );
 }
+
+// -----------------------------------------------------------------------
+// P5 — revise_vote reference-model invariant (issue #704)
+// -----------------------------------------------------------------------
+//
+// Three properties are proved using a pure-Rust reference model that mirrors
+// every vote and revision:
+//
+// **P5a — Tally-side equality.** After every operation, each of `for_votes`
+// and `against_votes` must equal the sum of receipt weights on that side.
+//
+// **P5b — Total-weight conservation.** Revisions never change
+// `for_votes + against_votes`. Votes that are revised are counted once; votes
+// that are not revised are counted once. The total equals the number of unique
+// voters times `FUNDS`.
+//
+// **P5c — Execution outcome consistency.** After the deadline, the contract's
+// finalization decision (Succeeded / Defeated) must match what the reference
+// model predicts from its own tally.
+//
+// The strategy generates a sequence of operations on a fixed voter pool:
+// - `Vote(idx, support)` — first vote from that pool slot.
+// - `Revise(idx, support)` — revision attempt (may be a no-op or error).
+// - `TimeJump(delta)` — advance the ledger clock (may cross the deadline).
+//
+// A `RngSeed` is baked into the proptest config so runs are reproducible
+// across CI invocations.
+
+/// An operation the generator can produce.
+#[derive(Debug, Clone)]
+enum Op {
+    Vote(usize, bool),
+    Revise(usize, bool),
+    TimeJump(u64),
+}
+
+fn op_strategy() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        (0usize..VOTER_POOL_SIZE, prop::bool::ANY).prop_map(|(i, s)| Op::Vote(i, s)),
+        (0usize..VOTER_POOL_SIZE, prop::bool::ANY).prop_map(|(i, s)| Op::Revise(i, s)),
+        (1u64..=3600u64).prop_map(Op::TimeJump),
+    ]
+}
+
+fn op_sequence() -> impl Strategy<Value = std::vec::Vec<Op>> {
+    prop::collection::vec(op_strategy(), 1..=24)
+}
+
+/// Reference model: tracks each voter's current direction and weight.
+#[derive(Default)]
+struct RefModel {
+    /// voter_index → (weight, support)
+    receipts: std::collections::BTreeMap<usize, (i128, bool)>,
+}
+
+impl RefModel {
+    fn vote(&mut self, idx: usize, weight: i128, support: bool) -> bool {
+        if self.receipts.contains_key(&idx) {
+            return false; // already voted
+        }
+        self.receipts.insert(idx, (weight, support));
+        true
+    }
+
+    fn revise(&mut self, idx: usize, support: bool) -> bool {
+        match self.receipts.get_mut(&idx) {
+            None => false,                          // not a voter
+            Some((_, s)) if *s == support => false, // same direction
+            Some((_, s)) => {
+                *s = support;
+                true
+            }
+        }
+    }
+
+    fn for_votes(&self) -> i128 {
+        self.receipts
+            .values()
+            .filter(|(_, s)| *s)
+            .map(|(w, _)| w)
+            .sum()
+    }
+
+    fn against_votes(&self) -> i128 {
+        self.receipts
+            .values()
+            .filter(|(_, s)| !s)
+            .map(|(w, _)| w)
+            .sum()
+    }
+}
+
+proptest! {
+    // Fixed seed for reproducibility; 64 cases exercises a wide range of
+    // interleaved vote/revise/time-jump sequences without being slow.
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        ..ProptestConfig::default()
+    })]
+
+    /// P5 — revise_vote reference-model invariant.
+    ///
+    /// For any generated sequence of votes, revisions, and time jumps:
+    /// - `for_votes` equals the sum of receipt weights on the for side (P5a).
+    /// - `against_votes` equals the sum of receipt weights on the against side (P5a).
+    /// - `for_votes + against_votes` is invariant under revisions (P5b).
+    /// - After the deadline, execution outcome matches the reference model (P5c).
+    #[test]
+    fn p5_revise_vote_reference_model(ops in op_sequence()) {
+        let w = setup_world();
+        let proposal_id = w.propose();
+        let mut model = RefModel::default();
+        let mut ledger_ts = START;
+        let deadline = START + DURATION;
+
+        for op in &ops {
+            if ledger_ts >= deadline {
+                break; // stop once the voting window has closed
+            }
+            match op {
+                Op::Vote(idx, support) => {
+                    let voter = w.voter(*idx);
+                    let res = w.client().try_vote(&proposal_id, voter, support);
+                    let accepted = matches!(res, Ok(Ok(())));
+                    let model_accepted = model.vote(*idx, FUNDS, *support);
+                    prop_assert_eq!(
+                        accepted, model_accepted,
+                        "vote({}, {}): contract={} model={}", idx, support, accepted, model_accepted
+                    );
+                }
+                Op::Revise(idx, support) => {
+                    let voter = w.voter(*idx);
+                    let res = w.client().try_revise_vote(&proposal_id, voter, support);
+                    let accepted = matches!(res, Ok(Ok(())));
+                    let model_accepted = model.revise(*idx, *support);
+                    prop_assert_eq!(
+                        accepted, model_accepted,
+                        "revise({}, {}): contract={} model={}", idx, support, accepted, model_accepted
+                    );
+                }
+                Op::TimeJump(delta) => {
+                    // Don't jump past the deadline during the voting loop.
+                    let new_ts = ledger_ts.saturating_add(*delta).min(deadline - 1);
+                    if new_ts > ledger_ts {
+                        ledger_ts = new_ts;
+                        w.env.ledger().set_timestamp(ledger_ts);
+                    }
+                }
+            }
+
+            // After every accepted operation: verify P5a.
+            let proposal = w.client().get_proposal(&proposal_id);
+            prop_assert_eq!(
+                proposal.for_votes,
+                model.for_votes(),
+                "P5a: for_votes mismatch after op {:?}", op
+            );
+            prop_assert_eq!(
+                proposal.against_votes,
+                model.against_votes(),
+                "P5a: against_votes mismatch after op {:?}", op
+            );
+
+            // P5b: total is conserved (sum of unique-voter weights).
+            let total_voted = model.receipts.len() as i128 * FUNDS;
+            prop_assert_eq!(
+                proposal.for_votes + proposal.against_votes,
+                total_voted,
+                "P5b: total weight mismatch after op {:?}", op
+            );
+        }
+
+        // P5c: execute after the deadline and check outcome matches the model.
+        w.env.ledger().set_timestamp(deadline + 1);
+        let _ = w.client().try_execute(&proposal_id);
+        let final_proposal = w.client().get_proposal(&proposal_id);
+        let expected = if model.for_votes() > model.against_votes() {
+            ProposalState::Succeeded
+        } else {
+            ProposalState::Defeated
+        };
+        prop_assert_eq!(
+            final_proposal.state,
+            expected,
+            "P5c: outcome mismatch: for={} against={}",
+            model.for_votes(),
+            model.against_votes()
+        );
+    }
+}

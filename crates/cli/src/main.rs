@@ -11,6 +11,9 @@
 //! soroban-forge verify --manifest provenance-manifest.json
 //! soroban-forge doctor --wasm target/wasm32v1-none/release/contract.wasm
 //! soroban-forge storage-diff --source old.wasm --target new.wasm
+//! soroban-forge ttl-audit --contract <CONTRACT_ID> --network testnet
+//! soroban-forge ttl-audit --contract <ID> --threshold 50000 --format json
+//! soroban-forge ttl-audit --contract <ID> --keys keys.json --plan extend.json
 //! ```
 
 mod cli;
@@ -20,11 +23,13 @@ mod network_profiles;
 #[path = "commands/decode_failure.rs"]
 mod decode_failure;
 
+use std::process;
+
 use clap::{Parser, Subcommand};
 use cli::{
     BuildArgs, CompareArgs, DeployArgs, DeployCheckArgs, DoctorArgs, EventsArgs, InspectArgs,
     InvokeArgs, KeysArgs, LintArgs, NewArgs, ProfileArgs, ScaffoldValidateArgs, StorageDiffArgs,
-    TestArgs, ValidatePlanArgs, VerifyArgs,
+    TestArgs, TtlAuditArgs, ValidatePlanArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 
@@ -69,6 +74,8 @@ pub enum Commands {
     ValidatePlan(ValidatePlanArgs),
     Compare(CompareArgs),
     StorageDiff(StorageDiffArgs),
+    /// Audit TTL (time-to-live) for contract storage entries.
+    TtlAudit(TtlAuditArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -94,6 +101,18 @@ fn main() -> anyhow::Result<()> {
         Commands::ValidatePlan(args) => commands::plan::run(args)?,
         Commands::Compare(args) => commands::compare::run(args)?,
         Commands::StorageDiff(args) => commands::storage_diff::run(args)?,
+        Commands::TtlAudit(args) => match commands::ttl_audit::run(args) {
+            Ok(exit_code) => {
+                let code = exit_code as i32;
+                if code != 0 {
+                    process::exit(code);
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                process::exit(2);
+            }
+        },
     }
 
     Ok(())
@@ -424,5 +443,106 @@ mod tests {
         let aliased =
             Cli::try_parse_from(["soroban-forge", "smoke", "--manifest", "receipt.json"]).unwrap();
         assert!(matches!(aliased.command, Commands::DeployCheck(_)));
+    }
+
+    // ── TTL audit CLI tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn ttl_audit_required_contract_flag() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "ttl-audit",
+            "--contract",
+            "CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB",
+        ])
+        .unwrap();
+
+        let Commands::TtlAudit(args) = cli.command else {
+            panic!("expected ttl-audit command");
+        };
+        assert_eq!(
+            args.contract,
+            "CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB"
+        );
+        assert_eq!(args.network, "testnet");
+        assert!(args.keys.is_none());
+        assert!(args.threshold.is_none());
+        assert!(args.format.is_none());
+        assert!(args.plan.is_none());
+    }
+
+    #[test]
+    fn ttl_audit_all_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "soroban-forge",
+            "ttl-audit",
+            "--contract",
+            "CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB",
+            "--network",
+            "mainnet",
+            "--keys",
+            "keys.json",
+            "--threshold",
+            "50000",
+            "--format",
+            "json",
+            "--plan",
+            "extend.json",
+            "--source",
+            "alice",
+        ])
+        .unwrap();
+
+        let Commands::TtlAudit(args) = cli.command else {
+            panic!("expected ttl-audit command");
+        };
+        assert_eq!(args.network, "mainnet");
+        assert_eq!(
+            args.keys.as_deref(),
+            Some(std::path::Path::new("keys.json"))
+        );
+        assert_eq!(args.threshold, Some(50_000));
+        assert_eq!(args.format.as_deref(), Some("json"));
+        assert_eq!(
+            args.plan.as_deref(),
+            Some(std::path::Path::new("extend.json"))
+        );
+        assert_eq!(args.source.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn ttl_audit_invalid_format_rejected() {
+        let result = Cli::try_parse_from([
+            "soroban-forge",
+            "ttl-audit",
+            "--contract",
+            "CC227UDF6WBLRTOKKVRIJN7BGSBK67ZGV6IDARJ2AMATGSQ7UZNBZHSB",
+            "--format",
+            "xml",
+        ]);
+        assert!(result.is_err(), "xml format should be rejected by clap");
+    }
+
+    #[test]
+    fn ttl_audit_missing_contract_rejected() {
+        let result = Cli::try_parse_from(["soroban-forge", "ttl-audit"]);
+        assert!(result.is_err(), "missing --contract should be rejected");
+    }
+
+    #[test]
+    fn ttl_audit_help_documents_flags() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("ttl-audit")
+            .expect("ttl-audit subcommand must exist")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--contract"));
+        assert!(help.contains("--network"));
+        assert!(help.contains("--keys"));
+        assert!(help.contains("--threshold"));
+        assert!(help.contains("--format"));
+        assert!(help.contains("--plan"));
+        assert!(help.contains("--source"));
     }
 }
