@@ -28,8 +28,8 @@ use std::process;
 use clap::{Parser, Subcommand};
 use cli::{
     BuildArgs, CompareArgs, DeployArgs, DeployCheckArgs, DoctorArgs, EventsArgs, InspectArgs,
-    InvokeArgs, KeysArgs, LintArgs, NewArgs, ProfileArgs, ScaffoldValidateArgs, StorageDiffArgs,
-    TestArgs, TtlAuditArgs, ValidatePlanArgs, VerifyArgs,
+    InvokeArgs, KeysArgs, LintArgs, NewArgs, ProfileArgs, ScaffoldValidateArgs, SimulateArgs,
+    StorageDiffArgs, TestArgs, TtlAuditArgs, ValidatePlanArgs, VerifyArgs,
 };
 use decode_failure::DecodeFailureArgs;
 
@@ -74,6 +74,7 @@ pub enum Commands {
     ValidatePlan(ValidatePlanArgs),
     Compare(CompareArgs),
     StorageDiff(StorageDiffArgs),
+    Simulate(SimulateArgs),
     /// Audit TTL (time-to-live) for contract storage entries.
     TtlAudit(TtlAuditArgs),
 }
@@ -101,6 +102,7 @@ fn main() -> anyhow::Result<()> {
         Commands::ValidatePlan(args) => commands::plan::run(args)?,
         Commands::Compare(args) => commands::compare::run(args)?,
         Commands::StorageDiff(args) => commands::storage_diff::run(args)?,
+        Commands::Simulate(args) => commands::simulate::run(args)?,
         Commands::TtlAudit(args) => match commands::ttl_audit::run(args) {
             Ok(exit_code) => {
                 let code = exit_code as i32;
