@@ -21,6 +21,8 @@ fn claim(schedule_id) -> Result<i128, ForgeError>
 fn claim_for(schedule_id, beneficiary) -> Result<i128, ForgeError>
 fn claimable(schedule_id) -> Result<i128, ForgeError>
 fn claimable_for(schedule_id, beneficiary) -> Result<i128, ForgeError>
+fn preview_claimable(schedule_id) -> Result<TranchePreview, ForgeError>
+fn preview_tranche(schedule_id) -> Result<TranchePreview, ForgeError>
 fn get_status(schedule_id) -> Result<VestingStatus, ForgeError>
 fn touch_ttl(schedule_id) -> Result<(), ForgeError>
 ```
@@ -224,8 +226,25 @@ atomically in the same call.
 - `reassign_beneficiary` requires the funder recorded at creation.
 - `claim` requires the current beneficiary; `claim_for` requires the named
   beneficiary.
-- `claimable`, `claimable_for`, `get_status`, `get_schedule`, and
+- `claimable`, `claimable_for`, `preview_claimable`, `preview_tranche`, `get_status`, `get_schedule`, and
   `get_tranche_schedule` are read-only views.
+
+## Claimable preview with timestamp
+
+`preview_claimable(schedule_id)` (aliased as `preview_tranche(schedule_id)`) evaluates
+the schedule at current ledger time without modifying contract state. It returns
+`TranchePreview { claimable, evaluated_timestamp, next_unlock_timestamp }`:
+
+- `claimable`: matches the amount `claim` would transfer at the same ledger time.
+- `evaluated_timestamp`: the current ledger timestamp.
+- `next_unlock_timestamp`: the timestamp of the next unlock boundary (`Some(timestamp)`),
+  or `None` when the schedule is fully unlocked, completed, or revoked.
+
+### Documented terminal values
+
+- **Completed schedule**: `claimable: 0`, `evaluated_timestamp: now`, `next_unlock_timestamp: None`.
+- **Revoked schedule**: `claimable: remaining_frozen_amount` (or `0` once claimed), `evaluated_timestamp: now`, `next_unlock_timestamp: None`.
+- **Post-final timestamps**: once all tranches have unlocked or past linear duration, `next_unlock_timestamp: None`.
 
 ## Settlement
 
