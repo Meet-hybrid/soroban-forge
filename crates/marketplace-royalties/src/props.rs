@@ -1033,16 +1033,6 @@ fn multi_recipient_residue_known_values() {
 /// the contract's implementation. This model serves as an oracle to verify
 /// that the contract's calculations are correct.
 mod reference_model {
-    use std::collections::HashMap;
-
-    /// Predicted settlement outcome from the reference model
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct ModelSettlement {
-        pub royalty_share: i128,
-        pub seller_net: i128,
-        pub recipient_payouts: HashMap<usize, i128>, // recipient_index -> amount
-    }
-
     /// Independent calculation of royalty split using floor division
     pub fn calculate_split(amount: i128, bps: u32) -> (i128, i128) {
         if amount <= 0 || bps == 0 {
@@ -1063,51 +1053,6 @@ mod reference_model {
             .expect("overflow in model");
 
         (royalty_share, seller_net)
-    }
-
-    /// Predict the outcome of a settlement with multiple recipients
-    pub fn predict_multi_recipient_settlement(
-        amount: i128,
-        recipient_rates: &[(usize, u32)], // (recipient_index, bps)
-    ) -> ModelSettlement {
-        let mut recipient_payouts = HashMap::new();
-        let mut total_royalty = 0i128;
-
-        for &(recipient_idx, bps) in recipient_rates {
-            let (share, _) = calculate_split(amount, bps);
-            recipient_payouts.insert(recipient_idx, share);
-            total_royalty = total_royalty.checked_add(share).expect("overflow in model");
-        }
-
-        let seller_net = amount
-            .checked_sub(total_royalty)
-            .expect("overflow in model");
-
-        ModelSettlement {
-            royalty_share: total_royalty,
-            seller_net,
-            recipient_payouts,
-        }
-    }
-
-    /// Predict a batch of settlements
-    pub fn predict_batch(sales: &[(i128, u32)], // (amount, bps) per sale
-    ) -> Vec<ModelSettlement> {
-        sales
-            .iter()
-            .map(|&(amount, bps)| {
-                let (royalty_share, seller_net) = calculate_split(amount, bps);
-                ModelSettlement {
-                    royalty_share,
-                    seller_net,
-                    recipient_payouts: {
-                        let mut map = HashMap::new();
-                        map.insert(0, royalty_share);
-                        map
-                    },
-                }
-            })
-            .collect()
     }
 
     #[cfg(test)]
@@ -1145,10 +1090,7 @@ mod reference_model {
 // -----------------------------------------------------------------------
 
 proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 128,
-        ..ProptestConfig::default()
-    }.with_source_file(file!()))]
+    #![proptest_config(ProptestConfig::with_cases(128))]
 
     /// Independent model predicts quote correctly
     #[test]
@@ -1292,13 +1234,12 @@ proptest! {
     ) {
         let w = setup_batch_world(bps, amounts.clone());
 
-        let recipient_balance_before = w.client().get_settlement_summary(&w.collection)
-            .unwrap_or_else(|_| SettlementSummary {
-                sales: 0,
-                gross_volume: 0,
-                royalties_paid: 0,
-            })
-            .royalties_paid;
+        let recipient_balance_before = w
+            .client()
+            .try_get_settlement_summary(&w.collection)
+            .ok()
+            .and_then(Result::ok)
+            .map_or(0, |summary| summary.royalties_paid);
 
         // Settle batch
         let settlements = w.client().settle_sales(

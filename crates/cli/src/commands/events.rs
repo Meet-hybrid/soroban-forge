@@ -3,7 +3,12 @@ use crate::commands::process::{ensure_success, CommandOutput};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet}, io, process::Command, thread, time::Duration};
+    collections::{BTreeMap, HashMap, HashSet},
+    io,
+    process::Command,
+    thread,
+    time::Duration,
+};
 
 /// Known event types from Soroban Forge contracts
 #[derive(Debug, Clone)]
@@ -812,7 +817,9 @@ mod tests {
         .unwrap_err();
 
         assert!(format!("{error:#}").contains("failed to run stellar events"));
+    }
 
+    #[test]
     fn event_definitions_cover_all_contracts() {
         let defs = get_event_definitions();
 
