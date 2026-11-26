@@ -1,14 +1,14 @@
 {
   "schema": "soroban-forge-generated-clients-v1",
-  "generatedAt": "2026-11-26T10:38:11.273Z",
-  "generationCommit": "0c0f22055f1b27c4c0d0938e9ce23a9784b12002",
+  "generatedAt": "2026-11-26T10:56:01.625Z",
+  "generationCommit": "2cc3755f3e16729eb1f8170a18ce3a7e5d9cf35d",
   "contracts": [
     {
       "crateName": "soroban-forge-escrow",
       "clientModule": "escrow",
       "contractVersion": "0.2.0",
       "generatedFiles": {
-        "src/clients/escrow.ts": "2821208b4e864625cf87dd270bfd03c5e9621e8ec45bb34deba14d991da7d7fc"
+        "src/clients/escrow.ts": "2d01f4a8bd3fad70a1db76a4cec9495597e0c075b9d15659fc7e3927d92665a5"
       }
     },
     {
