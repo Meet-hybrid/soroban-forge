@@ -233,6 +233,29 @@ pub trait SorobanForgeDaoGovernance {
         support: bool,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
+    /// Revise an already-cast vote to the opposite direction before the
+    /// voting deadline.
+    ///
+    /// The original weight (locked at first-vote time) is moved from the old
+    /// tally side to the new one using checked arithmetic. The token balance
+    /// is never re-read, so token transfers after the initial vote do not
+    /// affect voting power.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::Unauthorized`] — `voter.require_auth()` fails.
+    /// * [`ForgeError::InvalidState`] — the proposal is not `Active`
+    ///   (expired, cancelled, executed, or defeated).
+    /// * [`ForgeError::DeadlineReached`] — voting has closed.
+    /// * [`ForgeError::InvalidInput`] — `voter` has not cast a vote yet, or
+    ///   `support` is the same direction as the existing vote.
+    fn revise_vote(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+        support: bool,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
     /// Finalise a proposal once voting has ended, and execute passed proposals.
     ///
     /// Also the bond-release path: a proposal that becomes `Defeated`
@@ -311,6 +334,18 @@ pub trait SorobanForgeDaoGovernance {
         proposal_id: u64,
         voter: Address,
     ) -> Result<VoteReceipt, soroban_forge_shared_utils::ForgeError>;
+
+    /// How many times `voter` revised their vote on `proposal_id` via
+    /// `revise_vote` (0 if never revised or never voted).
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — `proposal_id` does not exist.
+    fn get_vote_revision_count(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<u32, soroban_forge_shared_utils::ForgeError>;
 
     /// Read the proposal-level snapshot metadata (snapshot ledger sequence and
     /// ledger timestamp recorded when the proposal was created).
@@ -628,6 +663,8 @@ enum DataKey {
     VotingStart(u64),
     /// Voting delay in seconds configured at proposal creation.
     VotingDelay(u64),
+    /// Number of times `voter` revised their vote on proposal `u64` via `revise_vote`.
+    VoteRevisions(u64, Address),
     /// Ledger sequence and timestamp recorded when `proposal_id` was created.
     ProposalSnapshot(u64),
     /// Ledger sequence and timestamp recorded when `voter` cast a vote on `proposal_id`.
@@ -966,6 +1003,113 @@ impl DaoGovernance {
         env.storage().persistent().set(&key, &proposal);
         bump_entry(&env, &key);
         events::vote_cast(&env, proposal_id, &voter, support, weight);
+        Ok(())
+    }
+
+    /// Revise an already-cast vote to the opposite direction before the
+    /// voting deadline.
+    ///
+    /// The original weight (locked in the `VoteReceipt` at first-vote time)
+    /// is moved from the old tally side to the new side using checked
+    /// arithmetic. The token balance is **never re-read**: token transfers
+    /// after the initial `vote` call do not affect voting power.
+    ///
+    /// All state changes are atomic. A failing checked-arithmetic operation
+    /// returns an error before any storage write, so a failed revision leaves
+    /// tally and receipt unchanged.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::InvalidState`] — proposal is not `Active` (expired,
+    ///   cancelled, executed, or defeated).
+    /// * [`ForgeError::DeadlineReached`] — voting deadline has passed.
+    /// * [`ForgeError::InvalidInput`] — voter has not cast a vote, or `support`
+    ///   is the same as the existing direction (unchanged vote).
+    pub fn revise_vote(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+        support: bool,
+    ) -> Result<(), ForgeError> {
+        // Authorize before reading state so an unauthorized call is rejected
+        // before any storage access.
+        voter.require_auth();
+
+        let mut proposal = Self::get_proposal_impl(&env, proposal_id)?;
+
+        // Only active proposals may be revised.
+        if proposal.state != ProposalState::Active {
+            return Err(ForgeError::InvalidState);
+        }
+        // The deadline boundary matches the `vote` function: strictly before
+        // `voting_ends` is open, at or after is closed.
+        if env.ledger().timestamp() >= proposal.voting_ends {
+            return Err(ForgeError::DeadlineReached);
+        }
+
+        let receipt_key = DataKey::VoteReceipt(proposal_id, voter.clone());
+        let mut receipt: VoteReceipt = env
+            .storage()
+            .instance()
+            .get(&receipt_key)
+            .ok_or(ForgeError::InvalidInput)?;
+        if !receipt.has_voted {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        // Reject no-op revisions: changing to the same direction is not a
+        // revision.
+        if receipt.support == Some(support) {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        // Compute the updated tallies before any write so that an overflow
+        // leaves all state unchanged.
+        let weight = receipt.weight;
+        let (new_for_votes, new_against_votes) = if support {
+            // Switching from against → for: subtract from against, add to for.
+            let new_against = proposal
+                .against_votes
+                .checked_sub(weight)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            let new_for = proposal
+                .for_votes
+                .checked_add(weight)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            (new_for, new_against)
+        } else {
+            // Switching from for → against: subtract from for, add to against.
+            let new_for = proposal
+                .for_votes
+                .checked_sub(weight)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            let new_against = proposal
+                .against_votes
+                .checked_add(weight)
+                .ok_or(ForgeError::ArithmeticOverflow)?;
+            (new_for, new_against)
+        };
+
+        let revisions_key = DataKey::VoteRevisions(proposal_id, voter.clone());
+        let revision_count: u32 = env.storage().instance().get(&revisions_key).unwrap_or(0);
+        let new_revision_count = revision_count
+            .checked_add(1)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+
+        // All arithmetic succeeded — now write.
+        proposal.for_votes = new_for_votes;
+        proposal.against_votes = new_against_votes;
+        receipt.support = Some(support);
+
+        let proposal_key = DataKey::Proposal(proposal_id);
+        env.storage().instance().set(&receipt_key, &receipt);
+        env.storage()
+            .instance()
+            .set(&revisions_key, &new_revision_count);
+        env.storage().persistent().set(&proposal_key, &proposal);
+        bump_entry(&env, &proposal_key);
+
+        events::vote_revised(&env, proposal_id, &voter, support, weight);
         Ok(())
     }
 
@@ -1424,6 +1568,23 @@ impl DaoGovernance {
         Ok(env.storage().instance().has(&vote_key))
     }
 
+    /// How many times `voter` revised their vote on `proposal_id` via
+    /// [`Self::revise_vote`] (0 if never revised or never voted).
+    ///
+    /// Returns [`ForgeError::NotFound`] if `proposal_id` does not exist.
+    pub fn get_vote_revision_count(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Result<u32, ForgeError> {
+        Self::get_proposal_impl(&env, proposal_id)?;
+        Ok(env
+            .storage()
+            .instance()
+            .get(&DataKey::VoteRevisions(proposal_id, voter))
+            .unwrap_or(0))
+    }
+
     /// Load the bond configuration, or `NotInitialized` if the contract was
     /// never configured (internal, reference-taking form of
     /// [`Self::get_bond_config`]).
@@ -1652,6 +1813,17 @@ mod events {
         pub weight: i128,
     }
 
+    /// A voter revised the direction of an already-cast vote while the
+    /// proposal was still active and within the voting deadline.
+    #[contractevent]
+    pub struct VoteRevised {
+        #[topic]
+        pub proposal_id: u64,
+        pub voter: Address,
+        pub new_support: bool,
+        pub weight: i128,
+    }
+
     #[contractevent]
     pub struct Finalised {
         #[topic]
@@ -1695,6 +1867,22 @@ mod events {
             proposal_id,
             voter: voter.clone(),
             support,
+            weight,
+        }
+        .publish(env);
+    }
+
+    pub fn vote_revised(
+        env: &Env,
+        proposal_id: u64,
+        voter: &Address,
+        new_support: bool,
+        weight: i128,
+    ) {
+        VoteRevised {
+            proposal_id,
+            voter: voter.clone(),
+            new_support,
             weight,
         }
         .publish(env);
@@ -5201,6 +5389,10 @@ mod authz;
 // and finalization-outcome invariants (issue #62).
 #[cfg(test)]
 mod props;
+
+// Dedicated test suite for the revise_vote entrypoint (issue #704).
+#[cfg(test)]
+mod vote_revision_tests;
 
 #[cfg(test)]
 mod indexer_fixtures;
