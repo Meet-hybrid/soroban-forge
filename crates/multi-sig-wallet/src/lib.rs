@@ -59,9 +59,9 @@
 //! - `add_owner` rejects addresses already in the set at submission and
 //!   again (against the live set) at execution.
 //! - `remove_owner` rejects removal of a non-member or of the final owner at
-//!   submission, and execution additionally refuses a removal that would
+//!   submission. Both submission and execution refuse a removal that would
 //!   leave `threshold > owners` — the wallet's approval invariant — so a
-//!   valid submission can only fail at execution if the owner set changed
+//!   valid submission can fail at execution if owners or threshold changed
 //!   underneath it.
 //! - `set_threshold` requires `1 <= new_threshold <= owners.len()` at
 //!   submission against the current set and again at execution against the
@@ -733,7 +733,7 @@ pub trait SorobanForgeMultiSigWallet {
     /// * [`ForgeError::NotInitialized`] — the wallet has no owner set.
     /// * [`ForgeError::Unauthorized`] — `submitter` is not an owner.
     /// * [`ForgeError::InvalidInput`] — `existing_owner` is not an owner, or
-    ///   is the final owner.
+    ///   is the final owner, or removal would leave fewer owners than the threshold.
     fn remove_owner(
         env: Env,
         submitter: Address,
@@ -1907,8 +1907,8 @@ impl MultiSigWallet {
     ///
     /// Creates only a pending governance [`TxKind::RemoveOwner`] tx; the
     /// owner set is untouched until the threshold-approved `execute` applies
-    /// it. Removing the final owner is rejected at submission so a pending
-    /// proposal can never leave the wallet ownerless.
+    /// it. Submission rejects removing the final owner or leaving fewer
+    /// owners than the current threshold.
     pub fn remove_owner(
         env: Env,
         submitter: Address,
@@ -1923,7 +1923,9 @@ impl MultiSigWallet {
         if !Self::is_owner_impl(&env, &existing_owner) {
             return Err(ForgeError::InvalidInput);
         }
-        if Self::owner_count(&env) <= 1 {
+        let owners = Self::owner_count(&env);
+        let threshold: u32 = env.storage().instance().get(&DataKey::Threshold).unwrap();
+        if owners <= 1 || owners - 1 < threshold {
             return Err(ForgeError::InvalidInput);
         }
         submitter.require_auth();
@@ -5304,24 +5306,24 @@ mod tests {
 
     #[test]
     fn execution_refuses_removal_that_would_break_the_threshold() {
-        // A three-owner wallet with a threshold of 3: removing anyone
-        // leaves 2 owners, which cannot satisfy the 3-owner threshold.
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(MultiSigWallet, ());
         let client = SorobanForgeMultiSigWalletClient::new(&env, &contract_id);
         let accounts = TestAccounts::generate(&env);
-        client.initialize(&owner_vec(&env, &accounts), &3_u32);
+        client.initialize(&owner_vec(&env, &accounts), &2_u32);
 
         let tx = client.remove_owner(&accounts.user1, &accounts.user3);
         client.confirm(&tx, &accounts.user2);
         client.confirm(&tx, &accounts.user1);
         client.confirm(&tx, &accounts.user3);
 
-        // The submission was valid (3 owners, >1), but execution
-        // re-validates the resulting state and refuses: 2 owners cannot
-        // satisfy threshold 3. The tx stays pending and the owner set is
-        // untouched.
+        // A separate governance proposal raises the threshold after submission.
+        let raise = client.set_threshold(&accounts.user1, &3);
+        client.confirm(&raise, &accounts.user1);
+        client.confirm(&raise, &accounts.user2);
+        client.execute(&raise);
+
         let err = client.try_execute(&tx).unwrap_err().unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
         assert_eq!(client.get_tx(&tx).status, TxStatus::Pending);
