@@ -404,6 +404,40 @@ pub trait SorobanForgeVesting {
         new_beneficiary: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
+    /// Propose reassignment of a linear schedule's unvested balance to a new beneficiary.
+    ///
+    /// Requires the funder recorded at creation. Stores a pending beneficiary proposal.
+    /// The current beneficiary continues to accrue and claim tokens until the proposal is accepted.
+    fn propose_reassignment(
+        env: Env,
+        schedule_id: u64,
+        new_beneficiary: Address,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the currently proposed pending beneficiary for `schedule_id`, if any.
+    fn pending_beneficiary(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<Option<Address>, soroban_forge_shared_utils::ForgeError>;
+
+    /// Cancel a pending reassignment proposal.
+    ///
+    /// Requires the funder recorded at creation. Clears the pending proposal.
+    fn cancel_reassignment(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Accept a proposed reassignment.
+    ///
+    /// Only the pending beneficiary can accept. On acceptance, vested tokens up to
+    /// the current timestamp remain with the former beneficiary, and future accruals
+    /// move atomically to the new beneficiary.
+    fn accept_reassignment(
+        env: Env,
+        schedule_id: u64,
+    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
     /// List schedule IDs in creation order for the current beneficiary.
     fn schedules_for_beneficiary(
         env: Env,
@@ -692,6 +726,8 @@ enum DataKey {
     FunderIndex(Address),
     /// Highest ID created before indexing was introduced.
     LegacyIndexEnd,
+    /// Pending proposed beneficiary awaiting acceptance.
+    PendingBeneficiary(u64),
 }
 
 /// A stored schedule of either kind, as returned by [`Vesting::load`].
@@ -1144,6 +1180,159 @@ impl Vesting {
         env.storage()
             .instance()
             .set(&DataKey::Schedule(schedule_id), &schedule);
+        Ok(())
+    }
+
+    /// Propose reassignment with funder authorization and store a pending beneficiary.
+    ///
+    /// * [`ForgeError::NotFound`] — no linear schedule with this id.
+    /// * [`ForgeError::InvalidInput`] — the schedule is completed or revoked,
+    ///   or the new beneficiary is already the current beneficiary or funder.
+    /// * [`ForgeError::Unauthorized`] — the funder's authorization is missing or invalid.
+    pub fn propose_reassignment(
+        env: Env,
+        schedule_id: u64,
+        new_beneficiary: Address,
+    ) -> Result<(), ForgeError> {
+        let schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(ForgeError::NotFound)?;
+        if schedule.revoked_vested.is_some() || schedule.claimed >= schedule.total_amount {
+            return Err(ForgeError::InvalidInput);
+        }
+        if new_beneficiary == schedule.beneficiary || new_beneficiary == schedule.funder {
+            return Err(ForgeError::InvalidInput);
+        }
+        schedule.funder.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingBeneficiary(schedule_id), &new_beneficiary);
+
+        events::reassignment_proposed(
+            &env,
+            schedule_id,
+            &schedule.funder,
+            &schedule.beneficiary,
+            &new_beneficiary,
+        );
+        Ok(())
+    }
+
+    /// Read the currently proposed pending beneficiary for `schedule_id`.
+    pub fn pending_beneficiary(env: Env, schedule_id: u64) -> Result<Option<Address>, ForgeError> {
+        let _schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(ForgeError::NotFound)?;
+        Ok(env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingBeneficiary(schedule_id)))
+    }
+
+    /// Cancel a pending reassignment proposal.
+    ///
+    /// Requires funder authorization. Clears the pending proposal.
+    pub fn cancel_reassignment(env: Env, schedule_id: u64) -> Result<(), ForgeError> {
+        let schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(ForgeError::NotFound)?;
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingBeneficiary(schedule_id))
+            .ok_or(ForgeError::InvalidInput)?;
+        schedule.funder.require_auth();
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingBeneficiary(schedule_id));
+
+        events::reassignment_cancelled(&env, schedule_id, &schedule.funder, &pending);
+        Ok(())
+    }
+
+    /// Accept a proposed reassignment.
+    ///
+    /// Only the pending beneficiary can accept.
+    pub fn accept_reassignment(env: Env, schedule_id: u64) -> Result<(), ForgeError> {
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(ForgeError::NotFound)?;
+        if schedule.revoked_vested.is_some() || schedule.claimed >= schedule.total_amount {
+            return Err(ForgeError::InvalidInput);
+        }
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingBeneficiary(schedule_id))
+            .ok_or(ForgeError::InvalidInput)?;
+        pending.require_auth();
+
+        let now = env.ledger().timestamp();
+        let vested = Self::vested_amount(&schedule, now)?;
+        let old_entitlement = vested
+            .checked_sub(schedule.reassignment_vested)
+            .and_then(|amount| amount.checked_sub(schedule.beneficiary_claimed))
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let reassignment_count = schedule
+            .reassignment_count
+            .checked_add(1)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        let old_key = DataKey::FormerBeneficiaryClaim(schedule_id, schedule.beneficiary.clone());
+        let prior_balance: i128 = env.storage().instance().get(&old_key).unwrap_or(0);
+        let old_balance = prior_balance
+            .checked_add(old_entitlement)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+
+        events::beneficiary_reassigned(
+            &env,
+            schedule_id,
+            &schedule.beneficiary,
+            &pending,
+            old_entitlement,
+            reassignment_count,
+        );
+        if old_balance > 0 {
+            env.storage().instance().set(&old_key, &old_balance);
+        }
+        if let Some(legacy_end) = env
+            .storage()
+            .instance()
+            .get::<_, u64>(&DataKey::LegacyIndexEnd)
+        {
+            if schedule_id > legacy_end {
+                let old_index = DataKey::BeneficiaryIndex(schedule.beneficiary.clone());
+                let mut ids = Self::read_index(&env, &old_index);
+                if let Ok(position) = ids.binary_search(schedule_id) {
+                    ids.remove(position);
+                    Self::write_index(&env, &old_index, &ids);
+                }
+                Self::insert_index(
+                    &env,
+                    DataKey::BeneficiaryIndex(pending.clone()),
+                    schedule_id,
+                );
+            }
+        }
+        schedule.beneficiary = pending;
+        schedule.reassignment_vested = vested;
+        schedule.beneficiary_claimed = 0;
+        schedule.reassignment_count = reassignment_count;
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(schedule_id), &schedule);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingBeneficiary(schedule_id));
         Ok(())
     }
 
@@ -1814,6 +2003,55 @@ pub mod events {
             old_beneficiary: old_beneficiary.clone(),
             vested_unclaimed,
             reassignment_count,
+        }
+        .publish(env);
+    }
+
+    #[contractevent]
+    pub struct ReassignmentProposed {
+        #[topic]
+        pub schedule_id: u64,
+        #[topic]
+        pub funder: Address,
+        pub current_beneficiary: Address,
+        pub pending_beneficiary: Address,
+    }
+
+    pub fn reassignment_proposed(
+        env: &Env,
+        schedule_id: u64,
+        funder: &Address,
+        current_beneficiary: &Address,
+        pending_beneficiary: &Address,
+    ) {
+        ReassignmentProposed {
+            schedule_id,
+            funder: funder.clone(),
+            current_beneficiary: current_beneficiary.clone(),
+            pending_beneficiary: pending_beneficiary.clone(),
+        }
+        .publish(env);
+    }
+
+    #[contractevent]
+    pub struct ReassignmentCancelled {
+        #[topic]
+        pub schedule_id: u64,
+        #[topic]
+        pub funder: Address,
+        pub pending_beneficiary: Address,
+    }
+
+    pub fn reassignment_cancelled(
+        env: &Env,
+        schedule_id: u64,
+        funder: &Address,
+        pending_beneficiary: &Address,
+    ) {
+        ReassignmentCancelled {
+            schedule_id,
+            funder: funder.clone(),
+            pending_beneficiary: pending_beneficiary.clone(),
         }
         .publish(env);
     }

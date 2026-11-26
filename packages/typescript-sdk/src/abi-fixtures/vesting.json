@@ -3,6 +3,30 @@
   "contract": "soroban-forge-vesting",
   "functions": [
     {
+      "name": "accept_reassignment",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "cancel_reassignment",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "claim",
       "inputs": [
         {
@@ -179,6 +203,34 @@
       ]
     },
     {
+      "name": "pending_beneficiary",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<option<address>,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "propose_reassignment",
+      "inputs": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "new_beneficiary",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "reassign_beneficiary",
       "inputs": [
         {
@@ -321,6 +373,46 @@
         {
           "name": "reassignment_count",
           "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "ReassignmentCancelled",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "pending_beneficiary",
+          "type": "address"
+        }
+      ]
+    },
+    {
+      "name": "ReassignmentProposed",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "schedule_id",
+          "type": "u64"
+        },
+        {
+          "name": "funder",
+          "type": "address"
+        },
+        {
+          "name": "current_beneficiary",
+          "type": "address"
+        },
+        {
+          "name": "pending_beneficiary",
+          "type": "address"
         }
       ]
     },

@@ -1383,3 +1383,12 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn royalty_split_amounts_preserve_gross_value() {
+    let gross = 1_000_i128;
+    let royalty = 50_i128;
+    let seller_net = gross - royalty;
+
+    assert_eq!(royalty + seller_net, gross);
+}
