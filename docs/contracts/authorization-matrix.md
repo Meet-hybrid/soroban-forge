@@ -110,6 +110,10 @@ funder who does not sign creation; only the batch path pulls tokens at creation.
 | `revoke` | funder recorded on the linear schedule | `NotFound` (unknown or tranche id); `InvalidInput` (already `Completed` or `Revoked`); authorization failure for a non-funder | none; freezes the vested amount only |
 | `refund_revoked` | funder recorded on the linear schedule | `NotFound`; `InvalidInput` (not `Revoked`); `ArithmeticOverflow`; `TokenTransferFailed` | contract → funder, unvested remainder |
 | `reassign_beneficiary` | funder recorded on the linear schedule | `NotFound`; `InvalidInput` (revoked or invalid new beneficiary); authorization failure for a non-funder | none; moves future accrual, not tokens |
+| `revoke_tranche_schedule` | funder recorded on the tranche schedule | `NotFound` (unknown or linear id); `InvalidInput` (`Completed`, already `Revoked`, or every tranche already unlocked); `ArithmeticOverflow`; `TokenTransferFailed` (schedule left unchanged) | contract → funder, locked remainder, transferred before the schedule is written |
+| `propose_reassignment` | funder recorded on the linear schedule | `NotFound`; `InvalidInput` (revoked or completed schedule, or invalid new beneficiary); authorization failure for a non-funder | none; stores a pending proposal, the current beneficiary keeps accruing |
+| `accept_reassignment` | pending beneficiary | `NotFound`; `InvalidInput` (no pending proposal or schedule no longer reassignable); `ArithmeticOverflow`; authorization failure for anyone else | none; vested balance stays with the former beneficiary, future accrual moves |
+| `cancel_reassignment` | funder recorded on the linear schedule | `NotFound`; `InvalidInput` (no pending proposal); authorization failure for a non-funder | none; clears the pending proposal |
 | `claim` | current beneficiary | `NotFound`; `TokenTransferFailed`; `ArithmeticOverflow`; a zero claim returns before any transfer | contract → current beneficiary |
 | `claim_for` | explicitly named beneficiary, including a former beneficiary | `NotFound`; `TokenTransferFailed`; `ArithmeticOverflow` | contract → named beneficiary |
 
@@ -124,6 +128,8 @@ funder who does not sign creation; only the batch path pulls tokens at creation.
 | `claimable` | none | Current beneficiary's claimable amount; kind-aware |
 | `claimable_for` | none | Named beneficiary's claimable amount, including frozen balances |
 | `get_status` | none | `NotFound` for an unknown id |
+| `get_schedule_status` | none | Derived status summary of a linear schedule (cliff, claimable, claimed); `NotFound` for an unknown or tranche id; `ArithmeticOverflow` |
+| `pending_beneficiary` | none | Proposed beneficiary, if any; `NotFound` for an unknown id |
 
 ## Multi-Sig Wallet
 
@@ -145,6 +151,7 @@ current threshold of distinct owners has approved and with no rejection.
 | `confirm_batch` | signer (an owner) for every listed transaction | `NotFound`; `InvalidInput` (empty or oversized batch, invalid entry); `Unauthorized`; `DeadlineReached` | none |
 | `reject` | signer (an owner who has not already signalled) | `NotFound`; `InvalidInput` (already confirmed or rejected, terminal tx); `Unauthorized`; `DeadlineReached` | none; one rejection blocks execution |
 | `cancel_tx` | recorded submitter only | `NotFound`; `Unauthorized` (not the submitter); `InvalidInput` (not `Pending`) | none |
+| `expire_tx` | none (permissionless once the expiry timestamp is reached) | `NotFound`; `InvalidInput` (no expiry, not yet expired, or already `Executed`, `Rejected` or `Cancelled`); idempotent once `Expired` | none; persists `Expired` and clears confirmations without moving funds |
 | `execute` | none (permissionless after threshold, with no rejection, while unpaused) | `NotInitialized`; `InvalidInput` (below threshold, terminal, paused); `DeadlineReached` (tx expired); `InsufficientFunds`; `WithdrawalLimitExceeded`; `ContractInvocationFailed` (target reverted) | contract → withdrawal destination; target calls run as the contract |
 | `deposit` | `from` (any depositor, owner or third party) | `NotInitialized`; `InvalidInput` (non-positive amount); `TokenTransferFailed` | from → contract, into per-token custody |
 | `submit_withdrawal` | submitter (an owner) | `NotInitialized`; `Unauthorized`; `InvalidInput` (non-positive amount); `ArithmeticOverflow`; `WithdrawalLimitExceeded` | none; intent only, re-checked at execution |
@@ -175,6 +182,7 @@ current threshold of distinct owners has approved and with no rejection.
 | `is_owner` | none | Uninitialized wallet reads as `false` |
 | `is_live` | none | `Pending` and not expired reads as `true` |
 | `is_tx_live` | none | Read-only alias of `is_live` |
+| `is_expired` | none | `true` when the effective status is `Expired`; `NotFound` for an unknown id |
 | `get_confirmations` | none | `NotFound` for an unknown transaction |
 | `get_rejections` | none | `NotFound` for an unknown transaction |
 | `get_tx_count` | none | No errors |
@@ -192,8 +200,12 @@ The proposal bond is the only token custody in this contract.
 | --- | --- | --- | --- |
 | `initialize` | none (first caller fixes the governance token) | `AlreadyInitialized` | none |
 | `configure_bond` | none (first caller fixes token, amount, and treasury) | `AlreadyInitialized`; `InvalidInput` (non-positive bond) | none |
+| `set_governance_address` | current governance address (the contract itself until one is set) | host authorization failure for anyone else; returns no `ForgeError` of its own and never `NotInitialized`, since governance defaults to the contract address | none |
+| `set_governance_policy` | governance address (the contract itself until one is set) | `InvalidInput` (quorum above 10 000 bps, negative minimum participation, zero voting period); authorization failure | none; applies to proposals created afterwards |
 | `propose` | proposer | `NotInitialized` (no bond configured); `InvalidInput` (zero duration or invalid dependency edge); `NotFound` (unknown dependency); `ProposerCooldown`; `ArithmeticOverflow`; `TokenTransferFailed` | proposer → contract, bond pulled before any state write |
+| `propose_with_delay` | proposer | Same failures as `propose`, plus `InvalidInput` for an invalid voting delay | proposer → contract, bond pulled before the proposal is stored |
 | `vote` | voter | `NotInitialized`; `InvalidInput` (inactive proposal, duplicate vote, zero token balance); `DeadlineReached`; `ArithmeticOverflow` | none |
+| `revise_vote` | voter who already voted | `InvalidState` (proposal not `Active`); `InvalidInput` (no prior vote or same direction); `DeadlineReached`; `ArithmeticOverflow` | none; moves the weight locked at first vote between tally sides |
 | `execute` | none (permissionless after voting ends) | `NotFound`; `InvalidInput` (voting open, terminal, or conflict executed); `DeadlineReached` (required proposal not yet executed); `ContractInvocationFailed` (target reverted or dependency blocked); `TokenTransferFailed` (bond refund or forfeit); `ArithmeticOverflow` | contract → proposer on success or cancel, contract → treasury on defeat |
 | `cancel_proposal` | original proposer only | `NotFound`; `Unauthorized` (not the proposer); `InvalidInput` (not `Active`); `TokenTransferFailed` | contract → proposer, bond refunded before the state write |
 | `touch_ttl` | none (keeper) | `NotFound` (no proposal record) | none; extends the persistent entry TTL only |
@@ -210,6 +222,13 @@ The proposal bond is the only token custody in this contract.
 | `get_proposals` | none | `InvalidInput` for zero limit; `ArithmeticOverflow`; `NotFound` |
 | `has_voted` | none | `NotFound`; `NotInitialized` |
 | `get_vote_receipt` | none | `NotFound` for an unknown proposal; no-vote receipt otherwise |
+| `get_vote_snapshot` | none | Snapshot ledger, timestamp and weight; zero weight for a non-voter; `NotFound` for an unknown proposal |
+| `get_voter_weight` | none | Recorded weight, `0` for a non-voter; `NotFound` for an unknown proposal |
+| `get_vote_revision_count` | none | Number of `revise_vote` calls; `NotFound` for an unknown proposal |
+| `get_proposal_snapshot` | none | Snapshot ledger and timestamp taken at creation; `NotFound` |
+| `get_proposal_policy` | none | Governance policy snapshotted onto the proposal; `NotFound` |
+| `get_voting_start` | none | Voting start timestamp (`0` when not delayed); `NotFound` |
+| `get_governance_policy` | none | Currently configured governance policy |
 | `get_active_proposal_count` | none | No errors |
 
 ## Subscription Payments
@@ -230,6 +249,7 @@ opt-in.
 | `accept_provider` | nominated provider | `NotFound`; `InvalidInput` (cancelled or no matching proposal) | none |
 | `set_rollover_cap` | subscriber | `NotFound`; `InvalidInput` (not `Active`, usage recorded, cap overflow, unknown metric) | none |
 | `subscribe` | subscriber | `InvalidInput` (non-positive amount or period) | none at creation; later pulls are subscriber-authorized |
+| `subscribe_with_trial` | subscriber | `InvalidInput` (non-positive amount or period, zero trial, or a trial longer than 90 days); `ArithmeticOverflow` (trial end overflows) | none at creation; nothing is billed before the trial ends |
 | `authorize_provider` | subscriber | `NotFound`; `Unauthorized` (not the subscriber); idempotent | none; records provider opt-in |
 | `revoke_provider` | subscriber | `NotFound`; `Unauthorized` (not the subscriber); idempotent | none; removes provider opt-in |
 | `subscribe_on_behalf_of` | provider, plus a prior subscriber opt-in for that provider | `Unauthorized` (not the provider or no opt-in); `InvalidInput` (non-positive amount or period) | none at creation; later pulls are subscriber-authorized |
@@ -261,6 +281,7 @@ opt-in.
 | `get_usage` | none | `NotFound`; an unused metric reads as a zeroed record |
 | `quote_period` | none | `NotFound`; uses the same derivation as `charge` |
 | `get_subscription` | none | `NotFound` for an unknown subscription |
+| `get_trial_end` | none | Trial end timestamp, or `None` when the subscription has no trial |
 | `get_subscription_count` | none | No errors |
 | `subscriptions_for_subscriber` | none | `InvalidInput` for zero limit; empty page when out of bounds |
 | `subscriptions_for_provider` | none | `InvalidInput` for zero limit; empty page when out of bounds |
@@ -278,6 +299,11 @@ settlement. One payer signature covers every nested token transfer in a batch.
 | --- | --- | --- | --- |
 | `set_royalty` | collection | `InvalidInput` (bps above 10,000); replaces any multi-recipient split | none |
 | `set_royalty_splits` | collection | `InvalidInput` (empty or oversized split, invalid bps) | none |
+| `set_royalty_tiers` | collection | `InvalidInput` (first minimum not `1`, non-increasing minimums, bps above 10,000 or the collection's cap, too many tiers); an empty table clears tiers | none |
+| `clear_royalty_tiers` | collection | host authorization failure only; returns no `ForgeError` (clearing with no tiers set is not `NotFound`) | none |
+| `propose_recipient_rotation` | current royalty recipient | `NotFound` (`current` is not a recipient of the collection); `InvalidInput` (new recipient equals current); replaces an earlier pending rotation | none |
+| `accept_recipient_rotation` | proposed new recipient | `NotFound` (no pending rotation or no royalty for the collection); `InvalidInput` (the new recipient already holds another split entry) | none; rewrites the split entries, keeping bps and order |
+| `cancel_recipient_rotation` | current royalty recipient | `NotFound` (no pending rotation) | none |
 | `set_max_royalty_cap` | collection | `InvalidInput` (bps above 10,000) | none |
 | `distribute` | collection and payer | `NotFound` (no royalty config); `InvalidInput` (non-positive amount); `TokenTransferFailed` | payer → royalty recipient; the seller net is not transferred here |
 | `settle_sale` | collection and payer | `NotFound`; `InvalidInput` (non-positive amount); `ArithmeticOverflow`; `TokenTransferFailed` | payer → seller, then payer → each royalty recipient |
@@ -291,6 +317,8 @@ settlement. One payer signature covers every nested token transfer in a batch.
 | `get_max_royalty_cap` | none | Returns 10,000 bps when no cap is configured |
 | `get_royalty` | none | `NotFound` for an unknown collection; legacy view of a split |
 | `get_royalty_splits` | none | `NotFound` for an unknown collection |
+| `get_royalty_tiers` | none | Configured price-bracket tiers; empty when none are set |
+| `get_pending_rotation` | none | Proposed new recipient, or `None` when no rotation is pending |
 | `get_settlement_summary` | none | `NotFound` until the first successful settlement |
 | `quote_sale` | none | `NotFound`; `InvalidInput` (non-positive amount); `ArithmeticOverflow` |
 | `preview_settlement` | none | `NotFound`; `InvalidInput` (non-positive amount) |
