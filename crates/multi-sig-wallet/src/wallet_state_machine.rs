@@ -201,9 +201,10 @@ fn run_trace(trace: &[Action]) -> Result<(), TestCaseError> {
                 let valid = valid_owner
                     && match kind {
                         Proposal::Add(new) => !model.owners.contains(new),
-                        // Submission permits a pending removal that execution must recheck.
+                        // Both submission and execution must preserve the signing threshold.
                         Proposal::Remove(old) => {
-                            model.owners.contains(old) && model.owners.len() > 1
+                            model.owners.contains(old)
+                                && model.owners.len() > model.threshold as usize
                         }
                         Proposal::Threshold(value) => {
                             *value > 0 && *value <= model.owners.len() as u32

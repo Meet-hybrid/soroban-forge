@@ -1,0 +1,239 @@
+name: Focused Crate Checks
+
+on:
+  push:
+    branches: [develop, main, integration]
+  pull_request:
+    branches: [develop, main, integration]
+  workflow_dispatch:
+    inputs:
+      full_workspace:
+        description: "Force full-workspace fallback validation"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: focused-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-changes:
+    name: Detect Changed Crates
+    runs-on: ubuntu-latest
+    outputs:
+      full_workspace: ${{ steps.plan.outputs.full_workspace }}
+      has_crates: ${{ steps.plan.outputs.has_crates }}
+      packages: ${{ steps.plan.outputs.packages }}
+      matrix_packages: ${{ steps.plan.outputs.matrix_packages }}
+      run_shared_utils: ${{ steps.plan.outputs.run_shared_utils }}
+      run_generated_clients: ${{ steps.plan.outputs.run_generated_clients }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Lint GitHub Actions workflows
+        run: python3 scripts/ci/lint-workflows.py
+
+      - name: Run path-matrix regression tests
+        run: python3 scripts/ci/test-path-matrix.py
+
+      - name: Compute focused validation matrix
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          FORCE_FULL_WORKSPACE: ${{ inputs.full_workspace }}
+        run: |
+          if [ "$FORCE_FULL_WORKSPACE" = "true" ]; then
+            python3 scripts/ci/detect-changed-crates.py \
+              --force-full-workspace \
+              --github-output "$GITHUB_OUTPUT" \
+              --github-summary "$GITHUB_STEP_SUMMARY"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 scripts/ci/detect-changed-crates.py \
+              --base "$PR_BASE_SHA" \
+              --head "$PR_HEAD_SHA" \
+              --diff-mode three-dot \
+              --github-output "$GITHUB_OUTPUT" \
+              --github-summary "$GITHUB_STEP_SUMMARY"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            python3 scripts/ci/detect-changed-crates.py \
+              --base "$PUSH_BEFORE_SHA" \
+              --head "$HEAD_SHA" \
+              --diff-mode two-dot \
+              --github-output "$GITHUB_OUTPUT" \
+              --github-summary "$GITHUB_STEP_SUMMARY"
+          else
+            python3 scripts/ci/detect-changed-crates.py \
+              --base "HEAD~1" \
+              --head "HEAD" \
+              --diff-mode two-dot \
+              --github-output "$GITHUB_OUTPUT" \
+              --github-summary "$GITHUB_STEP_SUMMARY"
+          fi
+
+  focused-crate-checks:
+    name: Focused Check (${{ matrix.package }})
+    needs: detect-changes
+    if: >-
+      needs.detect-changes.outputs.full_workspace != 'true'
+      && needs.detect-changes.outputs.has_crates == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.detect-changes.outputs.matrix_packages) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: focused-${{ matrix.package }}
+      - name: Format check
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: cargo fmt -p "$PACKAGE" -- --check
+      - name: Test package
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: cargo test -p "$PACKAGE" --all-targets --locked
+      - name: Clippy package
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: cargo clippy -p "$PACKAGE" --all-targets --locked -- -D warnings
+
+  shared-utils-checks:
+    name: Shared Utils & Error Registry
+    needs: detect-changes
+    if: >-
+      needs.detect-changes.outputs.full_workspace != 'true'
+      && needs.detect-changes.outputs.run_shared_utils == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: focused-shared-utils
+      - name: Format check
+        run: cargo fmt -p soroban-forge-shared-utils -- --check
+      - name: Test shared-utils
+        run: cargo test -p soroban-forge-shared-utils --all-targets --locked
+      - name: Clippy shared-utils
+        run: cargo clippy -p soroban-forge-shared-utils --all-targets --locked -- -D warnings
+      - name: Verify ForgeError registry freshness
+        run: bash scripts/check-error-registry-fresh.sh
+
+  generated-clients:
+    name: Generated Clients & TypeScript SDK
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run_generated_clients == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: packages/typescript-sdk/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: focused-generated-clients
+      - name: Install stellar-cli
+        # Pinned prebuilt binary matching ci.yml (v28.0.0).
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            https://github.com/stellar/stellar-cli/releases/download/v28.0.0/stellar-cli-28.0.0-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/stellar" --version
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+        working-directory: packages/typescript-sdk
+      - name: Verify generated clients and ABI fixtures
+        run: npm run verify:generated
+        working-directory: packages/typescript-sdk
+      - name: Run offline tests
+        run: npm test
+        working-directory: packages/typescript-sdk
+      - name: Build distribution
+        run: npm run build
+        working-directory: packages/typescript-sdk
+
+  full-workspace:
+    name: Full Workspace Fallback
+    needs: detect-changes
+    if: needs.detect-changes.outputs.full_workspace == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: focused-full-workspace
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Verify workspace metadata lock
+        run: cargo metadata --locked --no-deps --format-version 1 > /dev/null
+      - name: Test workspace
+        run: cargo test --workspace --all-targets --locked
+      - name: Clippy workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Verify ForgeError registry freshness
+        run: bash scripts/check-error-registry-fresh.sh
+
+  summary:
+    name: Focused Validation Summary
+    if: always()
+    needs:
+      - detect-changes
+      - focused-crate-checks
+      - shared-utils-checks
+      - generated-clients
+      - full-workspace
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required checks passed
+        env:
+          DETECT_RESULT: ${{ needs.detect-changes.result }}
+          CRATES_RESULT: ${{ needs.focused-crate-checks.result }}
+          SHARED_UTILS_RESULT: ${{ needs.shared-utils-checks.result }}
+          CLIENTS_RESULT: ${{ needs.generated-clients.result }}
+          WORKSPACE_RESULT: ${{ needs.full-workspace.result }}
+        run: |
+          failed=0
+          for entry in \
+            "detect-changes:$DETECT_RESULT" \
+            "focused-crate-checks:$CRATES_RESULT" \
+            "shared-utils-checks:$SHARED_UTILS_RESULT" \
+            "generated-clients:$CLIENTS_RESULT" \
+            "full-workspace:$WORKSPACE_RESULT"; do
+            job="${entry%%:*}"
+            result="${entry#*:}"
+            echo "$job: $result"
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              echo "::error::Job '$job' ended with result '$result'"
+              failed=1
+            fi
+          done
+          exit "$failed"

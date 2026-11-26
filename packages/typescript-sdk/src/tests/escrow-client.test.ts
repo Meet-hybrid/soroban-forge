@@ -212,6 +212,8 @@ test("ABI exposes the complete regenerated escrow function names", () => {
     "release_basket",
     "release_partial",
     "release_partial_basket",
+    "replace_arbiter",
+    "replace_basket_arbiter",
     "request_release",
     "request_release_basket",
     "resolve",

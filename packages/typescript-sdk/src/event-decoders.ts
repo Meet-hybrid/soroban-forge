@@ -57,6 +57,10 @@ const SUBSCRIPTION_BALANCE = {
 } as const;
 
 export const ESCROW_EVENT_SPECS = {
+  ArbiterReplaced: {
+    topics: 1,
+    fields: { escrow_id: "u64", old_arbiter: "address", new_arbiter: "address" },
+  },
   BasketCancelled: { topics: 1, fields: BASKET_DATA },
   BasketCreated: { topics: 1, fields: BASKET_DATA },
   BasketDeposited: { topics: 1, fields: BASKET_DATA },
@@ -174,6 +178,15 @@ export const VESTING_EVENT_SPECS = {
       duration: "u64",
     },
   },
+  TrancheRevoked: {
+    topics: 2,
+    fields: {
+      schedule_id: "u64",
+      funder: "address",
+      unlocked_at_revocation: "i128",
+      refunded_to_funder: "i128",
+    },
+  },
 } as const;
 
 export const MULTISIG_EVENT_SPECS = {
@@ -230,6 +243,14 @@ export const SUBSCRIPTION_EVENT_SPECS = {
   QuotasSet: {
     topics: 1,
     fields: { subscription_id: "u64", quotas: "vec<udt:MetricQuota>" },
+  },
+  TrialConverted: {
+    topics: 1,
+    fields: { subscription_id: "u64", trial_end: "u64" },
+  },
+  TrialStarted: {
+    topics: 1,
+    fields: { subscription_id: "u64", trial_end: "u64" },
   },
   UsageRecorded: {
     topics: 2,

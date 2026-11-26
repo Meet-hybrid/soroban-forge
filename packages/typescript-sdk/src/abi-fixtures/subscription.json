@@ -194,6 +194,18 @@
       ]
     },
     {
+      "name": "get_trial_end",
+      "inputs": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "option<u64>"
+      ]
+    },
+    {
       "name": "get_usage",
       "inputs": [
         {
@@ -478,6 +490,38 @@
       ]
     },
     {
+      "name": "subscribe_with_trial",
+      "inputs": [
+        {
+          "name": "subscriber",
+          "type": "address"
+        },
+        {
+          "name": "provider",
+          "type": "address"
+        },
+        {
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "name": "amount",
+          "type": "i128"
+        },
+        {
+          "name": "period",
+          "type": "u64"
+        },
+        {
+          "name": "trial_seconds",
+          "type": "u64"
+        }
+      ],
+      "outputs": [
+        "result<u64,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "subscriptions_for_provider",
       "inputs": [
         {
@@ -692,6 +736,34 @@
       ]
     },
     {
+      "name": "TrialConverted",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "trial_end",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "TrialStarted",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "u64"
+        },
+        {
+          "name": "trial_end",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "UsageRecorded",
       "dataFormat": "scSpecEventDataFormatMap",
       "params": [
@@ -822,6 +894,10 @@
         {
           "name": "ReleasePending",
           "value": 16
+        },
+        {
+          "name": "InvalidState",
+          "value": 17
         }
       ]
     },
@@ -1018,6 +1094,10 @@
     {
       "name": "ReleasePending",
       "code": 16
+    },
+    {
+      "name": "InvalidState",
+      "code": 17
     }
   ]
 }

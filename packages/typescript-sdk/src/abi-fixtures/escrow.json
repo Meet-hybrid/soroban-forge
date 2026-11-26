@@ -551,6 +551,38 @@
       ]
     },
     {
+      "name": "replace_arbiter",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "new_arbiter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
+      "name": "replace_basket_arbiter",
+      "inputs": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "new_arbiter",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        "result<void,udt:ForgeError>"
+      ]
+    },
+    {
       "name": "request_release",
       "inputs": [
         {
@@ -664,6 +696,24 @@
     }
   ],
   "events": [
+    {
+      "name": "ArbiterReplaced",
+      "dataFormat": "scSpecEventDataFormatMap",
+      "params": [
+        {
+          "name": "escrow_id",
+          "type": "u64"
+        },
+        {
+          "name": "old_arbiter",
+          "type": "address"
+        },
+        {
+          "name": "new_arbiter",
+          "type": "address"
+        }
+      ]
+    },
     {
       "name": "BasketCancelled",
       "dataFormat": "scSpecEventDataFormatMap",
@@ -1473,6 +1523,10 @@
         {
           "name": "ReleasePending",
           "value": 16
+        },
+        {
+          "name": "InvalidState",
+          "value": 17
         }
       ]
     },
@@ -1621,6 +1675,10 @@
     {
       "name": "ReleasePending",
       "code": 16
+    },
+    {
+      "name": "InvalidState",
+      "code": 17
     }
   ]
 }
